@@ -1,0 +1,7 @@
+// expect: E0370
+fn main() -> i64 {
+    if true {
+        break;
+    }
+    return 0;
+}

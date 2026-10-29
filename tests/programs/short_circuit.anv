@@ -1,0 +1,12 @@
+fn boom(n: i64) -> bool {
+    return 10 / n > 0;
+}
+
+fn main() uses io {
+    let zero: i64 = 0;
+    print(false && boom(zero));
+    print(true || boom(zero));
+    print(true && boom(1));
+    print(!(false || false));
+    print(true == false, " ", true != false);
+}

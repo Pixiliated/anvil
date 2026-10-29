@@ -1,0 +1,25 @@
+fn clamp(v: i64, lo: i64, hi: i64) -> i64
+    requires lo <= hi
+    ensures result >= lo && result <= hi
+{
+    if v < lo {
+        return lo;
+    }
+    if v > hi {
+        return hi;
+    }
+    return v;
+}
+
+fn log_twice(n: i64) uses io
+    requires n > 0
+    ensures n > 0
+{
+    print("n=", n);
+    print("n=", n);
+}
+
+fn main() uses io {
+    print(clamp(v: 5, lo: 0, hi: 3), " ", clamp(v: -5, lo: 0, hi: 3), " ", clamp(v: 2, lo: 0, hi: 3));
+    log_twice(4);
+}

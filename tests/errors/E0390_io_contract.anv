@@ -1,0 +1,11 @@
+// expect: E0390
+fn loud() -> bool uses io {
+    print("checking");
+    return true;
+}
+fn f(n: i64) -> i64
+    requires loud()
+{
+    return n;
+}
+fn main() -> i64 { return f(1); }

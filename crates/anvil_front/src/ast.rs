@@ -1,0 +1,189 @@
+//! Syntax tree straight from the parser. The checker turns it into the typed IR in `ir.rs`.
+
+use crate::span::Span;
+
+#[derive(Clone, Debug)]
+pub struct Ident {
+    pub name: String,
+    pub span: Span,
+}
+
+#[derive(Clone, Debug)]
+pub struct File {
+    pub items: Vec<Item>,
+}
+
+#[derive(Clone, Debug)]
+pub enum Item {
+    Unit(UnitDecl),
+    Struct(StructDecl),
+    Fn(FnDecl),
+    Test(TestDecl),
+}
+
+/// `unit m` declares a base unit; `unit N = kg*m/s^2` an alias.
+#[derive(Clone, Debug)]
+pub struct UnitDecl {
+    pub name: Ident,
+    pub def: Option<UnitExpr>,
+    pub span: Span,
+}
+
+/// Product of unit names with signed exponents; `/` is already folded into negative exponents.
+#[derive(Clone, Debug)]
+pub struct UnitExpr {
+    pub terms: Vec<(Ident, i32)>,
+    pub span: Span,
+}
+
+#[derive(Clone, Debug)]
+pub struct TypeExpr {
+    pub name: Ident,
+    pub unit: Option<UnitExpr>,
+    pub span: Span,
+}
+
+#[derive(Clone, Debug)]
+pub struct StructDecl {
+    pub name: Ident,
+    pub fields: Vec<(Ident, TypeExpr)>,
+    pub span: Span,
+}
+
+#[derive(Clone, Debug)]
+pub struct Param {
+    pub name: Ident,
+    pub ty: TypeExpr,
+}
+
+#[derive(Clone, Debug)]
+pub struct FnDecl {
+    pub name: Ident,
+    pub params: Vec<Param>,
+    pub ret: Option<TypeExpr>,
+    pub uses: Vec<Ident>,
+    /// Span of the whole `uses io` clause, for removal fixes.
+    pub uses_span: Option<Span>,
+    /// Where `uses io` would be inserted.
+    pub uses_insert: Span,
+    pub requires: Vec<Expr>,
+    pub ensures: Vec<Expr>,
+    pub body: Block,
+    pub span: Span,
+}
+
+#[derive(Clone, Debug)]
+pub struct TestDecl {
+    pub name: String,
+    pub name_span: Span,
+    pub uses: Vec<Ident>,
+    pub uses_span: Option<Span>,
+    pub uses_insert: Span,
+    pub body: Block,
+    pub span: Span,
+}
+
+#[derive(Clone, Debug)]
+pub struct Block {
+    pub stmts: Vec<Stmt>,
+    pub span: Span,
+}
+
+#[derive(Clone, Debug)]
+pub struct Stmt {
+    pub kind: StmtKind,
+    pub span: Span,
+}
+
+#[derive(Clone, Debug)]
+pub enum StmtKind {
+    Let { mutable: bool, kw_span: Span, name: Ident, ty: TypeExpr, init: Expr },
+    Assign { target: Expr, value: Expr },
+    Expr(Expr),
+    If { cond: Expr, then: Block, else_: Option<Box<Else>> },
+    While { cond: Expr, body: Block },
+    For { var: Ident, start: Expr, end: Expr, body: Block },
+    Return(Option<Expr>),
+    Break,
+    Continue,
+}
+
+#[derive(Clone, Debug)]
+pub enum Else {
+    Block(Block),
+    If(Box<Stmt>),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BinOp {
+    Add,
+    Sub,
+    Mul,
+    Div,
+    Rem,
+    Eq,
+    Ne,
+    Lt,
+    Le,
+    Gt,
+    Ge,
+    And,
+    Or,
+}
+
+impl BinOp {
+    pub fn text(self) -> &'static str {
+        match self {
+            BinOp::Add => "+",
+            BinOp::Sub => "-",
+            BinOp::Mul => "*",
+            BinOp::Div => "/",
+            BinOp::Rem => "%",
+            BinOp::Eq => "==",
+            BinOp::Ne => "!=",
+            BinOp::Lt => "<",
+            BinOp::Le => "<=",
+            BinOp::Gt => ">",
+            BinOp::Ge => ">=",
+            BinOp::And => "&&",
+            BinOp::Or => "||",
+        }
+    }
+    pub fn is_comparison(self) -> bool {
+        matches!(self, BinOp::Eq | BinOp::Ne | BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge)
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum UnOp {
+    Neg,
+    Not,
+}
+
+#[derive(Clone, Debug)]
+pub struct Arg {
+    pub name: Option<Ident>,
+    pub value: Expr,
+}
+
+#[derive(Clone, Debug)]
+pub struct Expr {
+    pub kind: ExprKind,
+    pub span: Span,
+}
+
+#[derive(Clone, Debug)]
+pub enum ExprKind {
+    Int(i64),
+    Float(f64, Option<UnitExpr>),
+    Bool(bool),
+    Str(String),
+    Name(Ident),
+    Result,
+    Field(Box<Expr>, Ident),
+    Call { callee: Ident, args: Vec<Arg> },
+    StructLit { name: Ident, fields: Vec<(Ident, Expr)> },
+    Unary(UnOp, Box<Expr>),
+    Binary(BinOp, Box<Expr>, Box<Expr>),
+    Paren(Box<Expr>),
+}

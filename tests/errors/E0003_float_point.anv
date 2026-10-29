@@ -1,0 +1,6 @@
+// expect: E0003
+// resolve: mechanical
+fn main() -> i64 {
+    let _x: f64 = 1.;
+    return 0;
+}

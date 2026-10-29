@@ -1,0 +1,28 @@
+# Anvil: agent brief
+
+Anvil is a compiled language designed to be written by AI agents. The compiler is in Rust.
+
+## Read first (and only these)
+- `docs/SPEC.md`: the whole language (or run `anvil spec`)
+- `docs/ROADMAP.md`: milestones; the first unchecked one is current work
+- `docs/DECISIONS.md`: why things are the way they are
+
+## Toolchain
+- Rust stable, MSVC. If `cargo` is not found, prepend `%USERPROFILE%\.cargo\bin` to PATH.
+- `cargo test --workspace` must pass before any milestone is called done.
+- `cargo run -p anvil_cli -- <command> <file.anv>` drives the compiler.
+
+## Rules
+1. **Both backends agree.** Every language change adds programs to `tests/programs` and must
+   give identical stdout, panic text and exit code in the interpreter and native code.
+2. **Every error code is tested.** A new code needs an explanation in `diag::explain`, an entry
+   in `ALL_CODES`, and a file in `tests/errors`. Mark it `// resolve: mechanical` if its
+   mechanical fixes must produce a clean program.
+3. **Fix kinds are honest.** `mechanical` only when the fix cannot change the author's intent.
+   If the fix is a guess, use `changes_meaning`; if a wrong guess would compile, offer no fix.
+4. **Loud, never silent.** No warnings, no silent defaults, no implicit conversions.
+5. **Deterministic.** Same source, same executable bytes, same output.
+6. **Goldens are reviewed, not just blessed.** `ANVIL_BLESS=1` writes missing goldens from the
+   interpreter; read every new golden and check it by hand before trusting it.
+7. **Small docs.** Tick ROADMAP checkboxes; add a few lines to DECISIONS per milestone.
+8. Commit only when the human asks.

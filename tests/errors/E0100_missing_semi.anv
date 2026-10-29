@@ -1,0 +1,6 @@
+// expect: E0100
+// resolve: mechanical
+fn main() -> i64 {
+    let _x: i64 = 1
+    return 0;
+}

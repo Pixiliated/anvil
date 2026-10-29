@@ -1,0 +1,7 @@
+// expect: E0301
+// resolve: mechanical
+unit m;
+fn main() -> i64 {
+    let _d: f64[m] = 3.0;
+    return 0;
+}

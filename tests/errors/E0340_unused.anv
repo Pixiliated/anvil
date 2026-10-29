@@ -1,0 +1,5 @@
+// expect: E0340
+fn main() -> i64 {
+    let unused: i64 = 1;
+    return 0;
+}

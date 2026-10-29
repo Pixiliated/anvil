@@ -1,0 +1,6 @@
+// expect: E0300
+fn main() -> i64 {
+    let n: i64 = 2;
+    let _x: f64 = 1.5 * n;
+    return 0;
+}

@@ -1,0 +1,1467 @@
+//! Name resolution and type checking: AST in, typed IR out. Collects every error it can find
+//! rather than stopping at the first, and never lets one error cause another (Ty::Error).
+
+use crate::ast::{self, BinOp, Else, ExprKind as AK, StmtKind, UnOp};
+use crate::diag::{Diagnostic, Edit, FixKind};
+use crate::ir::*;
+use crate::span::{SourceFile, Span};
+use crate::units::Unit;
+use std::collections::{HashMap, HashSet};
+
+const BUILTINS: &[&str] = &["print", "assert", "sqrt", "abs", "to_f64", "to_i64"];
+const TYPE_NAMES: &[&str] = &["i64", "f64", "bool", "str"];
+
+struct FuncSig {
+    params: Vec<(String, Ty)>,
+    ret: Ty,
+    uses_io: bool,
+    span: Span,
+}
+
+pub struct Checker<'a> {
+    src: &'a SourceFile,
+    diags: Vec<Diagnostic>,
+    units: HashMap<String, Unit>,
+    structs: Vec<StructDef>,
+    struct_index: HashMap<String, StructId>,
+    sigs: Vec<FuncSig>,
+    func_index: HashMap<String, FuncId>,
+}
+
+struct LocalMeta {
+    span: Span,
+    kw_span: Option<Span>,
+    mutable: bool,
+    is_param: bool,
+    is_loop_var: bool,
+    used: bool,
+    assigned: bool,
+}
+
+/// Per-function (or per-test) state while checking a body.
+struct Body {
+    locals: Vec<Local>,
+    meta: Vec<LocalMeta>,
+    scopes: Vec<HashMap<String, LocalId>>,
+    declared: HashMap<String, Span>,
+    ret: Ty,
+    uses_io: bool,
+    used_io: bool,
+    uses_insert: Span,
+    loop_depth: usize,
+    /// Some(local) while checking ensures clauses of a function with a return value.
+    result_local: Option<LocalId>,
+    in_ensures: bool,
+    in_contract: bool,
+}
+
+pub fn check(src: &SourceFile, file: &ast::File) -> Result<Program, Vec<Diagnostic>> {
+    let mut c = Checker {
+        src,
+        diags: Vec::new(),
+        units: HashMap::new(),
+        structs: Vec::new(),
+        struct_index: HashMap::new(),
+        sigs: Vec::new(),
+        func_index: HashMap::new(),
+    };
+    let program = c.program(file);
+    if c.diags.is_empty() {
+        Ok(program)
+    } else {
+        c.diags.sort_by_key(|d| (d.span.start, d.code));
+        Err(c.diags)
+    }
+}
+
+/// Edit distance counting a swap of adjacent letters as one edit (optimal string alignment),
+/// so typos like `cuont` for `count` get suggestions.
+fn distance(a: &str, b: &str) -> usize {
+    let a: Vec<char> = a.chars().collect();
+    let b: Vec<char> = b.chars().collect();
+    let mut d = vec![vec![0usize; b.len() + 1]; a.len() + 1];
+    for (i, row) in d.iter_mut().enumerate() {
+        row[0] = i;
+    }
+    for (j, cell) in d[0].iter_mut().enumerate() {
+        *cell = j;
+    }
+    for i in 1..=a.len() {
+        for j in 1..=b.len() {
+            let cost = (a[i - 1] != b[j - 1]) as usize;
+            let mut v = (d[i - 1][j] + 1).min(d[i][j - 1] + 1).min(d[i - 1][j - 1] + cost);
+            if i > 1 && j > 1 && a[i - 1] == b[j - 2] && a[i - 2] == b[j - 1] {
+                v = v.min(d[i - 2][j - 2] + 1);
+            }
+            d[i][j] = v;
+        }
+    }
+    d[a.len()][b.len()]
+}
+
+fn closest<'b>(name: &str, candidates: impl Iterator<Item = &'b String>) -> Option<String> {
+    let limit = (name.len() / 3).max(1);
+    candidates
+        .filter(|c| c.as_str() != name)
+        .map(|c| (distance(name, c), c))
+        .filter(|(d, _)| *d <= limit)
+        .min()
+        .map(|(_, c)| c.clone())
+}
+
+impl<'a> Checker<'a> {
+    fn err(&mut self, d: Diagnostic) {
+        self.diags.push(d);
+    }
+
+    fn show(&self, ty: &Ty) -> String {
+        TyDisplay { ty, structs: &self.structs }.to_string()
+    }
+
+    fn site(&self, span: Span) -> String {
+        self.src.site(span)
+    }
+
+    fn text(&self, span: Span) -> String {
+        self.src.slice(span).to_string()
+    }
+
+    // ---------------- declarations ----------------
+
+    fn program(&mut self, file: &ast::File) -> Program {
+        let mut unit_decls = Vec::new();
+        let mut struct_decls = Vec::new();
+        let mut fn_decls = Vec::new();
+        let mut test_decls = Vec::new();
+        for item in &file.items {
+            match item {
+                ast::Item::Unit(u) => unit_decls.push(u),
+                ast::Item::Struct(s) => struct_decls.push(s),
+                ast::Item::Fn(f) => fn_decls.push(f),
+                ast::Item::Test(t) => test_decls.push(t),
+            }
+        }
+        self.declare_units(&unit_decls);
+        self.declare_structs(&struct_decls);
+        self.declare_fns(&fn_decls);
+
+        let mut funcs = Vec::new();
+        for f in &fn_decls {
+            funcs.push(self.func(f));
+        }
+        let mut seen_tests: HashMap<String, Span> = HashMap::new();
+        let mut tests = Vec::new();
+        for t in &test_decls {
+            if let Some(prev) = seen_tests.insert(t.name.clone(), t.name_span) {
+                self.err(
+                    Diagnostic::new("E0201", t.name_span, format!("test \"{}\" is declared twice", t.name))
+                        .note("first declared here", Some(prev)),
+                );
+            }
+            tests.push(self.test(t));
+        }
+        let main = self.func_index.get("main").copied();
+        if let Some(id) = main {
+            let sig = &self.sigs[id];
+            let ok = sig.params.is_empty() && matches!(sig.ret, Ty::Void | Ty::I64 | Ty::Error);
+            if !ok {
+                let span = sig.span;
+                self.err(Diagnostic::new("E0350", span, "main takes no parameters and returns nothing or i64"));
+            }
+        }
+        Program { structs: self.structs.clone(), funcs, tests, main }
+    }
+
+    fn check_new_name(&mut self, name: &ast::Ident, what: &str, seen: &mut HashMap<String, Span>) -> bool {
+        if let Some(prev) = seen.get(&name.name) {
+            let prev = *prev;
+            self.err(
+                Diagnostic::new("E0201", name.span, format!("{what} `{}` is declared twice", name.name))
+                    .note("first declared here", Some(prev)),
+            );
+            return false;
+        }
+        seen.insert(name.name.clone(), name.span);
+        true
+    }
+
+    fn declare_units(&mut self, decls: &[&ast::UnitDecl]) {
+        let mut seen = HashMap::new();
+        let mut aliases: HashMap<String, &ast::UnitExpr> = HashMap::new();
+        for d in decls {
+            if !self.check_new_name(&d.name, "unit", &mut seen) {
+                continue;
+            }
+            match &d.def {
+                None => {
+                    self.units.insert(d.name.name.clone(), Unit::base(&d.name.name));
+                }
+                Some(e) => {
+                    aliases.insert(d.name.name.clone(), e);
+                }
+            }
+        }
+        // Resolve aliases in source order; each may refer to others, cycles are errors.
+        for d in decls {
+            if d.def.is_some() && !self.units.contains_key(&d.name.name) {
+                let mut visiting = HashSet::new();
+                self.resolve_alias(&d.name.name, &aliases, &mut visiting);
+            }
+        }
+    }
+
+    fn resolve_alias(
+        &mut self,
+        name: &str,
+        aliases: &HashMap<String, &ast::UnitExpr>,
+        visiting: &mut HashSet<String>,
+    ) -> Option<Unit> {
+        if let Some(u) = self.units.get(name) {
+            return Some(u.clone());
+        }
+        let expr = *aliases.get(name)?;
+        if !visiting.insert(name.to_string()) {
+            self.err(Diagnostic::new("E0201", expr.span, format!("unit `{name}` is defined in terms of itself")));
+            return None;
+        }
+        let mut u = Unit::dimensionless();
+        for (term, exp) in &expr.terms {
+            let t = if aliases.contains_key(&term.name) && !self.units.contains_key(&term.name) {
+                self.resolve_alias(&term.name, aliases, visiting)?
+            } else {
+                self.lookup_unit(term)?
+            };
+            u = u.mul(&t.pow(*exp));
+        }
+        self.units.insert(name.to_string(), u.clone());
+        Some(u)
+    }
+
+    fn lookup_unit(&mut self, name: &ast::Ident) -> Option<Unit> {
+        if let Some(u) = self.units.get(&name.name) {
+            return Some(u.clone());
+        }
+        let mut d = Diagnostic::new("E0200", name.span, format!("unknown unit `{}`", name.name));
+        if let Some(s) = closest(&name.name, self.units.keys()) {
+            d = d.fix1(FixKind::ChangesMeaning, format!("did you mean `{s}`?"), name.span, s);
+        } else {
+            d = d.note(format!("declare it at the top level: unit {};", name.name), None);
+        }
+        self.err(d);
+        None
+    }
+
+    fn unit_expr(&mut self, e: &ast::UnitExpr) -> Option<Unit> {
+        let mut u = Unit::dimensionless();
+        let mut ok = true;
+        for (term, exp) in &e.terms {
+            match self.lookup_unit(term) {
+                Some(t) => u = u.mul(&t.pow(*exp)),
+                None => ok = false,
+            }
+        }
+        ok.then_some(u)
+    }
+
+    fn resolve_type(&mut self, t: &ast::TypeExpr) -> Ty {
+        let name = t.name.name.as_str();
+        if name != "f64" {
+            if let Some(u) = &t.unit {
+                self.err(Diagnostic::new("E0307", u.span, format!("only f64 carries units, not {name}")));
+                return Ty::Error;
+            }
+        }
+        match name {
+            "i64" => Ty::I64,
+            "bool" => Ty::Bool,
+            "str" => Ty::Str,
+            "f64" => match &t.unit {
+                None => Ty::F64(Unit::dimensionless()),
+                Some(u) => self.unit_expr(u).map(Ty::F64).unwrap_or(Ty::Error),
+            },
+            _ => match self.struct_index.get(name) {
+                Some(id) => Ty::Struct(*id),
+                None => {
+                    let mut cands: Vec<String> = TYPE_NAMES.iter().map(|s| s.to_string()).collect();
+                    cands.extend(self.struct_index.keys().cloned());
+                    let mut d = Diagnostic::new("E0307", t.name.span, format!("unknown type `{name}`"));
+                    if let Some(s) = closest(name, cands.iter()) {
+                        d = d.fix1(FixKind::ChangesMeaning, format!("did you mean `{s}`?"), t.name.span, s);
+                    }
+                    self.err(d);
+                    Ty::Error
+                }
+            },
+        }
+    }
+
+    fn declare_structs(&mut self, decls: &[&ast::StructDecl]) {
+        let mut seen = HashMap::new();
+        let mut kept = Vec::new();
+        for d in decls {
+            if TYPE_NAMES.contains(&d.name.name.as_str()) {
+                self.err(Diagnostic::new("E0201", d.name.span, format!("`{}` is a built-in type", d.name.name)));
+                continue;
+            }
+            if self.check_new_name(&d.name, "struct", &mut seen) {
+                self.struct_index.insert(d.name.name.clone(), self.structs.len());
+                self.structs.push(StructDef { name: d.name.name.clone(), fields: Vec::new() });
+                kept.push(*d);
+            }
+        }
+        for (id, d) in kept.iter().enumerate() {
+            let mut fseen = HashMap::new();
+            let mut fields = Vec::new();
+            for (f, t) in &d.fields {
+                self.check_new_name(f, "field", &mut fseen);
+                let ty = self.resolve_type(t);
+                fields.push((f.name.clone(), ty));
+            }
+            self.structs[id].fields = fields;
+        }
+        // A struct containing itself by value has no size.
+        for (id, d) in kept.iter().enumerate() {
+            if self.struct_contains(id, id, &mut HashSet::new()) {
+                self.err(Diagnostic::new("E0308", d.name.span, format!("struct `{}` contains itself", d.name.name)));
+            }
+        }
+    }
+
+    fn struct_contains(&self, outer: StructId, target: StructId, seen: &mut HashSet<StructId>) -> bool {
+        for (_, ty) in &self.structs[outer].fields {
+            if let Ty::Struct(inner) = ty {
+                if *inner == target {
+                    return true;
+                }
+                if seen.insert(*inner) && self.struct_contains(*inner, target, seen) {
+                    return true;
+                }
+            }
+        }
+        false
+    }
+
+    fn effects(&mut self, uses: &[ast::Ident]) -> bool {
+        let mut io = false;
+        for u in uses {
+            if u.name == "io" {
+                if io {
+                    self.err(Diagnostic::new("E0201", u.span, "effect `io` is listed twice"));
+                }
+                io = true;
+            } else {
+                self.err(Diagnostic::new(
+                    "E0332",
+                    u.span,
+                    format!("unknown effect `{}`; the only effect is io", u.name),
+                ));
+            }
+        }
+        io
+    }
+
+    fn declare_fns(&mut self, decls: &[&ast::FnDecl]) {
+        let mut seen = HashMap::new();
+        for d in decls {
+            if BUILTINS.contains(&d.name.name.as_str()) {
+                self.err(Diagnostic::new("E0201", d.name.span, format!("`{}` is a built-in function", d.name.name)));
+            }
+            let fresh = self.check_new_name(&d.name, "function", &mut seen);
+            let params = d.params.iter().map(|p| (p.name.name.clone(), self.resolve_type(&p.ty))).collect();
+            let ret = d.ret.as_ref().map(|t| self.resolve_type(t)).unwrap_or(Ty::Void);
+            let uses_io = self.effects(&d.uses);
+            if fresh {
+                self.func_index.insert(d.name.name.clone(), self.sigs.len());
+            }
+            // Duplicates still get a slot so FuncIds line up with fn_decls order.
+            self.sigs.push(FuncSig { params, ret, uses_io, span: d.name.span });
+        }
+    }
+
+    // ---------------- bodies ----------------
+
+    fn new_body(&self, ret: Ty, uses_io: bool, uses_insert: Span) -> Body {
+        Body {
+            locals: Vec::new(),
+            meta: Vec::new(),
+            scopes: vec![HashMap::new()],
+            declared: HashMap::new(),
+            ret,
+            uses_io,
+            used_io: false,
+            uses_insert,
+            loop_depth: 0,
+            result_local: None,
+            in_ensures: false,
+            in_contract: false,
+        }
+    }
+
+    fn declare_local(&mut self, b: &mut Body, name: &ast::Ident, ty: Ty, meta: LocalMeta) -> LocalId {
+        if let Some(prev) = b.declared.get(&name.name) {
+            let prev = *prev;
+            self.err(
+                Diagnostic::new("E0202", name.span, format!("`{}` is already declared in this function", name.name))
+                    .note("first declared here", Some(prev)),
+            );
+        } else if self.func_index.contains_key(&name.name) {
+            self.err(Diagnostic::new("E0202", name.span, format!("`{}` is the name of a function", name.name)));
+        }
+        b.declared.insert(name.name.clone(), name.span);
+        let id = b.locals.len();
+        b.locals.push(Local { name: name.name.clone(), ty });
+        b.meta.push(meta);
+        b.scopes.last_mut().unwrap().insert(name.name.clone(), id);
+        id
+    }
+
+    fn finish_locals(&mut self, b: &Body) {
+        for (id, m) in b.meta.iter().enumerate() {
+            let name = &b.locals[id].name;
+            if !m.used && !name.starts_with('_') {
+                let mut d = Diagnostic::new("E0340", m.span, format!("`{name}` is never used"));
+                if m.is_param {
+                    d = d.note(
+                        "rename the parameter to start with _ if it is unused on purpose (callers name it too)",
+                        None,
+                    );
+                } else {
+                    d = d.fix1(
+                        FixKind::ChangesMeaning,
+                        format!("rename to `_{name}` if unused on purpose"),
+                        m.span,
+                        format!("_{name}"),
+                    );
+                }
+                self.err(d);
+            } else if m.mutable && !m.assigned && !m.is_loop_var {
+                let mut d = Diagnostic::new("E0341", m.span, format!("`{name}` is declared var but never reassigned"));
+                if let Some(kw) = m.kw_span {
+                    d = d.fix1(FixKind::Mechanical, "declare it with let", kw, "let");
+                }
+                self.err(d);
+            }
+        }
+    }
+
+    fn check_effect_usage(&mut self, b: &Body, uses_span: Option<Span>, uses_insert: Span) {
+        if b.uses_io && !b.used_io {
+            if let Some(s) = uses_span {
+                self.err(Diagnostic::new("E0331", s, "declares uses io but never performs io").fix1(
+                    FixKind::Mechanical,
+                    "remove `uses io`",
+                    Span::new(uses_insert.start, s.end),
+                    "",
+                ));
+            }
+        }
+    }
+
+    fn func(&mut self, d: &ast::FnDecl) -> Func {
+        let id = self.sigs.iter().position(|s| s.span == d.name.span).unwrap();
+        let ret = self.sigs[id].ret.clone();
+        let uses_io = self.sigs[id].uses_io;
+        let mut b = self.new_body(ret.clone(), uses_io, d.uses_insert);
+        let mut params = Vec::new();
+        for (i, p) in d.params.iter().enumerate() {
+            let ty = self.sigs[id].params[i].1.clone();
+            let meta = LocalMeta {
+                span: p.name.span,
+                kw_span: None,
+                mutable: false,
+                is_param: true,
+                is_loop_var: false,
+                used: false,
+                assigned: false,
+            };
+            params.push(self.declare_local(&mut b, &p.name, ty, meta));
+        }
+        b.in_contract = true;
+        let mut requires = Vec::new();
+        for e in &d.requires {
+            let x = self.expect(&mut b, e, &Ty::Bool);
+            let message = format!("requires failed at {}: {}", self.site(e.span), self.text(e.span));
+            requires.push(Check { expr: x, message });
+        }
+        let mut ensures = Vec::new();
+        let mut result_local = None;
+        if !d.ensures.is_empty() && ret != Ty::Void {
+            let id = b.locals.len();
+            b.locals.push(Local { name: "result".into(), ty: ret.clone() });
+            b.meta.push(LocalMeta {
+                span: d.name.span,
+                kw_span: None,
+                mutable: false,
+                is_param: false,
+                is_loop_var: false,
+                used: true,
+                assigned: false,
+            });
+            result_local = Some(id);
+        }
+        b.result_local = result_local;
+        b.in_ensures = true;
+        for e in &d.ensures {
+            let x = self.expect(&mut b, e, &Ty::Bool);
+            let message = format!("ensures failed at {}: {}", self.site(e.span), self.text(e.span));
+            ensures.push(Check { expr: x, message });
+        }
+        b.in_ensures = false;
+        b.in_contract = false;
+        let body = self.block(&mut b, &d.body);
+        if ret != Ty::Void && ret != Ty::Error && !always_returns(&d.body.stmts) {
+            self.err(
+                Diagnostic::new(
+                    "E0320",
+                    d.body.span.at_end().to(Span::new(d.body.span.end - 1, d.body.span.end)),
+                    format!("`{}` must return {} on every path", d.name.name, self.show(&ret)),
+                )
+                .note("the end of the function body can be reached without a return", None),
+            );
+        }
+        self.finish_locals(&b);
+        self.check_effect_usage(&b, d.uses_span, d.uses_insert);
+        Func {
+            name: d.name.name.clone(),
+            params,
+            ret,
+            uses_io,
+            requires,
+            ensures,
+            result_local,
+            locals: b.locals,
+            body,
+        }
+    }
+
+    fn test(&mut self, t: &ast::TestDecl) -> Test {
+        let uses_io = self.effects(&t.uses);
+        let mut b = self.new_body(Ty::Void, uses_io, t.uses_insert);
+        let body = self.block(&mut b, &t.body);
+        self.finish_locals(&b);
+        self.check_effect_usage(&b, t.uses_span, t.uses_insert);
+        Test { name: t.name.clone(), uses_io, locals: b.locals, body }
+    }
+
+    fn block(&mut self, b: &mut Body, block: &ast::Block) -> Vec<Stmt> {
+        b.scopes.push(HashMap::new());
+        let mut out = Vec::new();
+        let mut terminated: Option<Span> = None;
+        for s in &block.stmts {
+            if let Some(t) = terminated {
+                let last = block.stmts.last().unwrap().span;
+                self.err(
+                    Diagnostic::new("E0323", s.span, "unreachable code")
+                        .note("control never gets past this statement", Some(t))
+                        .fix1(FixKind::ChangesMeaning, "delete the unreachable statements", s.span.to(last), ""),
+                );
+                break;
+            }
+            if matches!(s.kind, StmtKind::Return(_) | StmtKind::Break | StmtKind::Continue) {
+                terminated = Some(s.span);
+            }
+            if let Some(st) = self.stmt(b, s) {
+                out.push(st);
+            }
+        }
+        b.scopes.pop();
+        out
+    }
+
+    fn stmt(&mut self, b: &mut Body, s: &ast::Stmt) -> Option<Stmt> {
+        Some(match &s.kind {
+            StmtKind::Let { mutable, kw_span, name, ty, init } => {
+                let t = self.resolve_type(ty);
+                let e = self.expect(b, init, &t);
+                let meta = LocalMeta {
+                    span: name.span,
+                    kw_span: Some(*kw_span),
+                    mutable: *mutable,
+                    is_param: false,
+                    is_loop_var: false,
+                    used: false,
+                    assigned: false,
+                };
+                let id = self.declare_local(b, name, t, meta);
+                Stmt::Let(id, e)
+            }
+            StmtKind::Assign { target, value } => {
+                let (local, path, ty) = self.place(b, target)?;
+                let v = self.expect(b, value, &ty);
+                Stmt::Assign(local, path, v)
+            }
+            StmtKind::Expr(e) => {
+                let AK::Call { .. } = &e.kind else {
+                    self.err(Diagnostic::new(
+                        "E0392",
+                        e.span,
+                        "this expression does nothing; only calls can be statements",
+                    ));
+                    return None;
+                };
+                let x = self.expr(b, e);
+                if x.ty != Ty::Void && x.ty != Ty::Error {
+                    let ty = self.show(&x.ty);
+                    self.err(
+                        Diagnostic::new("E0392", e.span, format!("the {ty} returned by this call is dropped")).fix1(
+                            FixKind::ChangesMeaning,
+                            "bind it to a name",
+                            e.span.at_start(),
+                            format!("let _unused: {ty} = "),
+                        ),
+                    );
+                }
+                Stmt::Expr(x)
+            }
+            StmtKind::If { cond, then, else_ } => {
+                let c = self.condition(b, cond);
+                let t = self.block(b, then);
+                let e = match else_.as_deref() {
+                    None => Vec::new(),
+                    Some(Else::Block(blk)) => self.block(b, blk),
+                    Some(Else::If(st)) => self.stmt(b, st).into_iter().collect(),
+                };
+                Stmt::If(c, t, e)
+            }
+            StmtKind::While { cond, body } => {
+                let c = self.condition(b, cond);
+                b.loop_depth += 1;
+                let body = self.block(b, body);
+                b.loop_depth -= 1;
+                Stmt::While(c, body)
+            }
+            StmtKind::For { var, start, end, body } => {
+                let s0 = self.expect(b, start, &Ty::I64);
+                let e0 = self.expect(b, end, &Ty::I64);
+                b.scopes.push(HashMap::new());
+                let meta = LocalMeta {
+                    span: var.span,
+                    kw_span: None,
+                    mutable: false,
+                    is_param: false,
+                    is_loop_var: true,
+                    used: false,
+                    assigned: false,
+                };
+                let id = self.declare_local(b, var, Ty::I64, meta);
+                b.loop_depth += 1;
+                let body = self.block(b, body);
+                b.loop_depth -= 1;
+                b.scopes.pop();
+                Stmt::For(id, s0, e0, body)
+            }
+            StmtKind::Return(v) => {
+                let ret = b.ret.clone();
+                match (v, &ret) {
+                    (None, Ty::Void) => Stmt::Return(None),
+                    (Some(e), Ty::Void) => {
+                        self.err(
+                            Diagnostic::new(
+                                "E0321",
+                                e.span,
+                                "this function has no return type, so return takes no value",
+                            )
+                            .fix1(
+                                FixKind::ChangesMeaning,
+                                "drop the value",
+                                Span::new(s.span.start + 6, e.span.end),
+                                "",
+                            ),
+                        );
+                        None?
+                    }
+                    (None, _) => {
+                        let t = self.show(&ret);
+                        self.err(Diagnostic::new("E0321", s.span, format!("this function must return a {t}")));
+                        None?
+                    }
+                    (Some(e), _) => Stmt::Return(Some(self.expect(b, e, &ret))),
+                }
+            }
+            StmtKind::Break | StmtKind::Continue => {
+                if b.loop_depth == 0 {
+                    self.err(Diagnostic::new("E0370", s.span, "break and continue only work inside a loop"));
+                    return None;
+                }
+                if matches!(s.kind, StmtKind::Break) {
+                    Stmt::Break
+                } else {
+                    Stmt::Continue
+                }
+            }
+        })
+    }
+
+    fn condition(&mut self, b: &mut Body, cond: &ast::Expr) -> Expr {
+        let c = self.expr(b, cond);
+        if c.ty != Ty::Bool && c.ty != Ty::Error {
+            let mut d = Diagnostic::new("E0380", cond.span, format!("condition is {}, not bool", self.show(&c.ty)));
+            if c.ty == Ty::I64 {
+                d = d.fix1(FixKind::ChangesMeaning, "compare with zero", cond.span.at_end(), " != 0");
+            }
+            self.err(d);
+        }
+        c
+    }
+
+    /// Resolves an assignment target to (local, field path, type).
+    fn place(&mut self, b: &mut Body, target: &ast::Expr) -> Option<(LocalId, Vec<usize>, Ty)> {
+        match &target.kind {
+            AK::Name(id) => {
+                let Some(local) = self.lookup_local(b, id) else {
+                    self.unknown_name(b, id);
+                    return None;
+                };
+                let m = &mut b.meta[local];
+                m.assigned = true;
+                if !m.mutable {
+                    let mut d = Diagnostic::new(
+                        "E0310",
+                        target.span,
+                        format!("`{}` cannot be assigned: it is not var", id.name),
+                    );
+                    if m.is_param {
+                        d = d.note("parameters are immutable; copy into a var first", None);
+                    } else if m.is_loop_var {
+                        d = d.note("loop variables are immutable", None);
+                    } else if let Some(kw) = m.kw_span {
+                        d = d.note("declared here", Some(m.span)).fix1(
+                            FixKind::ChangesMeaning,
+                            "declare it with var",
+                            kw,
+                            "var",
+                        );
+                    }
+                    self.err(d);
+                }
+                Some((local, Vec::new(), b.locals[local].ty.clone()))
+            }
+            AK::Field(base, field) => {
+                let (local, mut path, ty) = self.place(b, base)?;
+                let Ty::Struct(sid) = ty else {
+                    if ty != Ty::Error {
+                        let t = self.show(&ty);
+                        self.err(Diagnostic::new("E0306", field.span, format!("{t} has no fields")));
+                    }
+                    return None;
+                };
+                let idx = self.field_index(sid, field)?;
+                path.push(idx);
+                Some((local, path, self.structs[sid].fields[idx].1.clone()))
+            }
+            AK::Paren(inner) => self.place(b, inner),
+            _ => {
+                self.err(Diagnostic::new("E0311", target.span, "only variables and their fields can be assigned"));
+                None
+            }
+        }
+    }
+
+    fn field_index(&mut self, sid: StructId, field: &ast::Ident) -> Option<usize> {
+        let fields = &self.structs[sid].fields;
+        if let Some(i) = fields.iter().position(|(n, _)| *n == field.name) {
+            return Some(i);
+        }
+        let names: Vec<String> = fields.iter().map(|(n, _)| n.clone()).collect();
+        let sname = self.structs[sid].name.clone();
+        let mut d = Diagnostic::new("E0306", field.span, format!("struct `{sname}` has no field `{}`", field.name))
+            .note(format!("fields: {}", names.join(", ")), None);
+        if let Some(s) = closest(&field.name, names.iter()) {
+            d = d.fix1(FixKind::ChangesMeaning, format!("did you mean `{s}`?"), field.span, s);
+        }
+        self.err(d);
+        None
+    }
+
+    fn lookup_local(&self, b: &Body, id: &ast::Ident) -> Option<LocalId> {
+        b.scopes.iter().rev().find_map(|s| s.get(&id.name).copied())
+    }
+
+    fn unknown_name(&mut self, b: &mut Body, id: &ast::Ident) {
+        let mut d = Diagnostic::new("E0200", id.span, format!("unknown name `{}`", id.name));
+        if self.func_index.contains_key(&id.name) || BUILTINS.contains(&id.name.as_str()) {
+            d = d.note(format!("`{}` is a function; call it with ( )", id.name), None);
+        } else {
+            let visible: Vec<String> = b.scopes.iter().flat_map(|s| s.keys().cloned()).collect();
+            if let Some(s) = closest(&id.name, visible.iter()) {
+                // The suggested variable was probably meant to be read here; don't also call it unused.
+                if let Some(l) = b.scopes.iter().rev().find_map(|sc| sc.get(&s).copied()) {
+                    b.meta[l].used = true;
+                }
+                d = d.fix1(FixKind::ChangesMeaning, format!("did you mean `{s}`?"), id.span, s);
+            } else if b.declared.contains_key(&id.name) {
+                d = d.note("it is declared in a block that has already ended", b.declared.get(&id.name).copied());
+            }
+        }
+        self.err(d);
+    }
+
+    // ---------------- expressions ----------------
+
+    /// Checks `e` against an expected type, reporting mismatches with fixes.
+    fn expect(&mut self, b: &mut Body, e: &ast::Expr, want: &Ty) -> Expr {
+        let x = self.expr(b, e);
+        self.require_ty(e, &x, want);
+        x
+    }
+
+    fn require_ty(&mut self, e: &ast::Expr, x: &Expr, want: &Ty) {
+        if x.ty == *want || x.ty == Ty::Error || *want == Ty::Error {
+            return;
+        }
+        let got_s = self.show(&x.ty);
+        let want_s = self.show(want);
+        let d = match (&x.ty, want) {
+            (Ty::F64(_), Ty::F64(u)) => {
+                let mut d = Diagnostic::new("E0301", e.span, format!("expected {want_s}, found {got_s}"));
+                if let AK::Float(_, None) = &e.kind {
+                    d = d.fix1(
+                        FixKind::Mechanical,
+                        format!("give the literal the unit {u}"),
+                        e.span.at_end(),
+                        format!("[{u}]"),
+                    );
+                }
+                d
+            }
+            (Ty::I64, Ty::F64(u)) => {
+                let mut d = Diagnostic::new("E0300", e.span, format!("expected {want_s}, found i64"));
+                if let AK::Int(v) = &e.kind {
+                    let unit = if u.is_dimensionless() { String::new() } else { format!("[{u}]") };
+                    d = d.fix1(FixKind::Mechanical, "write a float literal", e.span, format!("{v}.0{unit}"));
+                } else if u.is_dimensionless() {
+                    d = d.fix(
+                        FixKind::ChangesMeaning,
+                        "convert with to_f64",
+                        vec![
+                            Edit { span: e.span.at_start(), text: "to_f64(".into() },
+                            Edit { span: e.span.at_end(), text: ")".into() },
+                        ],
+                    );
+                }
+                d
+            }
+            (Ty::F64(u), Ty::I64) => {
+                let mut d = Diagnostic::new("E0300", e.span, format!("expected i64, found {got_s}"));
+                if u.is_dimensionless() {
+                    d = d.fix(
+                        FixKind::ChangesMeaning,
+                        "truncate with to_i64",
+                        vec![
+                            Edit { span: e.span.at_start(), text: "to_i64(".into() },
+                            Edit { span: e.span.at_end(), text: ")".into() },
+                        ],
+                    );
+                }
+                d
+            }
+            _ => Diagnostic::new("E0300", e.span, format!("expected {want_s}, found {got_s}")),
+        };
+        self.err(d);
+    }
+
+    fn err_expr() -> Expr {
+        Expr { kind: ExprKind::Bool(false), ty: Ty::Error }
+    }
+
+    fn expr(&mut self, b: &mut Body, e: &ast::Expr) -> Expr {
+        let (kind, ty) = match &e.kind {
+            AK::Int(v) => (ExprKind::Int(*v), Ty::I64),
+            AK::Float(v, unit) => {
+                let u = match unit {
+                    None => Some(Unit::dimensionless()),
+                    Some(u) => self.unit_expr(u),
+                };
+                match u {
+                    Some(u) => (ExprKind::Float(*v), Ty::F64(u)),
+                    None => return Self::err_expr(),
+                }
+            }
+            AK::Bool(v) => (ExprKind::Bool(*v), Ty::Bool),
+            AK::Str(s) => (ExprKind::Str(s.clone()), Ty::Str),
+            AK::Paren(inner) => return self.expr(b, inner),
+            AK::Name(id) => match self.lookup_local(b, id) {
+                Some(l) => {
+                    b.meta[l].used = true;
+                    (ExprKind::Local(l), b.locals[l].ty.clone())
+                }
+                None => {
+                    self.unknown_name(b, id);
+                    return Self::err_expr();
+                }
+            },
+            AK::Result => {
+                if !b.in_ensures {
+                    self.err(Diagnostic::new("E0322", e.span, "`result` is only valid in ensures clauses"));
+                    return Self::err_expr();
+                }
+                match b.result_local {
+                    Some(l) => (ExprKind::Local(l), b.locals[l].ty.clone()),
+                    None => {
+                        self.err(Diagnostic::new(
+                            "E0322",
+                            e.span,
+                            "this function returns nothing, so there is no result",
+                        ));
+                        return Self::err_expr();
+                    }
+                }
+            }
+            AK::Field(base, field) => {
+                let x = self.expr(b, base);
+                match x.ty.clone() {
+                    Ty::Struct(sid) => match self.field_index(sid, field) {
+                        Some(i) => {
+                            let ty = self.structs[sid].fields[i].1.clone();
+                            (ExprKind::Field(Box::new(x), i), ty)
+                        }
+                        None => return Self::err_expr(),
+                    },
+                    Ty::Error => return Self::err_expr(),
+                    other => {
+                        let t = self.show(&other);
+                        self.err(Diagnostic::new("E0306", field.span, format!("{t} has no fields")));
+                        return Self::err_expr();
+                    }
+                }
+            }
+            AK::StructLit { name, fields } => return self.struct_lit(b, e, name, fields),
+            AK::Call { callee, args } => return self.call(b, e, callee, args),
+            AK::Unary(op, inner) => {
+                let x = self.expr(b, inner);
+                match (op, &x.ty) {
+                    (_, Ty::Error) => return Self::err_expr(),
+                    (UnOp::Neg, Ty::I64) => {
+                        let overflow = overflow_message("-", &self.site(e.span));
+                        (ExprKind::INeg { e: Box::new(x), overflow }, Ty::I64)
+                    }
+                    (UnOp::Neg, Ty::F64(u)) => {
+                        let u = u.clone();
+                        (ExprKind::FNeg(Box::new(x)), Ty::F64(u))
+                    }
+                    (UnOp::Not, Ty::Bool) => (ExprKind::Not(Box::new(x)), Ty::Bool),
+                    (op, t) => {
+                        let o = if *op == UnOp::Neg { "-" } else { "!" };
+                        let t = self.show(t);
+                        self.err(Diagnostic::new("E0302", e.span, format!("`{o}` is not defined for {t}")));
+                        return Self::err_expr();
+                    }
+                }
+            }
+            AK::Binary(op, l, r) => return self.binary(b, e, *op, l, r),
+        };
+        Expr { kind, ty }
+    }
+
+    fn binary(&mut self, b: &mut Body, e: &ast::Expr, op: BinOp, l: &ast::Expr, r: &ast::Expr) -> Expr {
+        let x = self.expr(b, l);
+        let y = self.expr(b, r);
+        if x.ty == Ty::Error || y.ty == Ty::Error {
+            return Self::err_expr();
+        }
+        let site = self.site(e.span);
+        let bx = |v: Expr| Box::new(v);
+        let (lt, rt) = (x.ty.clone(), y.ty.clone());
+        match op {
+            BinOp::And | BinOp::Or => {
+                if lt == Ty::Bool && rt == Ty::Bool {
+                    let kind = if op == BinOp::And { ExprKind::And(bx(x), bx(y)) } else { ExprKind::Or(bx(x), bx(y)) };
+                    return Expr { kind, ty: Ty::Bool };
+                }
+            }
+            _ if lt == Ty::I64 && rt == Ty::I64 => {
+                let iop = match op {
+                    BinOp::Add => Some(IOp::Add),
+                    BinOp::Sub => Some(IOp::Sub),
+                    BinOp::Mul => Some(IOp::Mul),
+                    BinOp::Div => Some(IOp::Div),
+                    BinOp::Rem => Some(IOp::Rem),
+                    _ => None,
+                };
+                if let Some(iop) = iop {
+                    let kind = ExprKind::IArith {
+                        op: iop,
+                        l: bx(x),
+                        r: bx(y),
+                        overflow: overflow_message(op.text(), &site),
+                        div_zero: div_zero_message(&site),
+                    };
+                    return Expr { kind, ty: Ty::I64 };
+                }
+                return Expr { kind: ExprKind::Cmp(cmp_op(op), bx(x), bx(y)), ty: Ty::Bool };
+            }
+            _ => {
+                if let (Ty::F64(a), Ty::F64(c)) = (&lt, &rt) {
+                    let (a, c) = (a.clone(), c.clone());
+                    match op {
+                        BinOp::Mul => {
+                            return Expr { kind: ExprKind::FArith(FOp::Mul, bx(x), bx(y)), ty: Ty::F64(a.mul(&c)) }
+                        }
+                        BinOp::Div => {
+                            return Expr { kind: ExprKind::FArith(FOp::Div, bx(x), bx(y)), ty: Ty::F64(a.div(&c)) }
+                        }
+                        BinOp::Rem => {}
+                        _ if a != c => {
+                            let d = Diagnostic::new(
+                                "E0301",
+                                e.span,
+                                format!(
+                                    "`{}` needs matching units, found {} and {}",
+                                    op.text(),
+                                    self.show(&lt),
+                                    self.show(&rt)
+                                ),
+                            );
+                            self.err(self.unit_fix(d, l, r, &a, &c));
+                            return Self::err_expr();
+                        }
+                        BinOp::Add => return Expr { kind: ExprKind::FArith(FOp::Add, bx(x), bx(y)), ty: Ty::F64(a) },
+                        BinOp::Sub => return Expr { kind: ExprKind::FArith(FOp::Sub, bx(x), bx(y)), ty: Ty::F64(a) },
+                        _ => return Expr { kind: ExprKind::Cmp(cmp_op(op), bx(x), bx(y)), ty: Ty::Bool },
+                    }
+                }
+                if lt == Ty::Bool && rt == Ty::Bool && matches!(op, BinOp::Eq | BinOp::Ne) {
+                    return Expr { kind: ExprKind::Cmp(cmp_op(op), bx(x), bx(y)), ty: Ty::Bool };
+                }
+                // i64 mixed with f64: point at the integer side.
+                let mixed = match (&lt, &rt) {
+                    (Ty::I64, Ty::F64(u)) => Some((l, &x, u.clone())),
+                    (Ty::F64(u), Ty::I64) => Some((r, &y, u.clone())),
+                    _ => None,
+                };
+                if let Some((side, sx, u)) = mixed {
+                    if op != BinOp::Rem {
+                        let msg = format!(
+                            "`{}` cannot mix {} and {}; Anvil never converts implicitly",
+                            op.text(),
+                            self.show(&lt),
+                            self.show(&rt)
+                        );
+                        let d = Diagnostic::new("E0300", e.span, msg);
+                        let want = Ty::F64(u);
+                        // Reuse the coercion fixes for the integer operand.
+                        let before = self.diags.len();
+                        self.require_ty(side, sx, &want);
+                        let fixes = self.diags.pop().map(|d| d.fixes).unwrap_or_default();
+                        debug_assert_eq!(self.diags.len(), before);
+                        let mut d = d;
+                        d.fixes = fixes;
+                        self.err(d);
+                        return Self::err_expr();
+                    }
+                }
+            }
+        }
+        let (ls, rs) = (self.show(&lt), self.show(&rt));
+        let mut d = Diagnostic::new("E0302", e.span, format!("`{}` is not defined for {ls} and {rs}", op.text()));
+        if op == BinOp::Rem && matches!(lt, Ty::F64(_)) {
+            d = d.note("% is only defined for i64", None);
+        }
+        self.err(d);
+        Self::err_expr()
+    }
+
+    fn unit_fix(&self, d: Diagnostic, l: &ast::Expr, r: &ast::Expr, a: &Unit, c: &Unit) -> Diagnostic {
+        // A bare literal on one side may just lack its unit, but that is a guess about intent.
+        if let AK::Float(_, None) = &r.kind {
+            if c.is_dimensionless() {
+                return d.fix1(
+                    FixKind::ChangesMeaning,
+                    format!("give the literal the unit {a}"),
+                    r.span.at_end(),
+                    format!("[{a}]"),
+                );
+            }
+        }
+        if let AK::Float(_, None) = &l.kind {
+            if a.is_dimensionless() {
+                return d.fix1(
+                    FixKind::ChangesMeaning,
+                    format!("give the literal the unit {c}"),
+                    l.span.at_end(),
+                    format!("[{c}]"),
+                );
+            }
+        }
+        d
+    }
+
+    fn struct_lit(
+        &mut self,
+        b: &mut Body,
+        e: &ast::Expr,
+        name: &ast::Ident,
+        fields: &[(ast::Ident, ast::Expr)],
+    ) -> Expr {
+        let Some(&sid) = self.struct_index.get(&name.name) else {
+            let mut d = Diagnostic::new("E0200", name.span, format!("unknown struct `{}`", name.name));
+            if let Some(s) = closest(&name.name, self.struct_index.keys()) {
+                d = d.fix1(FixKind::ChangesMeaning, format!("did you mean `{s}`?"), name.span, s);
+            }
+            self.err(d);
+            for (_, v) in fields {
+                self.expr(b, v);
+            }
+            return Self::err_expr();
+        };
+        let decl: Vec<(String, Ty)> = self.structs[sid].fields.clone();
+        let mut ok = true;
+        let mut by_name: HashMap<&str, usize> = HashMap::new();
+        for (i, (f, _)) in fields.iter().enumerate() {
+            if by_name.insert(f.name.as_str(), i).is_some() {
+                self.err(Diagnostic::new("E0305", f.span, format!("field `{}` is given twice", f.name)));
+                ok = false;
+            }
+            if !decl.iter().any(|(n, _)| *n == f.name) {
+                self.field_index(sid, f);
+                ok = false;
+            }
+        }
+        let missing: Vec<&str> =
+            decl.iter().filter(|(n, _)| !by_name.contains_key(n.as_str())).map(|(n, _)| n.as_str()).collect();
+        if !missing.is_empty() {
+            self.err(Diagnostic::new(
+                "E0305",
+                e.span,
+                format!(
+                    "struct `{}` literal is missing {}",
+                    name.name,
+                    missing.iter().map(|m| format!("`{m}`")).collect::<Vec<_>>().join(", ")
+                ),
+            ));
+            ok = false;
+        }
+        let in_order = fields.iter().zip(decl.iter()).all(|((f, _), (n, _))| f.name == *n);
+        if ok && !in_order {
+            // Same set, wrong order: rewrite in declaration order.
+            let text: Vec<String> = decl
+                .iter()
+                .map(|(n, _)| {
+                    let (f, v) = &fields[by_name[n.as_str()]];
+                    format!("{}: {}", f.name, self.text(v.span))
+                })
+                .collect();
+            let inner = Span::new(fields[0].0.span.start, fields.last().unwrap().1.span.end);
+            self.err(
+                Diagnostic::new("E0305", e.span, format!("fields of `{}` must be in declaration order", name.name))
+                    .note(
+                        format!(
+                            "declared order: {}",
+                            decl.iter().map(|(n, _)| n.as_str()).collect::<Vec<_>>().join(", ")
+                        ),
+                        None,
+                    )
+                    .fix1(FixKind::Mechanical, "reorder the fields", inner, text.join(", ")),
+            );
+            ok = false;
+        }
+        let mut vals = Vec::new();
+        for (f, v) in fields {
+            match decl.iter().find(|(n, _)| *n == f.name) {
+                Some((_, t)) => vals.push(self.expect(b, v, &t.clone())),
+                None => {
+                    self.expr(b, v);
+                }
+            }
+        }
+        if !ok {
+            return Self::err_expr();
+        }
+        Expr { kind: ExprKind::StructLit(sid, vals), ty: Ty::Struct(sid) }
+    }
+
+    fn note_io(&mut self, b: &mut Body, span: Span, what: &str) {
+        if b.in_contract {
+            self.err(Diagnostic::new("E0390", span, format!("{what} performs io, which contracts cannot do")));
+            return;
+        }
+        b.used_io = true;
+        if !b.uses_io {
+            self.err(Diagnostic::new("E0330", span, format!("{what} performs io, but this function is pure")).fix1(
+                FixKind::ChangesMeaning,
+                "declare the effect: uses io",
+                b.uses_insert,
+                " uses io",
+            ));
+        }
+    }
+
+    fn call(&mut self, b: &mut Body, e: &ast::Expr, callee: &ast::Ident, args: &[ast::Arg]) -> Expr {
+        let name = callee.name.as_str();
+        if BUILTINS.contains(&name) {
+            return self.builtin(b, e, callee, args);
+        }
+        let Some(&fid) = self.func_index.get(name) else {
+            let mut cands: Vec<String> = self.func_index.keys().cloned().collect();
+            cands.extend(BUILTINS.iter().map(|s| s.to_string()));
+            let mut d = Diagnostic::new("E0200", callee.span, format!("unknown function `{name}`"));
+            if let Some(s) = closest(name, cands.iter()) {
+                d = d.fix1(FixKind::ChangesMeaning, format!("did you mean `{s}`?"), callee.span, s);
+            }
+            self.err(d);
+            for a in args {
+                self.expr(b, &a.value);
+            }
+            return Self::err_expr();
+        };
+        let params: Vec<(String, Ty)> = self.sigs[fid].params.clone();
+        let ret = self.sigs[fid].ret.clone();
+        if self.sigs[fid].uses_io {
+            self.note_io(b, callee.span, &format!("calling `{name}`"));
+        }
+        if args.len() != params.len() {
+            let list = params.iter().map(|(n, t)| format!("{n}: {}", self.show(t))).collect::<Vec<_>>().join(", ");
+            self.err(
+                Diagnostic::new(
+                    "E0303",
+                    e.span,
+                    format!("`{name}` takes {} argument(s), found {}", params.len(), args.len()),
+                )
+                .note(format!("signature: {name}({list})"), Some(self.sigs[fid].span)),
+            );
+            for a in args {
+                self.expr(b, &a.value);
+            }
+            return Self::err_expr();
+        }
+        let mut ok = true;
+        if params.len() == 1 {
+            if let Some(n) = &args[0].name {
+                ok = false;
+                self.err(
+                    Diagnostic::new(
+                        "E0304",
+                        n.span,
+                        format!("`{name}` has one parameter, so the argument is not named"),
+                    )
+                    .fix1(
+                        FixKind::Mechanical,
+                        "remove the name",
+                        Span::new(n.span.start, args[0].value.span.start),
+                        "",
+                    ),
+                );
+            }
+        } else if params.len() >= 2 {
+            let unnamed: Vec<usize> = (0..args.len()).filter(|i| args[*i].name.is_none()).collect();
+            if unnamed.len() == args.len() {
+                ok = false;
+                let edits = args
+                    .iter()
+                    .zip(&params)
+                    .map(|(a, (p, _))| Edit { span: a.value.span.at_start(), text: format!("{p}: ") })
+                    .collect();
+                self.err(Diagnostic::new("E0304", e.span, format!("calls to `{name}` name every argument")).fix(
+                    FixKind::Mechanical,
+                    "name the arguments in parameter order",
+                    edits,
+                ));
+            } else if !unnamed.is_empty() {
+                ok = false;
+                let a = &args[unnamed[0]];
+                self.err(
+                    Diagnostic::new("E0304", a.value.span, format!("argument {} is not named", unnamed[0] + 1)).fix1(
+                        FixKind::Mechanical,
+                        format!("name it `{}`", params[unnamed[0]].0),
+                        a.value.span.at_start(),
+                        format!("{}: ", params[unnamed[0]].0),
+                    ),
+                );
+            } else {
+                let names: Vec<&str> = args.iter().map(|a| a.name.as_ref().unwrap().name.as_str()).collect();
+                let pnames: Vec<&str> = params.iter().map(|(p, _)| p.as_str()).collect();
+                for a in args {
+                    let n = a.name.as_ref().unwrap();
+                    if !pnames.contains(&n.name.as_str()) {
+                        ok = false;
+                        let mut d = Diagnostic::new("E0304", n.span, format!("`{name}` has no parameter `{}`", n.name))
+                            .note(format!("parameters: {}", pnames.join(", ")), None);
+                        let owned: Vec<String> = pnames.iter().map(|s| s.to_string()).collect();
+                        if let Some(s) = closest(&n.name, owned.iter()) {
+                            d = d.fix1(FixKind::ChangesMeaning, format!("did you mean `{s}`?"), n.span, s);
+                        }
+                        self.err(d);
+                    }
+                }
+                let mut sorted_a = names.clone();
+                sorted_a.sort();
+                let mut sorted_p = pnames.clone();
+                sorted_p.sort();
+                if ok && sorted_a != sorted_p {
+                    ok = false;
+                    self.err(Diagnostic::new("E0304", e.span, "each parameter is named exactly once"));
+                } else if ok && names != pnames {
+                    ok = false;
+                    let text: Vec<String> = pnames
+                        .iter()
+                        .map(|p| {
+                            let a = args.iter().find(|a| a.name.as_ref().unwrap().name == *p).unwrap();
+                            format!("{p}: {}", self.text(a.value.span))
+                        })
+                        .collect();
+                    let inner =
+                        Span::new(args[0].name.as_ref().unwrap().span.start, args.last().unwrap().value.span.end);
+                    self.err(
+                        Diagnostic::new("E0304", e.span, "named arguments must be in parameter order")
+                            .note(format!("parameter order: {}", pnames.join(", ")), None)
+                            .fix1(FixKind::Mechanical, "reorder the arguments", inner, text.join(", ")),
+                    );
+                }
+            }
+        }
+        let mut vals = Vec::new();
+        for (a, (_, t)) in args.iter().zip(&params) {
+            vals.push(self.expect(b, &a.value, t));
+        }
+        if !ok {
+            return Self::err_expr();
+        }
+        Expr { kind: ExprKind::Call(fid, vals), ty: ret }
+    }
+
+    fn builtin(&mut self, b: &mut Body, e: &ast::Expr, callee: &ast::Ident, args: &[ast::Arg]) -> Expr {
+        let name = callee.name.as_str();
+        for a in args {
+            if let Some(n) = &a.name {
+                self.err(
+                    Diagnostic::new("E0304", n.span, format!("built-in `{name}` takes positional arguments")).fix1(
+                        FixKind::Mechanical,
+                        "remove the name",
+                        Span::new(n.span.start, a.value.span.start),
+                        "",
+                    ),
+                );
+            }
+        }
+        let vals: Vec<Expr> = args.iter().map(|a| self.expr(b, &a.value)).collect();
+        if vals.iter().any(|v| v.ty == Ty::Error) {
+            return Self::err_expr();
+        }
+        if name == "print" {
+            self.note_io(b, callee.span, "print");
+            for (a, v) in args.iter().zip(&vals) {
+                if matches!(v.ty, Ty::Struct(_) | Ty::Void) {
+                    let t = self.show(&v.ty);
+                    self.err(
+                        Diagnostic::new("E0300", a.value.span, format!("print takes i64, f64, bool or str, not {t}"))
+                            .note("print the fields one by one", None),
+                    );
+                }
+            }
+            return Expr { kind: ExprKind::Builtin(Builtin::Print, vals), ty: Ty::Void };
+        }
+        if vals.len() != 1 {
+            self.err(Diagnostic::new("E0303", e.span, format!("`{name}` takes 1 argument, found {}", vals.len())));
+            return Self::err_expr();
+        }
+        let arg = &args[0].value;
+        let site = self.site(e.span);
+        let x = vals.into_iter().next().unwrap();
+        let t = x.ty.clone();
+        let bad = |c: &mut Self, want: &str| {
+            let got = c.show(&t);
+            c.err(Diagnostic::new("E0300", arg.span, format!("`{name}` takes {want}, found {got}")));
+            Self::err_expr()
+        };
+        match name {
+            "assert" => {
+                if t != Ty::Bool {
+                    return bad(self, "bool");
+                }
+                let message = format!("assertion failed at {site}: {}", self.text(arg.span));
+                Expr { kind: ExprKind::Builtin(Builtin::Assert { message }, vec![x]), ty: Ty::Void }
+            }
+            "sqrt" => match &t {
+                Ty::F64(u) => match u.sqrt() {
+                    Some(r) => Expr { kind: ExprKind::Builtin(Builtin::Sqrt, vec![x]), ty: Ty::F64(r) },
+                    None => {
+                        let t = self.show(&t);
+                        self.err(Diagnostic::new("E0360", arg.span, format!("sqrt of {t} has no unit")));
+                        Self::err_expr()
+                    }
+                },
+                _ => bad(self, "f64"),
+            },
+            "abs" => match &t {
+                Ty::I64 => Expr {
+                    kind: ExprKind::Builtin(Builtin::AbsI64 { message: overflow_message("abs", &site) }, vec![x]),
+                    ty: Ty::I64,
+                },
+                Ty::F64(_) => Expr { kind: ExprKind::Builtin(Builtin::AbsF64, vec![x]), ty: t.clone() },
+                _ => bad(self, "i64 or f64"),
+            },
+            "to_f64" => {
+                if t != Ty::I64 {
+                    return bad(self, "i64");
+                }
+                Expr { kind: ExprKind::Builtin(Builtin::ToF64, vec![x]), ty: Ty::F64(Unit::dimensionless()) }
+            }
+            "to_i64" => match &t {
+                Ty::F64(u) if u.is_dimensionless() => Expr {
+                    kind: ExprKind::Builtin(
+                        Builtin::ToI64 { message: format!("to_i64 of a non-finite or out-of-range value at {site}") },
+                        vec![x],
+                    ),
+                    ty: Ty::I64,
+                },
+                Ty::F64(u) => {
+                    let t = self.show(&t);
+                    self.err(
+                        Diagnostic::new("E0301", arg.span, format!("to_i64 takes a dimensionless f64, found {t}"))
+                            .fix1(
+                                FixKind::ChangesMeaning,
+                                format!("divide by 1.0[{u}] to state the unit you are counting in"),
+                                arg.span.at_end(),
+                                format!(" / 1.0[{u}]"),
+                            ),
+                    );
+                    Self::err_expr()
+                }
+                _ => bad(self, "f64"),
+            },
+            _ => unreachable!("builtin {name}"),
+        }
+    }
+}
+
+fn cmp_op(op: BinOp) -> CmpOp {
+    match op {
+        BinOp::Eq => CmpOp::Eq,
+        BinOp::Ne => CmpOp::Ne,
+        BinOp::Lt => CmpOp::Lt,
+        BinOp::Le => CmpOp::Le,
+        BinOp::Gt => CmpOp::Gt,
+        BinOp::Ge => CmpOp::Ge,
+        _ => unreachable!("{op:?} is not a comparison"),
+    }
+}
+
+/// Conservative "every path returns": a return, or an if/else whose branches all return.
+fn always_returns(stmts: &[ast::Stmt]) -> bool {
+    stmts.iter().any(|s| match &s.kind {
+        StmtKind::Return(_) => true,
+        StmtKind::If { then, else_: Some(e), .. } => {
+            always_returns(&then.stmts)
+                && match e.as_ref() {
+                    Else::Block(b) => always_returns(&b.stmts),
+                    Else::If(st) => always_returns(std::slice::from_ref(st)),
+                }
+        }
+        _ => false,
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{closest, distance};
+
+    #[test]
+    fn suggestions() {
+        assert_eq!(distance("cuont", "count"), 1);
+        assert_eq!(distance("speed", "sped"), 1);
+        assert_eq!(distance("abc", "xyz"), 3);
+        let names = ["count".to_string(), "total".to_string()];
+        assert_eq!(closest("cuont", names.iter()), Some("count".to_string()));
+        assert_eq!(closest("zzz", names.iter()), None);
+    }
+}

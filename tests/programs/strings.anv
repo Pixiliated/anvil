@@ -1,0 +1,13 @@
+fn greet(name: str) uses io {
+    print("hello, ", name, "!");
+}
+
+fn main() uses io {
+    greet("anvil");
+    print("tab:\tend");
+    print("quote: \"x\" backslash: \\");
+    print("");
+    print("two\nlines");
+    let s: str = "bound";
+    print(s);
+}

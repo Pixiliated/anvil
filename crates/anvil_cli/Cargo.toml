@@ -1,0 +1,18 @@
+[package]
+name = "anvil_cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "anvil"
+path = "src/main.rs"
+
+[dependencies]
+anvil_front = { path = "../anvil_front" }
+anvil_interp = { path = "../anvil_interp" }
+anvil_codegen = { path = "../anvil_codegen" }
+serde_json = "1.0.154"
+
+[dev-dependencies]
+serde_json = "1.0.154"

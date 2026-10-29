@@ -1,0 +1,11 @@
+// The contract example from docs/SPEC.md, checked on both signs.
+fn safe_div(n: i64, d: i64) -> i64
+    requires d != 0
+    ensures result * d + n % d == n
+{
+    return n / d;
+}
+
+fn main() uses io {
+    print(safe_div(n: 7, d: 2), " ", safe_div(n: -7, d: 2), " ", safe_div(n: 7, d: -2), " ", safe_div(n: -7, d: -2));
+}

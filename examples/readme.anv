@@ -1,0 +1,17 @@
+// The example from README.md; corpus.rs keeps it compiling.
+unit m;
+unit s;
+
+fn speed(distance: f64[m], time: f64[s]) -> f64[m/s]
+    requires time > 0.0[s]
+{
+    return distance / time;
+}
+
+fn main() uses io {
+    print(speed(distance: 100.0[m], time: 9.58[s]));   // 10.438413361169102 m/s
+}
+
+test "speed is positive" {
+    assert(speed(distance: 1.0[m], time: 1.0[s]) > 0.0[m/s]);
+}

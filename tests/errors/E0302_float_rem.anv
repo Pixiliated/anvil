@@ -1,0 +1,5 @@
+// expect: E0302
+fn main() -> i64 {
+    let _x: f64 = 5.0 % 2.0;
+    return 0;
+}

@@ -1,0 +1,5 @@
+// expect: E0323
+fn main() -> i64 {
+    return 0;
+    return 1;
+}

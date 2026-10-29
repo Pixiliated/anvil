@@ -1,0 +1,7 @@
+// expect: E0305
+// resolve: mechanical
+struct P { x: i64, y: i64, }
+fn main() -> i64 {
+    let p: P = P { y: 2, x: 1 };
+    return p.x + p.y;
+}

@@ -1,0 +1,5 @@
+// expect: E0331
+// resolve: mechanical
+fn main() -> i64 uses io {
+    return 0;
+}

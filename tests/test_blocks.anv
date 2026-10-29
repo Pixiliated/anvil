@@ -1,0 +1,17 @@
+// Used by corpus.rs: two passing tests and one failing test with output.
+fn double(n: i64) -> i64 {
+    return n * 2;
+}
+
+test "doubles" {
+    assert(double(3) == 6);
+}
+
+test "doubles negatives" {
+    assert(double(-3) == -6);
+}
+
+test "deliberately wrong" uses io {
+    print("about to fail");
+    assert(double(2) == 5);
+}

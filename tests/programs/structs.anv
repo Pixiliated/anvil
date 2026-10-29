@@ -1,0 +1,33 @@
+struct Vec2 { x: f64, y: f64, }
+struct Particle { name: str, pos: Vec2, vel: Vec2, alive: bool, id: i64, }
+
+fn add(a: Vec2, b: Vec2) -> Vec2 {
+    return Vec2 { x: a.x + b.x, y: a.y + b.y };
+}
+
+fn advance(p: Particle) -> Particle {
+    var next: Particle = p;
+    next.pos = add(a: p.pos, b: p.vel);
+    next.vel.y = p.vel.y - 1.0;
+    return next;
+}
+
+fn show(p: Particle) uses io {
+    print(p.name, "#", p.id, " at (", p.pos.x, ", ", p.pos.y, ") alive=", p.alive);
+}
+
+fn main() uses io {
+    var p: Particle = Particle {
+        name: "spark",
+        pos: Vec2 { x: 0.0, y: 0.0 },
+        vel: Vec2 { x: 1.5, y: 2.0 },
+        alive: true,
+        id: 7,
+    };
+    for _i in 0..4 {
+        p = advance(p);
+        show(p);
+    }
+    p.alive = false;
+    show(p);
+}

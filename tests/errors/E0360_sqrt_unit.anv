@@ -1,0 +1,6 @@
+// expect: E0360
+unit m;
+fn main() -> i64 {
+    let _r: f64 = sqrt(4.0[m]);
+    return 0;
+}

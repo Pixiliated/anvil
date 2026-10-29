@@ -1,0 +1,34 @@
+# Decisions
+
+Short records of choices that are not obvious from the code. Newest last.
+
+## M0
+
+- **The interpreter is the reference.** The native backend is correct when it matches the
+  interpreter on stdout, panic message and exit code. Failure messages are built once, in the
+  checker, and stored in the IR, so the backends cannot word them differently.
+- **Structs are flattened into scalars in codegen.** Values, parameters and returns are lists
+  of I64/F64/I8 values; there is no memory layout to get wrong. Cranelift's
+  `enable_multi_ret_implicit_sret` handles wide returns. Revisit when arrays arrive.
+- **The C runtime is compiled at build time and embedded** in the compiler, so `anvil` is one
+  binary. Static CRT. `/Brepro` makes executables byte-identical across builds.
+- **stdout is binary mode** in native programs, so `\n` is never rewritten to `\r\n` and both
+  backends print identical bytes.
+- **Float text is Anvil's own format** (shortest round-trip digits, always a `.`), implemented
+  twice (Rust `ir::format_f64`, C `anvil_format_f64`) and compared on hundreds of values by
+  `tests/programs/floats_sweep.anv`.
+- **Units are erased at runtime.** Printing a float with a unit appends the unit text, which the
+  compiler knows from the static type.
+- **Named arguments for two or more parameters**, positional for one: swapped arguments are the
+  most common bug a type checker cannot catch when both have the same type.
+- **Fix kinds.** A fix is `mechanical` only when it cannot change what the author meant (adding
+  `;`, naming arguments in their existing order, the unit stated by a declared type). Anything
+  that guesses intent is `changes_meaning`. Where a guess could compile and be wrong, there is
+  no fix at all (unterminated strings).
+- **Unused variables and unneeded `var` are errors**, not warnings: Anvil has no warnings.
+- **The parser stops at the first syntax error**; the checker reports every error, using an
+  error type so one mistake does not cascade.
+- **Recursion limits differ**: the interpreter panics past 10,000 nested calls; native code has
+  a 64 MiB stack. Recorded in SPEC.md as the one known difference.
+- **The `anvil` crate name is taken on crates.io** (and Foundry ships a tool called Anvil). The
+  language keeps the name; the package will publish as `anvil-lang`.

@@ -1,0 +1,9 @@
+// expect: E0301
+unit m;
+unit s;
+fn main() -> i64 {
+    let d: f64[m] = 3.0[m];
+    let t: f64[s] = 2.0[s];
+    let _x: f64[m] = d + t;
+    return 0;
+}

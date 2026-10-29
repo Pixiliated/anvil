@@ -1,0 +1,4 @@
+// expect: E0350
+fn main(n: i64) -> i64 {
+    return n;
+}

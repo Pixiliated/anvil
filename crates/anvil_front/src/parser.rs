@@ -1,0 +1,530 @@
+//! Recursive-descent parser. Stops at the first syntax error: one precise error beats a cascade.
+
+use crate::ast::*;
+use crate::diag::{Diagnostic, FixKind};
+use crate::lexer::{Tok, Token};
+use crate::span::Span;
+
+type PResult<T> = Result<T, Diagnostic>;
+
+pub struct Parser {
+    toks: Vec<Token>,
+    pos: usize,
+}
+
+pub fn parse(toks: Vec<Token>) -> PResult<File> {
+    let mut p = Parser { toks, pos: 0 };
+    let mut items = Vec::new();
+    while p.peek() != &Tok::Eof {
+        items.push(p.item()?);
+    }
+    Ok(File { items })
+}
+
+impl Parser {
+    fn peek(&self) -> &Tok {
+        &self.toks[self.pos].tok
+    }
+    fn peek_at(&self, n: usize) -> &Tok {
+        &self.toks[(self.pos + n).min(self.toks.len() - 1)].tok
+    }
+    fn span(&self) -> Span {
+        self.toks[self.pos].span
+    }
+    fn prev_span(&self) -> Span {
+        self.toks[self.pos.saturating_sub(1)].span
+    }
+    fn bump(&mut self) -> Token {
+        let t = self.toks[self.pos].clone();
+        if t.tok != Tok::Eof {
+            self.pos += 1;
+        }
+        t
+    }
+    fn eat(&mut self, tok: &Tok) -> bool {
+        if self.peek() == tok {
+            self.bump();
+            true
+        } else {
+            false
+        }
+    }
+
+    fn unexpected(&self, expected: &str) -> Diagnostic {
+        Diagnostic::new("E0100", self.span(), format!("expected {expected}, found {}", self.peek().describe()))
+    }
+
+    fn expect(&mut self, tok: Tok) -> PResult<Span> {
+        if self.peek() == &tok {
+            Ok(self.bump().span)
+        } else {
+            let mut d = self.unexpected(&format!("`{}`", tok.text()));
+            if tok == Tok::Semi {
+                d = d.fix1(FixKind::Mechanical, "add `;`", self.prev_span().at_end(), ";");
+            }
+            Err(d)
+        }
+    }
+
+    fn ident(&mut self, what: &str) -> PResult<Ident> {
+        match self.peek().clone() {
+            Tok::Ident(name) => {
+                let span = self.bump().span;
+                Ok(Ident { name, span })
+            }
+            Tok::Result => Err(self.unexpected(what).note("`result` is reserved for ensures clauses", None)),
+            _ => Err(self.unexpected(what)),
+        }
+    }
+
+    fn item(&mut self) -> PResult<Item> {
+        match self.peek() {
+            Tok::Unit => self.unit_decl().map(Item::Unit),
+            Tok::Struct => self.struct_decl().map(Item::Struct),
+            Tok::Fn => self.fn_decl().map(Item::Fn),
+            Tok::Test => self.test_decl().map(Item::Test),
+            _ => Err(self.unexpected("`fn`, `struct`, `unit` or `test`")),
+        }
+    }
+
+    fn unit_decl(&mut self) -> PResult<UnitDecl> {
+        let start = self.bump().span;
+        let name = self.ident("unit name")?;
+        let def = if self.eat(&Tok::Assign) { Some(self.unit_expr()?) } else { None };
+        let end = self.expect(Tok::Semi)?;
+        Ok(UnitDecl { name, def, span: start.to(end) })
+    }
+
+    fn unit_expr(&mut self) -> PResult<UnitExpr> {
+        let start = self.span();
+        let mut terms = Vec::new();
+        let mut sign = 1;
+        let mut first = true;
+        loop {
+            if first && self.peek() == &Tok::Int(1) && self.peek_at(1) == &Tok::Slash {
+                // `1/s`
+                self.bump();
+            } else {
+                let name = self.ident("unit name")?;
+                let mut exp = 1;
+                if self.eat(&Tok::Caret) {
+                    let neg = self.eat(&Tok::Minus);
+                    match self.peek().clone() {
+                        Tok::Int(v) if v > 0 && v <= 64 => {
+                            self.bump();
+                            exp = if neg { -(v as i32) } else { v as i32 };
+                        }
+                        _ => return Err(self.unexpected("an exponent between 1 and 64")),
+                    }
+                }
+                terms.push((name, exp * sign));
+            }
+            first = false;
+            if self.eat(&Tok::Star) {
+                sign = 1;
+            } else if self.eat(&Tok::Slash) {
+                sign = -1;
+            } else {
+                break;
+            }
+        }
+        Ok(UnitExpr { terms, span: start.to(self.prev_span()) })
+    }
+
+    fn type_expr(&mut self) -> PResult<TypeExpr> {
+        let name = self.ident("a type")?;
+        let mut span = name.span;
+        let unit = if self.eat(&Tok::LBracket) {
+            let u = self.unit_expr()?;
+            span = span.to(self.expect(Tok::RBracket)?);
+            Some(u)
+        } else {
+            None
+        };
+        Ok(TypeExpr { name, unit, span })
+    }
+
+    fn struct_decl(&mut self) -> PResult<StructDecl> {
+        let start = self.bump().span;
+        let name = self.ident("struct name")?;
+        self.expect(Tok::LBrace)?;
+        let mut fields = Vec::new();
+        while self.peek() != &Tok::RBrace {
+            let f = self.ident("field name")?;
+            self.expect(Tok::Colon)?;
+            let t = self.type_expr()?;
+            fields.push((f, t));
+            if !self.eat(&Tok::Comma) {
+                break;
+            }
+        }
+        let end = self.expect(Tok::RBrace)?;
+        Ok(StructDecl { name, fields, span: start.to(end) })
+    }
+
+    fn uses_clause(&mut self) -> PResult<(Vec<Ident>, Option<Span>)> {
+        if !self.eat(&Tok::Uses) {
+            return Ok((Vec::new(), None));
+        }
+        let start = self.prev_span();
+        let mut uses = vec![self.ident("an effect name")?];
+        while self.eat(&Tok::Comma) {
+            uses.push(self.ident("an effect name")?);
+        }
+        Ok((uses, Some(start.to(self.prev_span()))))
+    }
+
+    fn fn_decl(&mut self) -> PResult<FnDecl> {
+        let start = self.bump().span;
+        let name = self.ident("function name")?;
+        self.expect(Tok::LParen)?;
+        let mut params = Vec::new();
+        while self.peek() != &Tok::RParen {
+            let pname = self.ident("parameter name")?;
+            self.expect(Tok::Colon)?;
+            let ty = self.type_expr()?;
+            params.push(Param { name: pname, ty });
+            if !self.eat(&Tok::Comma) {
+                break;
+            }
+        }
+        self.expect(Tok::RParen)?;
+        let ret = if self.eat(&Tok::Arrow) { Some(self.type_expr()?) } else { None };
+        let uses_insert = self.prev_span().at_end();
+        let (uses, uses_span) = self.uses_clause()?;
+        let mut requires = Vec::new();
+        let mut ensures = Vec::new();
+        loop {
+            match self.peek() {
+                Tok::Requires => {
+                    if !ensures.is_empty() {
+                        return Err(Diagnostic::new(
+                            "E0100",
+                            self.span(),
+                            "requires clauses come before ensures clauses",
+                        ));
+                    }
+                    self.bump();
+                    requires.push(self.expr_no_struct()?);
+                }
+                Tok::Ensures => {
+                    self.bump();
+                    ensures.push(self.expr_no_struct()?);
+                }
+                _ => break,
+            }
+        }
+        let body = self.block()?;
+        let span = start.to(body.span);
+        Ok(FnDecl { name, params, ret, uses, uses_span, uses_insert, requires, ensures, body, span })
+    }
+
+    fn test_decl(&mut self) -> PResult<TestDecl> {
+        let start = self.bump().span;
+        let (name, name_span) = match self.peek().clone() {
+            Tok::Str(s) => (s, self.bump().span),
+            _ => return Err(self.unexpected("a test name in quotes")),
+        };
+        let uses_insert = name_span.at_end();
+        let (uses, uses_span) = self.uses_clause()?;
+        let body = self.block()?;
+        let span = start.to(body.span);
+        Ok(TestDecl { name, name_span, uses, uses_span, uses_insert, body, span })
+    }
+
+    fn block(&mut self) -> PResult<Block> {
+        let start = self.expect(Tok::LBrace)?;
+        let mut stmts = Vec::new();
+        while self.peek() != &Tok::RBrace {
+            if self.peek() == &Tok::Eof {
+                return Err(self.unexpected("`}`"));
+            }
+            stmts.push(self.stmt()?);
+        }
+        let end = self.expect(Tok::RBrace)?;
+        Ok(Block { stmts, span: start.to(end) })
+    }
+
+    fn stmt(&mut self) -> PResult<Stmt> {
+        let start = self.span();
+        let kind = match self.peek() {
+            Tok::Let | Tok::Var => {
+                let mutable = self.peek() == &Tok::Var;
+                let kw_span = self.bump().span;
+                let name = self.ident("variable name")?;
+                if self.peek() != &Tok::Colon {
+                    return Err(self
+                        .unexpected("`:` and a type")
+                        .note("every binding states its type: let speed: f64[m/s] = 3.0[m/s];", None));
+                }
+                self.bump();
+                let ty = self.type_expr()?;
+                self.expect(Tok::Assign)?;
+                let init = self.expr()?;
+                self.expect(Tok::Semi)?;
+                StmtKind::Let { mutable, kw_span, name, ty, init }
+            }
+            Tok::If => return self.if_stmt(),
+            Tok::While => {
+                self.bump();
+                let cond = self.expr_no_struct()?;
+                let body = self.block()?;
+                StmtKind::While { cond, body }
+            }
+            Tok::For => {
+                self.bump();
+                let var = self.ident("loop variable")?;
+                self.expect(Tok::In)?;
+                let s = self.add()?;
+                self.expect(Tok::DotDot)?;
+                let e = self.add_no_struct()?;
+                let body = self.block()?;
+                StmtKind::For { var, start: s, end: e, body }
+            }
+            Tok::Return => {
+                self.bump();
+                let v = if self.peek() == &Tok::Semi { None } else { Some(self.expr()?) };
+                self.expect(Tok::Semi)?;
+                StmtKind::Return(v)
+            }
+            Tok::Break => {
+                self.bump();
+                self.expect(Tok::Semi)?;
+                StmtKind::Break
+            }
+            Tok::Continue => {
+                self.bump();
+                self.expect(Tok::Semi)?;
+                StmtKind::Continue
+            }
+            _ => {
+                let e = self.expr()?;
+                if self.eat(&Tok::Assign) {
+                    let value = self.expr()?;
+                    self.expect(Tok::Semi)?;
+                    StmtKind::Assign { target: e, value }
+                } else {
+                    self.expect(Tok::Semi)?;
+                    StmtKind::Expr(e)
+                }
+            }
+        };
+        Ok(Stmt { kind, span: start.to(self.prev_span()) })
+    }
+
+    fn if_stmt(&mut self) -> PResult<Stmt> {
+        let start = self.bump().span;
+        let cond = self.expr_no_struct()?;
+        let then = self.block()?;
+        let else_ = if self.eat(&Tok::Else) {
+            if self.peek() == &Tok::If {
+                Some(Box::new(Else::If(Box::new(self.if_stmt()?))))
+            } else {
+                Some(Box::new(Else::Block(self.block()?)))
+            }
+        } else {
+            None
+        };
+        Ok(Stmt { kind: StmtKind::If { cond, then, else_ }, span: start.to(self.prev_span()) })
+    }
+
+    // ---- expressions ----
+
+    pub fn expr(&mut self) -> PResult<Expr> {
+        self.or(true)
+    }
+    fn expr_no_struct(&mut self) -> PResult<Expr> {
+        self.or(false)
+    }
+
+    fn bin(op: BinOp, l: Expr, r: Expr) -> Expr {
+        let span = l.span.to(r.span);
+        Expr { kind: ExprKind::Binary(op, Box::new(l), Box::new(r)), span }
+    }
+
+    fn or(&mut self, s: bool) -> PResult<Expr> {
+        let mut l = self.and(s)?;
+        while self.eat(&Tok::OrOr) {
+            let r = self.and(s)?;
+            l = Self::bin(BinOp::Or, l, r);
+        }
+        Ok(l)
+    }
+
+    fn and(&mut self, s: bool) -> PResult<Expr> {
+        let mut l = self.cmp(s)?;
+        while self.eat(&Tok::AndAnd) {
+            let r = self.cmp(s)?;
+            l = Self::bin(BinOp::And, l, r);
+        }
+        Ok(l)
+    }
+
+    fn cmp_op(&self) -> Option<BinOp> {
+        Some(match self.peek() {
+            Tok::EqEq => BinOp::Eq,
+            Tok::NotEq => BinOp::Ne,
+            Tok::Lt => BinOp::Lt,
+            Tok::Le => BinOp::Le,
+            Tok::Gt => BinOp::Gt,
+            Tok::Ge => BinOp::Ge,
+            _ => return None,
+        })
+    }
+
+    fn cmp(&mut self, s: bool) -> PResult<Expr> {
+        let l = self.add_s(s)?;
+        if let Some(op) = self.cmp_op() {
+            self.bump();
+            let r = self.add_s(s)?;
+            if self.cmp_op().is_some() {
+                return Err(Diagnostic::new("E0391", l.span.to(self.span()), "comparisons cannot be chained"));
+            }
+            return Ok(Self::bin(op, l, r));
+        }
+        Ok(l)
+    }
+
+    fn add(&mut self) -> PResult<Expr> {
+        self.add_s(true)
+    }
+    fn add_no_struct(&mut self) -> PResult<Expr> {
+        self.add_s(false)
+    }
+
+    fn add_s(&mut self, s: bool) -> PResult<Expr> {
+        let mut l = self.mul(s)?;
+        loop {
+            let op = match self.peek() {
+                Tok::Plus => BinOp::Add,
+                Tok::Minus => BinOp::Sub,
+                _ => break,
+            };
+            self.bump();
+            let r = self.mul(s)?;
+            l = Self::bin(op, l, r);
+        }
+        Ok(l)
+    }
+
+    fn mul(&mut self, s: bool) -> PResult<Expr> {
+        let mut l = self.unary(s)?;
+        loop {
+            let op = match self.peek() {
+                Tok::Star => BinOp::Mul,
+                Tok::Slash => BinOp::Div,
+                Tok::Percent => BinOp::Rem,
+                _ => break,
+            };
+            self.bump();
+            let r = self.unary(s)?;
+            l = Self::bin(op, l, r);
+        }
+        Ok(l)
+    }
+
+    fn unary(&mut self, s: bool) -> PResult<Expr> {
+        let op = match self.peek() {
+            Tok::Minus => UnOp::Neg,
+            Tok::Bang => UnOp::Not,
+            _ => return self.postfix(s),
+        };
+        let start = self.bump().span;
+        let e = self.unary(s)?;
+        let span = start.to(e.span);
+        Ok(Expr { kind: ExprKind::Unary(op, Box::new(e)), span })
+    }
+
+    fn postfix(&mut self, s: bool) -> PResult<Expr> {
+        let mut e = self.primary(s)?;
+        while self.eat(&Tok::Dot) {
+            let f = self.ident("field name")?;
+            let span = e.span.to(f.span);
+            e = Expr { kind: ExprKind::Field(Box::new(e), f), span };
+        }
+        Ok(e)
+    }
+
+    fn primary(&mut self, s: bool) -> PResult<Expr> {
+        let start = self.span();
+        let kind = match self.peek().clone() {
+            Tok::Int(v) => {
+                self.bump();
+                ExprKind::Int(v)
+            }
+            Tok::Float(v) => {
+                self.bump();
+                let unit = if self.eat(&Tok::LBracket) {
+                    let u = self.unit_expr()?;
+                    self.expect(Tok::RBracket)?;
+                    Some(u)
+                } else {
+                    None
+                };
+                ExprKind::Float(v, unit)
+            }
+            Tok::True => {
+                self.bump();
+                ExprKind::Bool(true)
+            }
+            Tok::False => {
+                self.bump();
+                ExprKind::Bool(false)
+            }
+            Tok::Str(v) => {
+                self.bump();
+                ExprKind::Str(v)
+            }
+            Tok::Result => {
+                self.bump();
+                ExprKind::Result
+            }
+            Tok::LParen => {
+                self.bump();
+                let e = self.expr()?;
+                self.expect(Tok::RParen)?;
+                ExprKind::Paren(Box::new(e))
+            }
+            Tok::Ident(_) => {
+                let name = self.ident("a name")?;
+                if self.eat(&Tok::LParen) {
+                    let mut args = Vec::new();
+                    while self.peek() != &Tok::RParen {
+                        let arg_name = if matches!(self.peek(), Tok::Ident(_)) && self.peek_at(1) == &Tok::Colon {
+                            let n = self.ident("argument name")?;
+                            self.bump();
+                            Some(n)
+                        } else {
+                            None
+                        };
+                        let value = self.expr()?;
+                        args.push(Arg { name: arg_name, value });
+                        if !self.eat(&Tok::Comma) {
+                            break;
+                        }
+                    }
+                    self.expect(Tok::RParen)?;
+                    ExprKind::Call { callee: name, args }
+                } else if s && self.peek() == &Tok::LBrace {
+                    self.bump();
+                    let mut fields = Vec::new();
+                    while self.peek() != &Tok::RBrace {
+                        let f = self.ident("field name")?;
+                        self.expect(Tok::Colon)?;
+                        let v = self.expr()?;
+                        fields.push((f, v));
+                        if !self.eat(&Tok::Comma) {
+                            break;
+                        }
+                    }
+                    self.expect(Tok::RBrace)?;
+                    ExprKind::StructLit { name, fields }
+                } else {
+                    ExprKind::Name(name)
+                }
+            }
+            _ => return Err(self.unexpected("an expression")),
+        };
+        Ok(Expr { kind, span: start.to(self.prev_span()) })
+    }
+}

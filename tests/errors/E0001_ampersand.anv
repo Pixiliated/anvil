@@ -1,0 +1,5 @@
+// expect: E0001
+fn main() -> i64 {
+    let x: bool = true & false;
+    return 0;
+}

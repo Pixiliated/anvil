@@ -1,0 +1,6 @@
+// expect: E0311
+fn one() -> i64 { return 1; }
+fn main() -> i64 {
+    one() = 2;
+    return 0;
+}

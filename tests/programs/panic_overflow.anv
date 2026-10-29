@@ -1,0 +1,8 @@
+// exit: 101
+// panic: integer overflow in `+` at tests/programs/panic_overflow.anv:6:11
+fn main() uses io {
+    let big: i64 = 9223372036854775807;
+    print("before");
+    print(big + 1);
+    print("after");
+}

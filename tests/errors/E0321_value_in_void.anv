@@ -1,0 +1,5 @@
+// expect: E0321
+fn f() {
+    return 1;
+}
+fn main() -> i64 { f(); return 0; }

@@ -1,0 +1,21 @@
+unit m;
+unit s;
+unit kg;
+unit N = kg*m/s^2;
+unit Hz = 1/s;
+unit J = N*m;
+
+fn kinetic(mass: f64[kg], speed: f64[m/s]) -> f64[J] {
+    return 0.5 * mass * speed * speed;
+}
+
+fn main() uses io {
+    let d: f64[m] = 100.0[m];
+    let t: f64[s] = 9.58[s];
+    print(d / t);
+    print(kinetic(mass: 80.0[kg], speed: d / t));
+    print(2.0[Hz] * t);
+    print(sqrt(16.0[m^2]));
+    print(d / 1.0[m]);
+    print(3.0[m] * 2.0[m], " ", 1.0[s^-1], " ", -4.0[N]);
+}

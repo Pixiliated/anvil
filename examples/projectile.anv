@@ -1,0 +1,61 @@
+// Integrates a projectile under gravity until it lands, with units checked at compile time.
+
+unit m;
+unit s;
+unit kg;
+unit N = kg*m/s^2;
+
+struct Body {
+    mass: f64[kg],
+    height: f64[m],
+    speed: f64[m/s],
+}
+
+fn step(body: Body, force: f64[N], dt: f64[s]) -> Body
+    requires dt > 0.0[s]
+    requires body.mass > 0.0[kg]
+{
+    let accel: f64[m/s^2] = force / body.mass;
+    let speed: f64[m/s] = body.speed + accel * dt;
+    return Body { mass: body.mass, height: body.height + speed * dt, speed: speed };
+}
+
+fn weight(mass: f64[kg]) -> f64[N]
+    ensures result <= 0.0[N]
+{
+    return mass * -9.81[m/s^2];
+}
+
+fn flight_steps(start: Body, dt: f64[s]) -> i64
+    requires start.height >= 0.0[m]
+    ensures result >= 0
+{
+    var body: Body = start;
+    var steps: i64 = 0;
+    while body.height > 0.0[m] || steps == 0 {
+        body = step(body: body, force: weight(body.mass), dt: dt);
+        steps = steps + 1;
+    }
+    return steps;
+}
+
+fn main() -> i64 uses io {
+    let ball: Body = Body { mass: 0.43[kg], height: 0.0[m], speed: 20.0[m/s] };
+    let dt: f64[s] = 0.01[s];
+    let steps: i64 = flight_steps(start: ball, dt: dt);
+    print("landed after ", steps, " steps (", to_f64(steps) * dt, ")");
+    print("weight: ", weight(ball.mass));
+    return 0;
+}
+
+test "a dropped ball falls" {
+    let ball: Body = Body { mass: 1.0[kg], height: 10.0[m], speed: 0.0[m/s] };
+    let after: Body = step(body: ball, force: weight(ball.mass), dt: 0.1[s]);
+    assert(after.height < ball.height);
+    assert(after.speed < 0.0[m/s]);
+}
+
+test "flight takes at least one step" {
+    let ball: Body = Body { mass: 1.0[kg], height: 0.0[m], speed: 1.0[m/s] };
+    assert(flight_steps(start: ball, dt: 0.01[s]) >= 1);
+}
