@@ -1,256 +1,142 @@
-//! The `anvil` command. Quiet by default (failures and one summary line), `--json` for tools.
-//! Exit codes: 0 success, 1 compile errors or failing tests, 2 usage errors; `run` passes through
-//! the program's own exit code, 101 on panic.
+//! The `anvil` command. Every command is an `anvil_ops` operation; this file only parses
+//! arguments against `anvil_ops::COMMANDS` and prints the report. Quiet by default (failures and
+//! one summary line), `--json` for tools. Exit codes: 0 success, 1 compile errors or failures,
+//! 2 usage errors; `run` passes through the program's own exit code, 101 on panic.
 
-use anvil_front::diag::{self, Diagnostic};
-use anvil_front::ir::{Program, PANIC_EXIT_CODE};
-use anvil_front::span::SourceFile;
-use serde_json::json;
-use std::path::{Path, PathBuf};
+use anvil_ops::{Command, Report, COMMANDS};
+use std::collections::HashMap;
+use std::io::Write;
+use std::path::Path;
 use std::process::ExitCode;
 
-const SPEC: &str = include_str!("../../../docs/SPEC.md");
-
-const USAGE: &str = "\
-usage: anvil <command> [args]
-
-  check <file.anv> [--json]               type-check only
-  run   <file.anv> [--json]               interpret main (reference semantics)
-  build <file.anv> [-o out.exe] [--asm] [--json]
-                                          compile main to a native executable;
-                                          --asm prints each function's machine code
-  test  <file.anv> [--json]               run every test block
-  explain [CODE] [--json]                 explain an error code (no code: list all)
-  spec                                    print the language specification";
-
-struct Args {
-    command: String,
-    file: Option<String>,
-    out: Option<String>,
-    json: bool,
-    asm: bool,
-}
-
-fn parse_args() -> Result<Args, String> {
-    let mut it = std::env::args().skip(1);
-    let command = it.next().ok_or("missing command")?;
-    let mut a = Args { command, file: None, out: None, json: false, asm: false };
-    while let Some(arg) = it.next() {
-        match arg.as_str() {
-            "--json" => a.json = true,
-            "--asm" => a.asm = true,
-            "-o" => a.out = Some(it.next().ok_or("-o needs a path")?),
-            s if s.starts_with('-') => return Err(format!("unknown option `{s}`")),
-            s => {
-                if a.file.is_some() {
-                    return Err(format!("unexpected argument `{s}`"));
-                }
-                a.file = Some(s.to_string());
+fn usage() -> String {
+    let mut s = String::from("usage: anvil <command> [args] [--json]\n\n");
+    for c in COMMANDS {
+        let mut line = format!("  {}", c.name);
+        for p in c.positionals {
+            match p.strip_suffix('?') {
+                Some(opt) => line.push_str(&format!(" [{}]", opt.to_uppercase())),
+                None => line.push_str(&format!(" <{}>", p.to_uppercase())),
             }
         }
+        for (name, value, _) in c.options {
+            if value.is_empty() {
+                line.push_str(&format!(" [--{name}]"));
+            } else {
+                line.push_str(&format!(" [--{name} {value}]"));
+            }
+        }
+        s.push_str(&format!("{line:<48} {}\n", c.summary));
     }
-    Ok(a)
+    s.push_str("\n  -o is short for --out. --json prints the result as JSON (for run, on stderr).");
+    s
+}
+
+struct Parsed {
+    command: &'static Command,
+    positionals: Vec<String>,
+    options: HashMap<&'static str, Option<String>>,
+    json: bool,
+}
+
+fn parse_args() -> Result<Parsed, String> {
+    let mut it = std::env::args().skip(1);
+    let name = it.next().ok_or("missing command")?;
+    let command = COMMANDS.iter().find(|c| c.name == name).ok_or(format!("unknown command `{name}`"))?;
+    let mut p = Parsed { command, positionals: Vec::new(), options: HashMap::new(), json: false };
+    while let Some(arg) = it.next() {
+        let long = match arg.as_str() {
+            "--json" => {
+                p.json = true;
+                continue;
+            }
+            "-o" => "out",
+            a if a.starts_with("--") => &a[2..],
+            a if a.starts_with('-') && a.len() > 1 => return Err(format!("unknown option `{a}`")),
+            _ => {
+                p.positionals.push(arg);
+                continue;
+            }
+        };
+        let Some((opt, value, _)) = command.options.iter().find(|(n, _, _)| *n == long) else {
+            let valid: Vec<String> = command.options.iter().map(|(n, _, _)| format!("--{n}")).collect();
+            return Err(format!(
+                "`{name}` has no option `--{long}`{}",
+                if valid.is_empty() { String::new() } else { format!("; it takes {}", valid.join(", ")) }
+            ));
+        };
+        let v = if value.is_empty() { None } else { Some(it.next().ok_or(format!("--{opt} needs a value"))?) };
+        p.options.insert(opt, v);
+    }
+    let required = command.positionals.iter().filter(|p| !p.ends_with('?')).count();
+    if p.positionals.len() < required || p.positionals.len() > command.positionals.len() {
+        let names: Vec<&str> = command.positionals.iter().map(|p| p.trim_end_matches('?')).collect();
+        return Err(format!(
+            "`{name}` takes {} ({}), found {} argument(s)",
+            command.positionals.len(),
+            names.join(", "),
+            p.positionals.len()
+        ));
+    }
+    Ok(p)
+}
+
+fn number<T: std::str::FromStr>(what: &str, text: &str) -> Result<T, String> {
+    text.parse().map_err(|_| format!("{what} must be a whole number, found `{text}`"))
+}
+
+fn dispatch(p: &Parsed) -> Result<Report, String> {
+    let root = Path::new(".");
+    let pos = |i: usize| p.positionals.get(i).map(String::as_str);
+    let file = pos(0).unwrap_or("");
+    let steps = match p.options.get("max-steps") {
+        Some(Some(v)) => Some(number::<u64>("--max-steps", v)?),
+        _ => None,
+    };
+    Ok(match p.command.name {
+        "check" => anvil_ops::check(root, file),
+        "run" => anvil_ops::run(root, file, steps, &mut std::io::stdout()),
+        "build" => {
+            let out = p.options.get("out").and_then(|v| v.as_deref());
+            anvil_ops::build(root, file, out, p.options.contains_key("asm"))
+        }
+        "test" => anvil_ops::test(root, file, steps),
+        "fix" => anvil_ops::fix(root, file),
+        "outline" => anvil_ops::outline(root, file),
+        "type-at" => anvil_ops::type_at(root, file, number("line", pos(1).unwrap())?, number("col", pos(2).unwrap())?),
+        "refs" => anvil_ops::refs(root, file, pos(1).unwrap()),
+        "explain" => anvil_ops::explain(pos(0)),
+        "spec" => anvil_ops::spec(),
+        other => unreachable!("command `{other}` is in COMMANDS but not dispatched"),
+    })
 }
 
 fn main() -> ExitCode {
-    let args = match parse_args() {
-        Ok(a) => a,
+    let parsed = match parse_args() {
+        Ok(p) => p,
         Err(e) => {
-            eprintln!("error: {e}\n\n{USAGE}");
-            return ExitCode::from(2);
+            eprintln!("error: {e}\n\n{}", usage());
+            return ExitCode::from(anvil_ops::EXIT_USAGE);
         }
     };
-    if (args.out.is_some() || args.asm) && args.command != "build" {
-        eprintln!("error: -o and --asm only apply to build");
-        return ExitCode::from(2);
-    }
-    match args.command.as_str() {
-        "spec" => {
-            print!("{SPEC}");
-            ExitCode::SUCCESS
-        }
-        "explain" => explain(&args),
-        "check" | "run" | "build" | "test" => {
-            let Some(file) = &args.file else {
-                eprintln!("error: {} needs a source file\n\n{USAGE}", args.command);
-                return ExitCode::from(2);
-            };
-            let text = match std::fs::read_to_string(file) {
-                Ok(t) => t,
-                Err(e) => {
-                    eprintln!("error: cannot read {file}: {e}");
-                    return ExitCode::from(2);
-                }
-            };
-            let src = SourceFile::new(file.replace('\\', "/"), text);
-            let program = match anvil_front::compile(&src) {
-                Ok(p) => p,
-                Err(diags) => return report(&src, &diags, args.json),
-            };
-            match args.command.as_str() {
-                "check" => {
-                    if args.json {
-                        println!("{}", json!({ "ok": true, "diagnostics": [] }));
-                    }
-                    ExitCode::SUCCESS
-                }
-                "run" => run(&src, program, args.json),
-                "build" => build(&src, &program, file, &args),
-                _ => test(program, args.json),
-            }
-        }
-        other => {
-            eprintln!("error: unknown command `{other}`\n\n{USAGE}");
-            ExitCode::from(2)
-        }
-    }
-}
-
-fn report(src: &SourceFile, diags: &[Diagnostic], json: bool) -> ExitCode {
-    if json {
-        let ds: Vec<_> = diags.iter().map(|d| diag::to_json(src, d)).collect();
-        println!("{}", json!({ "ok": false, "diagnostics": ds }));
-    } else {
-        for d in diags {
-            eprintln!("{}", diag::render(src, d));
-        }
-        eprintln!("{} error(s)", diags.len());
-    }
-    ExitCode::from(1)
-}
-
-fn no_main(src: &SourceFile, json: bool) -> ExitCode {
-    let d = Diagnostic::new("E0350", anvil_front::span::Span::new(0, 0), "this file has no main function");
-    report(src, &[d], json)
-}
-
-fn run(src: &SourceFile, program: Program, json: bool) -> ExitCode {
-    if program.main.is_none() {
-        return no_main(src, json);
-    }
-    let outcome = anvil_interp::run_on_big_stack(move || {
-        let stdout = std::io::stdout();
-        let mut lock = stdout.lock();
-        match anvil_interp::run_main(&program, &mut lock) {
-            anvil_interp::Outcome::Exit(c) => Ok(c),
-            anvil_interp::Outcome::Panicked(m) => Err(m),
-        }
-    });
-    match outcome {
-        Ok(code) => ExitCode::from(code as u8),
-        Err(m) => {
-            if json {
-                eprintln!("{}", json!({ "panic": m }));
-            } else {
-                eprintln!("panic: {m}");
-            }
-            ExitCode::from(PANIC_EXIT_CODE as u8)
-        }
-    }
-}
-
-fn build(src: &SourceFile, program: &Program, file: &str, args: &Args) -> ExitCode {
-    let json = args.json;
-    if program.main.is_none() {
-        return no_main(src, json);
-    }
-    let out: PathBuf = match &args.out {
-        Some(o) => PathBuf::from(o),
-        None => Path::new(file).with_extension("exe"),
-    };
-    let work = std::env::temp_dir().join(format!("anvil_build_{}", std::process::id()));
-    let result = anvil_codegen::build_exe(program, &out, &work, args.asm);
-    let _ = std::fs::remove_dir_all(&work);
-    match result {
-        Ok(listing) => {
-            if json {
-                let mut v = json!({ "ok": true, "output": out.display().to_string() });
-                if args.asm {
-                    v["asm"] = json!(listing);
-                }
-                println!("{v}");
-            } else if args.asm {
-                print!("{listing}");
-            }
-            ExitCode::SUCCESS
-        }
+    let report = match dispatch(&parsed) {
+        Ok(r) => r,
         Err(e) => {
-            if json {
-                println!("{}", json!({ "ok": false, "error": e }));
-            } else {
-                eprintln!("error: {e}");
-            }
-            ExitCode::from(1)
+            eprintln!("error: {e}\n\n{}", usage());
+            return ExitCode::from(anvil_ops::EXIT_USAGE);
         }
-    }
-}
-
-fn test(program: Program, json: bool) -> ExitCode {
-    let results = anvil_interp::run_on_big_stack(move || {
-        let mut results = Vec::new();
-        for (i, t) in program.tests.iter().enumerate() {
-            let mut out = Vec::new();
-            let r = anvil_interp::run_test(&program, i, &mut out);
-            results.push((t.name.clone(), r, String::from_utf8_lossy(&out).into_owned()));
+    };
+    if parsed.json {
+        // `run` keeps stdout for the program's own output.
+        if parsed.command.name == "run" {
+            eprintln!("{}", report.json);
+        } else {
+            println!("{}", report.json);
         }
-        results
-    });
-    let failed = results.iter().filter(|r| r.1.is_err()).count();
-    let passed = results.len() - failed;
-    if json {
-        let tests: Vec<_> = results
-            .iter()
-            .map(|(name, r, out)| match r {
-                Ok(()) => json!({ "name": name, "ok": true }),
-                Err(m) => json!({ "name": name, "ok": false, "panic": m, "output": out }),
-            })
-            .collect();
-        println!("{}", json!({ "ok": failed == 0, "passed": passed, "failed": failed, "tests": tests }));
     } else {
-        for (name, r, out) in &results {
-            if let Err(m) = r {
-                println!("FAIL \"{name}\": {m}");
-                for line in out.lines() {
-                    println!("  | {line}");
-                }
-            }
-        }
-        println!("{passed} passed, {failed} failed");
+        print!("{}", report.stdout);
+        eprint!("{}", report.stderr);
     }
-    if failed == 0 {
-        ExitCode::SUCCESS
-    } else {
-        ExitCode::from(1)
-    }
-}
-
-fn explain(args: &Args) -> ExitCode {
-    match &args.file {
-        Some(code) => match diag::explain(code) {
-            Some(text) => {
-                if args.json {
-                    println!("{}", json!({ "code": code, "explanation": text }));
-                } else {
-                    println!("{code}: {text}");
-                }
-                ExitCode::SUCCESS
-            }
-            None => {
-                eprintln!("error: unknown error code `{code}`");
-                ExitCode::from(2)
-            }
-        },
-        None => {
-            if args.json {
-                let all: Vec<_> =
-                    diag::ALL_CODES.iter().map(|c| json!({ "code": c, "explanation": diag::explain(c) })).collect();
-                println!("{}", serde_json::Value::Array(all));
-            } else {
-                for c in diag::ALL_CODES {
-                    println!("{c}: {}", diag::explain(c).unwrap());
-                }
-            }
-            ExitCode::SUCCESS
-        }
-    }
+    let _ = std::io::stdout().flush();
+    ExitCode::from(report.exit)
 }

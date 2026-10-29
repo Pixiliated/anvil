@@ -1,9 +1,16 @@
 [workspace]
 resolver = "2"
-members = ["crates/anvil_front", "crates/anvil_interp", "crates/anvil_codegen", "crates/anvil_cli"]
+members = [
+    "crates/anvil_front",
+    "crates/anvil_interp",
+    "crates/anvil_codegen",
+    "crates/anvil_ops",
+    "crates/anvil_cli",
+    "crates/anvil_mcp",
+]
 
 [workspace.package]
-version = "0.2.0"
+version = "0.3.0"
 edition = "2021"
 license = "MIT OR Apache-2.0"
 

@@ -235,7 +235,122 @@ fn usage_errors_are_loud() {
     assert_eq!(anvil(&["check", "examples/projectile.anv", "--verbose"]).status.code(), Some(2));
     assert_eq!(anvil(&["run", "does/not/exist.anv"]).status.code(), Some(2));
     assert_eq!(anvil(&["explain", "E9999"]).status.code(), Some(2));
+    assert_eq!(anvil(&["type-at", "examples/orders.anv", "12"]).status.code(), Some(2));
+    assert_eq!(anvil(&["type-at", "examples/orders.anv", "12", "x"]).status.code(), Some(2));
+    assert_eq!(anvil(&["type-at", "examples/orders.anv", "999", "1"]).status.code(), Some(2));
+    assert_eq!(anvil(&["build", "examples/orders.anv", "--max-steps", "3"]).status.code(), Some(2));
+    // `run --json` keeps stdout for the program and reports on stderr.
     let no_main = anvil(&["run", "tests/test_blocks.anv", "--json"]);
     assert_eq!(no_main.status.code(), Some(1));
-    assert!(String::from_utf8_lossy(&no_main.stdout).contains("E0350"));
+    assert!(String::from_utf8_lossy(&no_main.stderr).contains("E0350"));
+}
+
+fn json_of(out: &Output) -> serde_json::Value {
+    serde_json::from_slice(&out.stdout)
+        .unwrap_or_else(|e| panic!("not JSON ({e}): {}", String::from_utf8_lossy(&out.stdout)))
+}
+
+/// Column (1-based) of the first `needle` on 1-based `line` of `rel`.
+fn col_of(rel: &str, line: usize, needle: &str) -> String {
+    let text = std::fs::read_to_string(root().join(rel)).unwrap();
+    let l = text.lines().nth(line - 1).unwrap();
+    (l.find(needle).unwrap_or_else(|| panic!("`{needle}` not on line {line}: {l}")) + 1).to_string()
+}
+
+#[test]
+fn type_at_names_types_and_declarations() {
+    let f = "examples/orders.anv";
+    let field = json_of(&anvil(&["type-at", f, "44", &col_of(f, 44, "weight"), "--json"]));
+    assert_eq!(field["type"], "f64[kg]", "{field}");
+    assert_eq!(field["declaration"]["name"], "Product.weight", "{field}");
+    assert_eq!(field["declaration"]["kind"], "field", "{field}");
+    assert_eq!(field["declaration"]["defined_at"]["line"], 7, "{field}");
+
+    let binding = json_of(&anvil(&["type-at", f, "55", &col_of(f, 55, "max_weight"), "--json"]));
+    assert_eq!(binding["type"], "f64[kg]", "{binding}");
+    assert_eq!(binding["declaration"]["kind"], "local", "{binding}");
+    assert_eq!(binding["declaration"]["defined_at"]["line"], 54, "{binding}");
+
+    // Inside an interpolation: the innermost expression is the call, the name is the function.
+    let call = json_of(&anvil(&["type-at", f, "89", &col_of(f, 89, "money"), "--json"]));
+    assert_eq!(call["text"], "money(value)", "{call}");
+    assert_eq!(call["type"], "str", "{call}");
+    assert_eq!(call["declaration"]["kind"], "fn", "{call}");
+    assert_eq!(call["declaration"]["detail"], "fn money(cents: i64) -> str", "{call}");
+
+    let nothing = anvil(&["type-at", f, "1", "1", "--json"]);
+    assert_eq!(nothing.status.code(), Some(1));
+}
+
+#[test]
+fn type_at_works_in_files_with_type_errors() {
+    let v = json_of(&anvil(&["type-at", "tests/errors/E0400_missing_arm.anv", "19", "20", "--json"]));
+    assert_eq!(v["declaration"]["name"], "Dir.South", "{v}");
+    assert_eq!(v["errors_in_file"], 1, "{v}");
+}
+
+#[test]
+fn refs_list_every_use() {
+    let f = "examples/orders.anv";
+    let text = std::fs::read_to_string(root().join(f)).unwrap();
+    let money = json_of(&anvil(&["refs", f, "money", "--json"]));
+    let uses = money["declarations"][0]["uses"].as_array().unwrap();
+    assert_eq!(uses.len(), text.matches("money(").count() - 1, "{money}");
+    let weight = json_of(&anvil(&["refs", f, "Product.weight", "--json"]));
+    let lines: Vec<i64> =
+        weight["declarations"][0]["uses"].as_array().unwrap().iter().map(|u| u["line"].as_i64().unwrap()).collect();
+    assert_eq!(lines, vec![44, 100, 101, 102], "{weight}");
+    let courier = json_of(&anvil(&["refs", f, "Shipping.Courier", "--json"]));
+    let lines: Vec<i64> =
+        courier["declarations"][0]["uses"].as_array().unwrap().iter().map(|u| u["line"].as_i64().unwrap()).collect();
+    assert_eq!(lines, vec![54, 109, 111], "{courier}");
+    let unit = json_of(&anvil(&["refs", f, "kg", "--json"]));
+    assert_eq!(unit["declarations"][0]["kind"], "unit", "{unit}");
+
+    let missing = anvil(&["refs", f, "mony", "--json"]);
+    assert_eq!(missing.status.code(), Some(1));
+    let v = json_of(&missing);
+    assert!(v["declared"].as_array().unwrap().iter().any(|n| n == "money"), "{v}");
+    assert_eq!(v["suggestion"], "money", "{v}");
+}
+
+#[test]
+fn outline_lists_items_without_checking() {
+    let v = json_of(&anvil(&["outline", "examples/orders.anv", "--json"]));
+    let items = v["items"].as_array().unwrap();
+    let names: Vec<&str> = items.iter().map(|i| i["name"].as_str().unwrap()).collect();
+    assert_eq!(&names[..4], &["kg", "Product", "Line", "Shipping"], "{v}");
+    let f = items.iter().find(|i| i["name"] == "line_total").unwrap();
+    assert_eq!(f["signature"], "fn line_total(catalog: [Product], line: Line) -> Result[i64, str]");
+    // A file with type errors still has an outline.
+    assert!(anvil(&["outline", "tests/errors/E0400_missing_arm.anv"]).status.success());
+}
+
+#[test]
+fn fix_applies_mechanical_fixes_until_clean() {
+    let tmp = std::env::temp_dir().join(format!("anvil_cli_fix_{}", std::process::id()));
+    std::fs::create_dir_all(&tmp).unwrap();
+    let clean = tmp.join("clean.anv");
+    std::fs::copy(root().join("tests/errors/E0303_print_args.anv"), &clean).unwrap();
+    let out = anvil(&["fix", clean.to_str().unwrap(), "--json"]);
+    assert_eq!(out.status.code(), Some(0), "{}", String::from_utf8_lossy(&out.stdout));
+    assert!(anvil(&["check", clean.to_str().unwrap()]).status.success());
+    // Errors that need a decision stay, and fix says so.
+    let stuck = tmp.join("stuck.anv");
+    std::fs::copy(root().join("tests/errors/E0400_missing_arm.anv"), &stuck).unwrap();
+    let before = std::fs::read(&stuck).unwrap();
+    let out = anvil(&["fix", stuck.to_str().unwrap(), "--json"]);
+    assert_eq!(out.status.code(), Some(1));
+    assert_eq!(json_of(&out)["diagnostics"][0]["code"], "E0400");
+    assert_eq!(std::fs::read(&stuck).unwrap(), before, "a changes_meaning fix was applied");
+    let _ = std::fs::remove_dir_all(&tmp);
+}
+
+#[test]
+fn run_stops_at_the_step_limit() {
+    let out = anvil(&["run", "tests/programs/panic_index.anv", "--max-steps", "5"]);
+    assert_eq!(out.status.code(), Some(1));
+    assert!(String::from_utf8_lossy(&out.stderr).contains("step limit"));
+    let out = anvil(&["test", "tests/test_blocks.anv", "--max-steps", "1", "--json"]);
+    assert_eq!(json_of(&out)["passed"], 0);
 }

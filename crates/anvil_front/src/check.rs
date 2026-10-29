@@ -25,9 +25,48 @@ struct FuncSig {
     span: Span,
 }
 
+/// A declared name: functions, types, fields, variants, units, parameters and locals.
+#[derive(Clone, Debug)]
+pub struct Def {
+    /// The span of the name where it is declared; uses point here.
+    pub span: Span,
+    /// `area`, `Shape`, `Shape.Circle`, `Body.mass`, `Shape.Circle.radius`, or a local's name.
+    pub name: String,
+    /// fn, struct, enum, field, variant, unit, param or local.
+    pub kind: &'static str,
+    /// The declaration's source text for items; the type for fields, parameters and locals.
+    pub detail: String,
+}
+
+/// What the checker learned about a file, kept even when it has errors: every declaration,
+/// every use of a declared name, and the type of every expression. `anvil type-at` and
+/// `anvil refs` answer from these.
+#[derive(Clone, Debug, Default)]
+pub struct Facts {
+    pub defs: Vec<Def>,
+    /// (span of the use, span of the declaration it names)
+    pub uses: Vec<(Span, Span)>,
+    /// (span of the expression, its type as shown in errors)
+    pub exprs: Vec<(Span, String)>,
+}
+
+/// Everything `check` finds; `program` is None when there are errors.
+pub struct Analysis {
+    pub program: Option<Program>,
+    pub diags: Vec<Diagnostic>,
+    pub facts: Facts,
+}
+
 pub struct Checker<'a> {
     src: &'a SourceFile,
     diags: Vec<Diagnostic>,
+    facts: Facts,
+    /// Declaration spans of types, struct fields, enum variants and their fields, and units.
+    type_spans: HashMap<String, Span>,
+    field_spans: HashMap<(StructId, usize), Span>,
+    variant_spans: HashMap<(EnumId, usize), Span>,
+    variant_field_spans: HashMap<(EnumId, usize, usize), Span>,
+    unit_spans: HashMap<String, Span>,
     units: HashMap<String, Unit>,
     structs: Vec<StructDef>,
     struct_index: HashMap<String, StructId>,
@@ -69,9 +108,23 @@ struct Body {
 }
 
 pub fn check(src: &SourceFile, file: &ast::File) -> Result<Program, Vec<Diagnostic>> {
+    let a = analyze(src, file);
+    match a.program {
+        Some(p) => Ok(p),
+        None => Err(a.diags),
+    }
+}
+
+pub fn analyze(src: &SourceFile, file: &ast::File) -> Analysis {
     let mut c = Checker {
         src,
         diags: Vec::new(),
+        facts: Facts::default(),
+        type_spans: HashMap::new(),
+        field_spans: HashMap::new(),
+        variant_spans: HashMap::new(),
+        variant_field_spans: HashMap::new(),
+        unit_spans: HashMap::new(),
         units: HashMap::new(),
         structs: Vec::new(),
         struct_index: HashMap::new(),
@@ -82,12 +135,9 @@ pub fn check(src: &SourceFile, file: &ast::File) -> Result<Program, Vec<Diagnost
         func_index: HashMap::new(),
     };
     let program = c.program(file);
-    if c.diags.is_empty() {
-        Ok(program)
-    } else {
-        c.diags.sort_by_key(|d| (d.span.start, d.code));
-        Err(c.diags)
-    }
+    c.diags.sort_by_key(|d| (d.span.start, d.code));
+    let program = c.diags.is_empty().then_some(program);
+    Analysis { program, diags: c.diags, facts: c.facts }
 }
 
 /// Edit distance counting a swap of adjacent letters as one edit (optimal string alignment),
@@ -115,7 +165,8 @@ fn distance(a: &str, b: &str) -> usize {
     d[a.len()][b.len()]
 }
 
-fn closest<'b>(name: &str, candidates: impl Iterator<Item = &'b String>) -> Option<String> {
+/// The candidate within a small edit distance of `name`, for "did you mean" suggestions.
+pub fn closest<'b>(name: &str, candidates: impl Iterator<Item = &'b String>) -> Option<String> {
     let limit = (name.len() / 3).max(1);
     candidates
         .filter(|c| c.as_str() != name)
@@ -128,6 +179,16 @@ fn closest<'b>(name: &str, candidates: impl Iterator<Item = &'b String>) -> Opti
 impl<'a> Checker<'a> {
     fn err(&mut self, d: Diagnostic) {
         self.diags.push(d);
+    }
+
+    fn def(&mut self, span: Span, name: impl Into<String>, kind: &'static str, detail: impl Into<String>) {
+        self.facts.defs.push(Def { span, name: name.into(), kind, detail: detail.into() });
+    }
+
+    fn note_use(&mut self, span: Span, def: Option<Span>) {
+        if let Some(def) = def {
+            self.facts.uses.push((span, def));
+        }
     }
 
     fn show(&self, ty: &Ty) -> String {
@@ -210,6 +271,9 @@ impl<'a> Checker<'a> {
             if !self.check_new_name(&d.name, "unit", &mut seen) {
                 continue;
             }
+            self.unit_spans.insert(d.name.name.clone(), d.name.span);
+            let text = self.text(d.span);
+            self.def(d.name.span, d.name.name.clone(), "unit", text);
             match &d.def {
                 None => {
                     self.units.insert(d.name.name.clone(), Unit::base(&d.name.name));
@@ -244,6 +308,8 @@ impl<'a> Checker<'a> {
         }
         let mut u = Unit::dimensionless();
         for (term, exp) in &expr.terms {
+            let def = self.unit_spans.get(&term.name).copied();
+            self.note_use(term.span, def);
             let t = if aliases.contains_key(&term.name) && !self.units.contains_key(&term.name) {
                 self.resolve_alias(&term.name, aliases, visiting)?
             } else {
@@ -257,7 +323,10 @@ impl<'a> Checker<'a> {
 
     fn lookup_unit(&mut self, name: &ast::Ident) -> Option<Unit> {
         if let Some(u) = self.units.get(&name.name) {
-            return Some(u.clone());
+            let u = u.clone();
+            let def = self.unit_spans.get(&name.name).copied();
+            self.note_use(name.span, def);
+            return Some(u);
         }
         let mut d = Diagnostic::new("E0200", name.span, format!("unknown unit `{}`", name.name));
         if let Some(s) = closest(&name.name, self.units.keys()) {
@@ -324,11 +393,15 @@ impl<'a> Checker<'a> {
                 Some(u) => self.unit_expr(u).map(Ty::F64).unwrap_or(Ty::Error),
             },
             _ => {
-                if let Some(id) = self.struct_index.get(n) {
-                    return Ty::Struct(*id);
+                if let Some(id) = self.struct_index.get(n).copied() {
+                    let def = self.type_spans.get(n).copied();
+                    self.note_use(name.span, def);
+                    return Ty::Struct(id);
                 }
-                if let Some(id) = self.enum_index.get(n) {
-                    return Ty::Enum(*id);
+                if let Some(id) = self.enum_index.get(n).copied() {
+                    let def = self.type_spans.get(n).copied();
+                    self.note_use(name.span, def);
+                    return Ty::Enum(id);
                 }
                 let mut cands: Vec<String> = TYPE_NAMES.iter().map(|s| s.to_string()).collect();
                 cands.extend(self.struct_index.keys().cloned());
@@ -392,6 +465,8 @@ impl<'a> Checker<'a> {
                 continue;
             }
             if self.check_new_name(&d.name, "type", &mut seen) {
+                self.type_spans.insert(d.name.name.clone(), d.name.span);
+                self.def(d.name.span, d.name.name.clone(), "struct", format!("struct {}", d.name.name));
                 self.struct_index.insert(d.name.name.clone(), self.structs.len());
                 self.structs.push(StructDef { name: d.name.name.clone(), fields: Vec::new() });
                 kept.push(*d);
@@ -404,6 +479,8 @@ impl<'a> Checker<'a> {
                 continue;
             }
             if self.check_new_name(&d.name, "type", &mut seen) {
+                self.type_spans.insert(d.name.name.clone(), d.name.span);
+                self.def(d.name.span, d.name.name.clone(), "enum", format!("enum {}", d.name.name));
                 self.enum_index.insert(d.name.name.clone(), self.enums.len());
                 kept_enums.push((self.enums.len(), *d));
                 self.enums.push(EnumDef { name: d.name.name.clone(), variants: Vec::new() });
@@ -412,9 +489,12 @@ impl<'a> Checker<'a> {
         for (id, d) in kept.iter().enumerate() {
             let mut fseen = HashMap::new();
             let mut fields = Vec::new();
-            for (f, t) in &d.fields {
+            for (i, (f, t)) in d.fields.iter().enumerate() {
                 self.check_new_name(f, "field", &mut fseen);
                 let ty = self.resolve_type(t);
+                self.field_spans.insert((id, i), f.span);
+                let shown = self.show(&ty);
+                self.def(f.span, format!("{}.{}", d.name.name, f.name), "field", shown);
                 fields.push((f.name.clone(), ty));
             }
             self.structs[id].fields = fields;
@@ -422,13 +502,20 @@ impl<'a> Checker<'a> {
         for (id, d) in &kept_enums {
             let mut vseen = HashMap::new();
             let mut variants = Vec::new();
-            for v in &d.variants {
+            for (vi, v) in d.variants.iter().enumerate() {
                 self.check_new_name(&v.name, "variant", &mut vseen);
+                self.variant_spans.insert((*id, vi), v.name.span);
+                let vname = format!("{}.{}", d.name.name, v.name.name);
+                let text = self.text(v.span);
+                self.def(v.name.span, vname.clone(), "variant", text);
                 let mut fseen = HashMap::new();
                 let mut fields = Vec::new();
-                for (f, t) in &v.fields {
+                for (fi, (f, t)) in v.fields.iter().enumerate() {
                     self.check_new_name(f, "field", &mut fseen);
                     let ty = self.resolve_type(t);
+                    self.variant_field_spans.insert((*id, vi, fi), f.span);
+                    let shown = self.show(&ty);
+                    self.def(f.span, format!("{vname}.{}", f.name), "field", shown);
                     fields.push((f.name.clone(), ty));
                 }
                 variants.push(VariantDef { name: v.name.name.clone(), fields });
@@ -514,6 +601,8 @@ impl<'a> Checker<'a> {
             if fresh {
                 self.func_index.insert(d.name.name.clone(), self.sigs.len());
             }
+            let header = self.text(Span::new(d.span.start, d.body.span.start)).trim_end().to_string();
+            self.def(d.name.span, d.name.name.clone(), "fn", header);
             // Duplicates still get a slot so FuncIds line up with fn_decls order.
             self.sigs.push(FuncSig { params, ret, uses_io, span: d.name.span });
         }
@@ -558,6 +647,9 @@ impl<'a> Checker<'a> {
             ));
         }
         b.declared.insert(name.name.clone(), name.span);
+        let kind = if meta.is_param { "param" } else { "local" };
+        let shown = self.show(&ty);
+        self.def(name.span, name.name.clone(), kind, shown);
         let id = b.locals.len();
         b.locals.push(Local { name: name.name.clone(), ty });
         b.meta.push(meta);
@@ -947,8 +1039,10 @@ impl<'a> Checker<'a> {
                 self.unchecked_arm(b, arm);
                 continue;
             }
+            let def = self.variant_spans.get(&(id, vi)).copied();
+            self.note_use(arm.variant.span, def);
             b.scopes.push(HashMap::new());
-            let bindings = self.pattern(b, arm, &variants[vi]);
+            let bindings = self.pattern(b, arm, (id, vi), &variants[vi]);
             let body = self.block(b, &arm.body);
             b.scopes.pop();
             out.push(Arm { variant: vi, bindings, body });
@@ -1024,7 +1118,7 @@ impl<'a> Checker<'a> {
     }
 
     /// Checks an arm's field list against the variant and declares its bindings.
-    fn pattern(&mut self, b: &mut Body, arm: &ast::Arm, v: &VariantDef) -> Vec<(usize, LocalId)> {
+    fn pattern(&mut self, b: &mut Body, arm: &ast::Arm, at: (EnumId, usize), v: &VariantDef) -> Vec<(usize, LocalId)> {
         let vname = &arm.variant.name;
         let fields = match (&arm.fields, v.fields.is_empty()) {
             (None, true) => return Vec::new(),
@@ -1127,6 +1221,8 @@ impl<'a> Checker<'a> {
                 continue;
             }
             let i = given[pf.field.name.as_str()];
+            let def = self.variant_field_spans.get(&(at.0, at.1, i)).copied();
+            self.note_use(pf.field.span, def);
             let rename_fix = match &pf.binding {
                 None => Some((pf.field.span.at_end(), ": _".to_string())),
                 Some(n) => Some((n.span, "_".to_string())),
@@ -1218,6 +1314,7 @@ impl<'a> Checker<'a> {
                     self.unknown_name(b, id);
                     return None;
                 };
+                self.note_use(id.span, Some(b.meta[local].span));
                 let m = &mut b.meta[local];
                 m.assigned = true;
                 if !m.mutable {
@@ -1286,6 +1383,8 @@ impl<'a> Checker<'a> {
     fn field_index(&mut self, sid: StructId, field: &ast::Ident) -> Option<usize> {
         let fields = &self.structs[sid].fields;
         if let Some(i) = fields.iter().position(|(n, _)| *n == field.name) {
+            let def = self.field_spans.get(&(sid, i)).copied();
+            self.note_use(field.span, def);
             return Some(i);
         }
         let names: Vec<String> = fields.iter().map(|(n, _)| n.clone()).collect();
@@ -1398,6 +1497,15 @@ impl<'a> Checker<'a> {
 
     /// `hint` is the expected type where one is known; it types `None`, `Ok`, `Err` and `[]`.
     fn expr_hint(&mut self, b: &mut Body, e: &ast::Expr, hint: Option<&Ty>) -> Expr {
+        let x = self.expr_kind(b, e, hint);
+        if x.ty != Ty::Error {
+            let shown = self.show(&x.ty);
+            self.facts.exprs.push((e.span, shown));
+        }
+        x
+    }
+
+    fn expr_kind(&mut self, b: &mut Body, e: &ast::Expr, hint: Option<&Ty>) -> Expr {
         let (kind, ty) = match &e.kind {
             AK::Int(v) => (ExprKind::Int(*v), Ty::I64),
             AK::Float(v, unit) => {
@@ -1417,6 +1525,7 @@ impl<'a> Checker<'a> {
             AK::Name(id) => match self.lookup_local(b, id) {
                 Some(l) => {
                     b.meta[l].used = true;
+                    self.note_use(id.span, Some(b.meta[l].span));
                     (ExprKind::Local(l), b.locals[l].ty.clone())
                 }
                 None => {
@@ -1443,7 +1552,7 @@ impl<'a> Checker<'a> {
             }
             AK::Field(base, field) if self.enum_name(b, base).is_some() => {
                 let eid = self.enum_name(b, base).unwrap();
-                return self.variant_ctor(b, e, eid, field, None);
+                return self.variant_ctor(b, e, (eid, base.span), field, None);
             }
             AK::Field(base, field) => {
                 let x = self.expr(b, base);
@@ -1755,6 +1864,14 @@ impl<'a> Checker<'a> {
             return Self::err_expr();
         };
         let decl: Vec<(String, Ty)> = self.structs[sid].fields.clone();
+        let def = self.type_spans.get(&name.name).copied();
+        self.note_use(name.span, def);
+        for (f, _) in fields {
+            if let Some(i) = decl.iter().position(|(n, _)| *n == f.name) {
+                let def = self.field_spans.get(&(sid, i)).copied();
+                self.note_use(f.span, def);
+            }
+        }
         let mut ok = true;
         let mut by_name: HashMap<&str, usize> = HashMap::new();
         for (i, (f, _)) in fields.iter().enumerate() {
@@ -1856,6 +1973,7 @@ impl<'a> Checker<'a> {
         };
         let params: Vec<(String, Ty)> = self.sigs[fid].params.clone();
         let ret = self.sigs[fid].ret.clone();
+        self.note_use(callee.span, Some(self.sigs[fid].span));
         if self.sigs[fid].uses_io {
             self.note_io(b, callee.span, &format!("calling `{name}`"));
         }
@@ -2153,11 +2271,13 @@ impl<'a> Checker<'a> {
         &mut self,
         b: &mut Body,
         e: &ast::Expr,
-        enum_id: EnumId,
+        (enum_id, enum_span): (EnumId, Span),
         vname: &ast::Ident,
         args: Option<&[ast::Arg]>,
     ) -> Expr {
         let ename = self.enums[enum_id].name.clone();
+        let def = self.type_spans.get(&ename).copied();
+        self.note_use(enum_span, def);
         let variants = self.enums[enum_id].variants.clone();
         let Some(vi) = variants.iter().position(|v| v.name == vname.name) else {
             let names: Vec<String> = variants.iter().map(|v| v.name.clone()).collect();
@@ -2174,6 +2294,8 @@ impl<'a> Checker<'a> {
         };
         let fields = variants[vi].fields.clone();
         let full = format!("{ename}.{}", vname.name);
+        let def = self.variant_spans.get(&(enum_id, vi)).copied();
+        self.note_use(vname.span, def);
         let Some(args) = args else {
             if fields.is_empty() {
                 return Expr {
@@ -2320,7 +2442,7 @@ impl<'a> Checker<'a> {
         args: &[ast::Arg],
     ) -> Expr {
         if let Some(eid) = self.enum_name(b, receiver) {
-            return self.variant_ctor(b, e, eid, method, Some(args));
+            return self.variant_ctor(b, e, (eid, receiver.span), method, Some(args));
         }
         let m = method.name.as_str();
         for a in args {

@@ -10,7 +10,8 @@ Anvil is a compiled language designed to be written by AI agents. The compiler i
 ## Toolchain
 - Rust stable, MSVC. If `cargo` is not found, prepend `%USERPROFILE%\.cargo\bin` to PATH.
 - `cargo test --workspace` must pass before any milestone is called done.
-- `cargo run -p anvil_cli -- <command> <file.anv>` drives the compiler.
+- `cargo run -p anvil_cli -- <command> <file.anv>` drives the compiler; `anvil-mcp` serves the
+  same commands as MCP tools.
 
 ## Rules
 1. **Both backends agree.** Every language change adds programs to `tests/programs` and must
@@ -25,5 +26,8 @@ Anvil is a compiled language designed to be written by AI agents. The compiler i
 5. **Deterministic.** Same source, same executable bytes, same output.
 6. **Goldens are reviewed, not just blessed.** `ANVIL_BLESS=1` writes missing goldens from the
    interpreter; read every new golden and check it by hand before trusting it.
-7. **Small docs.** Tick ROADMAP checkboxes; add a few lines to DECISIONS per milestone.
-8. Commit only when the human asks.
+7. **One implementation per command.** Commands live in `anvil_ops` and in its `COMMANDS`
+   table; the CLI and `anvil-mcp` only parse and print. A new command or option needs a tool
+   parameter too, or the parity test fails.
+8. **Small docs.** Tick ROADMAP checkboxes; add a few lines to DECISIONS per milestone.
+9. Commit only when the human asks.

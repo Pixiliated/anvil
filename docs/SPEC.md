@@ -1,4 +1,4 @@
-# Anvil language specification (v0.2)
+# Anvil language specification (v0.3)
 
 Anvil is a small, compiled, general-purpose language designed to be written mostly by AI agents
 and read by humans. Its rules aim at three things: one obvious way to write each thing, code
@@ -283,17 +283,29 @@ fails if it panics (`assert`, a contract, overflow, a bad index). Tests may decl
 ## Tooling
 
 ```
-anvil check file.anv [--json]          type-check
-anvil run   file.anv                   interpret (the reference semantics)
-anvil build file.anv [-o out.exe]      native executable via Cranelift
-anvil test  file.anv [--json]          run test blocks
+anvil check   file.anv                 type-check
+anvil run     file.anv [--max-steps N] interpret (the reference semantics)
+anvil build   file.anv [-o out.exe] [--asm]
+                                       native executable via Cranelift
+anvil test    file.anv [--max-steps N] run test blocks
+anvil fix     file.anv                 apply every mechanical fix until none is left
+anvil outline file.anv                 items and signatures, without reading the whole file
+anvil type-at file.anv LINE COL        type and declaration at a position
+anvil refs    file.anv NAME            declaration and uses of NAME (fn, type, unit,
+                                       Type.field, Enum.Variant, Enum.Variant.field)
 anvil explain [CODE]                   long explanation of an error code
 anvil spec                             print this document
 ```
 
-Every error has a stable code (`E0301`), an exact range and, where one exists, fixes. A fix is
-`mechanical` (safe to apply without thought) or `changes_meaning` (compiles, but may hide the
-real bug: understand the intent first). `--json` gives the same information as structured data.
+Every command takes `--json`. Every error has a stable code (`E0301`), an exact range and,
+where one exists, fixes. A fix is `mechanical` (safe to apply without thought) or
+`changes_meaning` (compiles, but may hide the real bug: understand the intent first);
+`anvil fix` applies only mechanical ones. `type-at` and `refs` answer even for a file with
+type errors. `--max-steps` stops a run after that many statements and loop iterations.
+
+`anvil-mcp` serves the same commands as MCP tools over stdio (`type-at` is `type_at`), with
+the same arguments and the same JSON; a failing check is a tool error. Over MCP, `run` and
+`test` stop after 100,000,000 steps unless `max_steps` says otherwise.
 
 The interpreter and the native compiler must agree exactly: same stdout, same panic message,
 same exit code. The one known difference: the interpreter panics past 10,000 nested calls,

@@ -50,6 +50,19 @@ impl SourceFile {
         (line + 1, col)
     }
 
+    /// Byte offset of a 1-based line and character column; None past the end of that line.
+    pub fn offset_of(&self, line: usize, col: usize) -> Option<usize> {
+        let start = *self.line_starts.get(line.checked_sub(1)?)?;
+        let text = self.line_text(line);
+        if col == 0 {
+            return None;
+        }
+        if col == text.chars().count() + 1 {
+            return Some(start + text.len());
+        }
+        text.char_indices().nth(col - 1).map(|(i, _)| start + i)
+    }
+
     pub fn line_text(&self, line: usize) -> &str {
         let start = self.line_starts[line - 1];
         let end = self.line_starts.get(line).copied().unwrap_or(self.text.len());

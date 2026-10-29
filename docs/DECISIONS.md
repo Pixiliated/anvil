@@ -49,3 +49,17 @@ Short records of choices that are not obvious from the code. Newest last.
   half-evaluated temporaries behind in native code.
 - **Strings may appear inside `{...}`**, after the first version forbade it and the author of
   the tests tripped over the rule three times.
+
+## M2 (v0.3)
+
+- **The agent surface follows the Nautilus engine's**: one ops layer (`anvil_ops`) that both
+  the CLI and the MCP server call, a parity test that walks `COMMANDS` and the tool list both
+  ways, failing checks as tool errors, and argument structs that reject unknown fields.
+- **The checker keeps facts** (declarations, uses pointing at declarations, the type of every
+  expression) even when a file has errors, so `type-at` and `refs` work on code mid-edit.
+- **`fix` applies only mechanical fixes**, repeatedly, and fails if errors remain: anything
+  that needs a decision is left to the author.
+- **Steps, not wall-clock time, limit runs**, so the limit is deterministic. MCP calls default
+  to 100,000,000 steps so a loop cannot hang a session; the CLI has no default limit.
+- **Not taken from the engine (yet):** the SQLite project record and review sheets. A language
+  repo's ROADMAP and DECISIONS are small enough, and there are no pictures to sign off.

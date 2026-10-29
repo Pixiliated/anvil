@@ -1,0 +1,11 @@
+[package]
+name = "anvil_ops"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+anvil_front = { path = "../anvil_front" }
+anvil_interp = { path = "../anvil_interp" }
+anvil_codegen = { path = "../anvil_codegen" }
+serde_json = "1.0.154"

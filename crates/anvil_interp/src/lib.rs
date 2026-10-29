@@ -19,11 +19,13 @@ pub enum Value {
     Enum(usize, Vec<Value>),
 }
 
-/// Why evaluation stopped early: a panic (the text after "panic: "), or `?` returning a failure.
+/// Why evaluation stopped early: a panic (the text after "panic: "), `?` returning a failure,
+/// or the step limit running out.
 #[derive(Debug, PartialEq)]
 enum Unwind {
     Panic(String),
     Return(Value),
+    OutOfSteps,
 }
 
 type R<T> = Result<T, Unwind>;
@@ -46,18 +48,28 @@ pub struct Interp<'p> {
     program: &'p Program,
     out: &'p mut dyn Write,
     depth: usize,
+    /// Statements and loop iterations left before the run stops; None is unlimited.
+    steps_left: Option<u64>,
 }
 
 /// How a run ended. Exit codes match the native executable: main's value, or 101 on panic.
+#[derive(Debug, PartialEq)]
 pub enum Outcome {
     Exit(i32),
     Panicked(String),
+    /// The step limit ran out; this is the tool stopping the program, not the program failing.
+    OutOfSteps(u64),
 }
 
-/// Runs main. Needs a large stack for deep recursion; see `run_on_big_stack`.
-pub fn run_main(program: &Program, out: &mut dyn Write) -> Outcome {
+pub fn step_limit_message(limit: u64) -> String {
+    format!("stopped after {limit} steps (the step limit); the program may loop forever")
+}
+
+/// Runs main. Needs a large stack for deep recursion; see `run_on_big_stack`. A step is one
+/// statement or one loop iteration; `max_steps` None runs without a limit.
+pub fn run_main(program: &Program, out: &mut dyn Write, max_steps: Option<u64>) -> Outcome {
     let main = program.main.expect("run_main needs a main function");
-    let mut it = Interp { program, out, depth: 0 };
+    let mut it = Interp { program, out, depth: 0, steps_left: max_steps };
     let result = it.call(main, Vec::new());
     let _ = it.out.flush();
     match result {
@@ -66,20 +78,22 @@ pub fn run_main(program: &Program, out: &mut dyn Write) -> Outcome {
         Ok(Value::I64(code)) => Outcome::Panicked(main_exit_message(code)),
         Ok(other) => unreachable!("main returned {other:?}"),
         Err(Unwind::Panic(m)) => Outcome::Panicked(m),
+        Err(Unwind::OutOfSteps) => Outcome::OutOfSteps(max_steps.unwrap()),
         Err(Unwind::Return(v)) => unreachable!("`?` escaped main: {v:?}"),
     }
 }
 
-/// Runs one test body. Ok(()) if it finished, Err(message) if it panicked.
-pub fn run_test(program: &Program, index: usize, out: &mut dyn Write) -> Result<(), String> {
+/// Runs one test body. Ok(()) if it finished, Err(message) if it panicked or ran out of steps.
+pub fn run_test(program: &Program, index: usize, out: &mut dyn Write, max_steps: Option<u64>) -> Result<(), String> {
     let test = &program.tests[index];
-    let mut it = Interp { program, out, depth: 0 };
+    let mut it = Interp { program, out, depth: 0, steps_left: max_steps };
     let mut frame = vec![Value::Void; test.locals.len()];
     let r = it.block(&test.body, &mut frame);
     let _ = it.out.flush();
     match r {
         Ok(_) => Ok(()),
         Err(Unwind::Panic(m)) => Err(m),
+        Err(Unwind::OutOfSteps) => Err(step_limit_message(max_steps.unwrap())),
         Err(Unwind::Return(v)) => unreachable!("`?` in a test: {v:?}"),
     }
 }
@@ -136,6 +150,16 @@ fn place_mut<'v>(mut slot: &'v mut Value, path: &[Step], indices: &[i64]) -> R<&
 }
 
 impl<'p> Interp<'p> {
+    fn step(&mut self) -> R<()> {
+        if let Some(n) = &mut self.steps_left {
+            if *n == 0 {
+                return Err(Unwind::OutOfSteps);
+            }
+            *n -= 1;
+        }
+        Ok(())
+    }
+
     fn call(&mut self, fid: FuncId, args: Vec<Value>) -> R<Value> {
         let f = &self.program.funcs[fid];
         if self.depth >= MAX_CALL_DEPTH {
@@ -191,6 +215,7 @@ impl<'p> Interp<'p> {
 
     /// Runs a loop body; Some(flow) when the loop must stop.
     fn loop_body(&mut self, body: &[Stmt], frame: &mut Vec<Value>) -> R<Option<Flow>> {
+        self.step()?;
         Ok(match self.block(body, frame)? {
             Flow::Break => Some(Flow::Normal),
             Flow::Return(v) => Some(Flow::Return(v)),
@@ -199,6 +224,7 @@ impl<'p> Interp<'p> {
     }
 
     fn stmt(&mut self, s: &Stmt, frame: &mut Vec<Value>) -> R<Flow> {
+        self.step()?;
         match s {
             Stmt::Let(l, e) => {
                 frame[*l] = self.eval(e, frame)?;

@@ -20,39 +20,46 @@ green and the interpreter and native backend agreeing on every program in `tests
 - [x] `Option[T]`, `Result[T, E]` and `?`; errors are values, no exceptions
 - [x] Native backend: reference counting with copy-on-write, leak check in every native test
 
-## M2: Formatter
+## M2: Agent surface (v0.3)
+- [x] `anvil_ops`: one implementation of every command, returning the JSON both faces send
+- [x] `anvil-mcp`: every command as an MCP tool over stdio; failing checks are tool errors
+- [x] Parity test: commands and tools match both ways, with the same arguments
+- [x] `anvil outline`, `anvil type-at`, `anvil refs`, answered from the checker even with errors
+- [x] `anvil fix`: mechanical fixes applied until none is left
+- [x] Step limit for `run` and `test`
+
+## M3: Formatter
 - [ ] `anvil fmt` with one canonical layout, comments preserved
 - [ ] `anvil check` reports unformatted files as an error with a mechanical fix
 - [ ] Parser reports several syntax errors per run where recovery is reliable
 
-## M3: Text and collections
+## M4: Text and collections
 - [ ] Slicing arrays and strings by range, string search and split
 - [ ] Maps with deterministic iteration order
 - [ ] `==` for arrays, structs and enums whose parts all have it
 
-## M4: Modules
+## M5: Modules
 - [ ] Multiple files, explicit imports by name, no wildcard imports
 - [ ] Visibility (`pub`), one module per file
 
-## M5: Generics
+## M6: Generics
 - [ ] Generic functions and structs with explicit, use-site-visible constraints
 
-## M6: Verification
+## M7: Verification
 - [ ] `anvil test --native`
 - [ ] Differential fuzzing: random well-typed programs, interpreter vs native
 - [ ] Property tests in the language (`for all` over generated inputs, seeded)
 
-## M7: Platforms
+## M8: Platforms
 - [ ] Linux x86-64 and AArch64 (ELF), macOS (Mach-O)
 - [ ] Release binaries
 
-## M8: Tooling for agents
-- [ ] `anvil query --json`: type at a position, callers of a function, uses of a field
-- [ ] Language server
+## M9: Language server
+- [ ] Language server on the same facts as `type-at` and `refs`, plus completion
 
-## M9: Effects and interop
+## M10: Effects and interop
 - [ ] Effects for allocation, time and seeded randomness
 - [ ] C FFI with declared effects
 
-## M10: Publishing
+## M11: Publishing
 - [ ] crates.io as `anvil-lang` (`anvil` is taken), docs site, contribution guide

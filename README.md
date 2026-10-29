@@ -76,7 +76,7 @@ in full (`anvil spec` prints it).
 
 ## Status
 
-v0.2: single-file programs with i64, f64 with units, bool, strings with interpolation,
+v0.3: single-file programs with i64, f64 with units, bool, strings with interpolation,
 growable arrays, structs, enums with exhaustive `match`, `Option` and `Result` with `?`,
 contracts, effects and tests. There are two backends:
 
@@ -107,12 +107,31 @@ target/release/anvil build examples/orders.anv -o orders.exe
 
 | Command | Does |
 |---|---|
-| `anvil check f.anv [--json]` | type-check |
-| `anvil run f.anv` | interpret `main` |
+| `anvil check f.anv` | type-check |
+| `anvil run f.anv [--max-steps N]` | interpret `main` |
 | `anvil build f.anv [-o out.exe] [--asm]` | compile to a native executable |
-| `anvil test f.anv [--json]` | run `test` blocks |
+| `anvil test f.anv [--max-steps N]` | run `test` blocks |
+| `anvil fix f.anv` | apply every mechanical fix until none is left |
+| `anvil outline f.anv` | list items and signatures |
+| `anvil type-at f.anv LINE COL` | type and declaration at a position |
+| `anvil refs f.anv NAME` | where a function, type, field, variant or unit is declared and used |
 | `anvil explain [CODE]` | explain an error code |
 | `anvil spec` | print the language specification |
+
+Every command takes `--json`.
+
+## For agents: the MCP server
+
+`anvil-mcp` serves every command above as an MCP tool over stdio, with the same arguments and
+the same JSON (a test keeps the two in step). A failing check is a tool error. To add it to
+Claude Code:
+
+```bash
+claude mcp add anvil -- target/release/anvil-mcp --root .
+```
+
+An agent starts with `spec` (the whole language), writes a file, then loops on `check` and
+`fix`; `outline`, `type_at` and `refs` let it navigate a file without reading all of it.
 
 ## Layout
 
@@ -121,7 +140,9 @@ target/release/anvil build examples/orders.anv -o orders.exe
 | `crates/anvil_front` | lexer, parser, checker, diagnostics, typed IR |
 | `crates/anvil_interp` | reference interpreter |
 | `crates/anvil_codegen` | Cranelift backend, C runtime, linker driver |
+| `crates/anvil_ops` | every command, returning the JSON the CLI and MCP server send |
 | `crates/anvil_cli` | the `anvil` command and end-to-end tests |
+| `crates/anvil_mcp` | the `anvil-mcp` server, its stdio and parity tests |
 | `tests/programs` | programs with golden output, run on both backends |
 | `tests/errors` | one file per error code, with expected codes and fix checks |
 
