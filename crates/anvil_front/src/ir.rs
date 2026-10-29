@@ -8,6 +8,7 @@ use std::fmt;
 pub type LocalId = usize;
 pub type FuncId = usize;
 pub type StructId = usize;
+pub type EnumId = usize;
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum Ty {
@@ -17,6 +18,9 @@ pub enum Ty {
     Bool,
     Str,
     Struct(StructId),
+    /// `[T]`: a growable array with value semantics (copied on write).
+    Array(Box<Ty>),
+    Enum(EnumId),
     /// Produced after an error so one mistake does not cascade; never reaches a backend.
     Error,
 }
@@ -26,6 +30,26 @@ pub struct StructDef {
     pub name: String,
     pub fields: Vec<(String, Ty)>,
 }
+
+/// A user enum, or one instantiation of the built-in `Option[T]` / `Result[T, E]`.
+#[derive(Clone, Debug)]
+pub struct EnumDef {
+    /// As shown to users: `Shape`, `Option[i64]`.
+    pub name: String,
+    pub variants: Vec<VariantDef>,
+}
+
+#[derive(Clone, Debug)]
+pub struct VariantDef {
+    pub name: String,
+    pub fields: Vec<(String, Ty)>,
+}
+
+/// Variant order of the built-in enums: the success variant is always 0, the failure 1.
+pub const OPTION_SOME: usize = 0;
+pub const OPTION_NONE: usize = 1;
+pub const RESULT_OK: usize = 0;
+pub const RESULT_ERR: usize = 1;
 
 #[derive(Clone, Debug)]
 pub struct Local {
@@ -65,21 +89,56 @@ pub struct Test {
 #[derive(Clone, Debug)]
 pub struct Program {
     pub structs: Vec<StructDef>,
+    pub enums: Vec<EnumDef>,
     pub funcs: Vec<Func>,
     pub tests: Vec<Test>,
     pub main: Option<FuncId>,
 }
 
+/// One step from a local to the place being assigned or mutated.
+#[derive(Clone, Debug)]
+pub enum Step {
+    Field(usize),
+    /// Bounds-checked; `site` is the source location named by the panic.
+    Index {
+        index: Expr,
+        site: String,
+    },
+}
+
+#[derive(Clone, Debug)]
+pub struct Arm {
+    pub variant: usize,
+    /// (field index in the variant, local bound to it)
+    pub bindings: Vec<(usize, LocalId)>,
+    pub body: Vec<Stmt>,
+}
+
+/// Evaluation order, shared by both backends: the right-hand value first, then the index
+/// expressions of the place from left to right, then bounds checks as the place is reached.
 #[derive(Clone, Debug)]
 pub enum Stmt {
     Let(LocalId, Expr),
-    /// Assign to a local or a field path inside it.
-    Assign(LocalId, Vec<usize>, Expr),
+    /// Assign to a local or a place inside it.
+    Assign(LocalId, Vec<Step>, Expr),
     Expr(Expr),
     If(Expr, Vec<Stmt>, Vec<Stmt>),
     While(Expr, Vec<Stmt>),
     /// `for i in start..end`, end exclusive, both evaluated once.
     For(LocalId, Expr, Expr, Vec<Stmt>),
+    /// `for x in array`: iterates a snapshot held in the hidden local `held`.
+    ForEach {
+        var: LocalId,
+        held: LocalId,
+        iter: Expr,
+        body: Vec<Stmt>,
+    },
+    /// The scrutinee is stored in the hidden local `held`; exactly one arm per variant.
+    Match {
+        held: LocalId,
+        scrutinee: Expr,
+        arms: Vec<Arm>,
+    },
     Return(Option<Expr>),
     Break,
     Continue,
@@ -128,6 +187,8 @@ pub enum Builtin {
     ToI64 {
         message: String,
     },
+    /// Length of a str (bytes) or an array (elements).
+    Len,
 }
 
 #[derive(Clone, Debug)]
@@ -146,6 +207,40 @@ pub enum ExprKind {
     Field(Box<Expr>, usize),
     Call(FuncId, Vec<Expr>),
     StructLit(StructId, Vec<Expr>),
+    ArrayLit(Vec<Expr>),
+    /// Construct `variant` of an enum; `fields` are that variant's fields in order.
+    Variant {
+        enum_id: EnumId,
+        variant: usize,
+        fields: Vec<Expr>,
+    },
+    Index {
+        base: Box<Expr>,
+        index: Box<Expr>,
+        site: String,
+    },
+    /// Concatenation of the text of each part (str, i64, f64 with its unit, bool).
+    Interp(Vec<Expr>),
+    StrConcat(Box<Expr>, Box<Expr>),
+    /// `xs.push(v)` on the array at a place.
+    Push {
+        local: LocalId,
+        path: Vec<Step>,
+        value: Box<Expr>,
+    },
+    /// `xs.pop()`: removes and returns the last element; panics with `message` when empty.
+    Pop {
+        local: LocalId,
+        path: Vec<Step>,
+        message: String,
+    },
+    /// `e?` on Option/Result: the success payload, or return the failure from the function.
+    /// The value is first stored in the hidden local `held`; `ret_enum` is the function's return type.
+    Try {
+        held: LocalId,
+        inner: Box<Expr>,
+        ret_enum: EnumId,
+    },
     /// Checked integer arithmetic. `overflow` and `div_zero` are the panic messages.
     IArith {
         op: IOp,
@@ -179,6 +274,13 @@ pub fn div_zero_message(site: &str) -> String {
 }
 pub fn main_exit_message(code: i64) -> String {
     format!("main returned {code}, outside the exit code range 0..=255")
+}
+/// Mirrors anvil_panic_index in the C runtime.
+pub fn index_message(index: i64, len: i64, site: &str) -> String {
+    format!("index {index} out of bounds for length {len} at {site}")
+}
+pub fn pop_message(site: &str) -> String {
+    format!("pop from an empty array at {site}")
 }
 
 /// i64 -> f64 range limits for to_i64: values must lie in [-2^63, 2^63).
@@ -250,6 +352,7 @@ pub fn format_f64(v: f64) -> String {
 pub struct TyDisplay<'a> {
     pub ty: &'a Ty,
     pub structs: &'a [StructDef],
+    pub enums: &'a [EnumDef],
 }
 
 impl fmt::Display for TyDisplay<'_> {
@@ -262,6 +365,8 @@ impl fmt::Display for TyDisplay<'_> {
             Ty::Bool => write!(f, "bool"),
             Ty::Str => write!(f, "str"),
             Ty::Struct(id) => write!(f, "{}", self.structs[*id].name),
+            Ty::Array(t) => write!(f, "[{}]", TyDisplay { ty: t, structs: self.structs, enums: self.enums }),
+            Ty::Enum(id) => write!(f, "{}", self.enums[*id].name),
             Ty::Error => write!(f, "<error>"),
         }
     }

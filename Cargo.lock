@@ -10,7 +10,7 @@ checksum = "683d7910e743518b0e34f1186f92494becacb047c7b6bf616c96772180fef923"
 
 [[package]]
 name = "anvil_cli"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anvil_codegen",
  "anvil_front",
@@ -20,7 +20,7 @@ dependencies = [
 
 [[package]]
 name = "anvil_codegen"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anvil_front",
  "cc",
@@ -32,7 +32,7 @@ dependencies = [
 
 [[package]]
 name = "anvil_front"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -40,7 +40,7 @@ dependencies = [
 
 [[package]]
 name = "anvil_interp"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anvil_front",
 ]

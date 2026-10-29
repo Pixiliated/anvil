@@ -1,0 +1,5 @@
+// expect: E0004
+fn main() uses io {
+    let x: i64 = 1;
+    print("x = {x");
+}

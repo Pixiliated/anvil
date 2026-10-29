@@ -1,0 +1,103 @@
+struct Item {
+    name: str,
+    tags: [str],
+}
+
+struct Bag {
+    items: [Item],
+    count: i64,
+}
+
+fn sum(xs: [i64]) -> i64 {
+    var total: i64 = 0;
+    for x in xs {
+        total = total + x;
+    }
+    return total;
+}
+
+fn squares(n: i64) -> [i64] {
+    var out: [i64] = [];
+    for i in 0..n {
+        out.push(i * i);
+    }
+    return out;
+}
+
+// Arrays are values: changing the copy leaves the original alone.
+fn bump_first(xs: [i64]) -> [i64] {
+    var ys: [i64] = xs;
+    ys[0] = ys[0] + 100;
+    return ys;
+}
+
+fn main() uses io {
+    let xs: [i64] = [3, 1, 4, 1, 5];
+    print("len {xs.len()}, first {xs[0]}, last {xs[xs.len() - 1]}, sum {sum(xs)}");
+    let sq: [i64] = squares(6);
+    print("squares sum {sum(sq)}, sq[5] = {sq[5]}");
+    let bumped: [i64] = bump_first(xs);
+    print("bumped {bumped[0]}, original {xs[0]}");
+
+    var a: [i64] = [1, 2, 3];
+    let b: [i64] = a;
+    a.push(4);
+    a[0] = 10;
+    print("a: {a.len()} items, a[0] {a[0]}; b: {b.len()} items, b[0] {b[0]}");
+    let last: i64 = a.pop();
+    print("popped {last}, a now has {a.len()}");
+
+    var grid: [[i64]] = [];
+    for r in 0..3 {
+        var row: [i64] = [];
+        for c in 0..4 {
+            row.push(r * 10 + c);
+        }
+        grid.push(row);
+    }
+    grid[1][2] = -1;
+    let snapshot: [[i64]] = grid;
+    grid[2][3] = 99;
+    print("grid[1][2] {grid[1][2]}, grid[2][3] {grid[2][3]}, snapshot[2][3] {snapshot[2][3]}");
+    var total: i64 = 0;
+    for row2 in grid {
+        total = total + sum(row2);
+    }
+    print("grid total {total}");
+
+    // The loop runs over the array as it was when the loop started.
+    var growing: [i64] = [1, 2, 3];
+    for g in growing {
+        growing.push(g * 10);
+    }
+    print("growing has {growing.len()}: {growing[3]} {growing[4]} {growing[5]}");
+
+    var bag: Bag = Bag { items: [], count: 0 };
+    bag.items.push(Item { name: "hammer", tags: ["tool", "heavy"] });
+    bag.items.push(Item { name: "feather", tags: [] });
+    bag.items[1].tags.push("light");
+    bag.count = bag.items.len();
+    for it in bag.items {
+        var line: str = "{it.name}:";
+        for t in it.tags {
+            line = line + " " + t;
+        }
+        print(line);
+    }
+    print("bag count {bag.count}");
+
+    let words: [str] = ["alpha", "beta"];
+    var more: [str] = words;
+    more[0] = "gamma";
+    print("{words[0]} {more[0]} {more[1]}");
+
+    var flags: [bool] = [true, false];
+    flags.push(true);
+    print("{flags[0]} {flags[1]} {flags[2]}");
+    let lengths: [f64] = [1.5, 2.25];
+    print("{lengths[0] + lengths[1]}");
+
+    var stack: [[str]] = [["x"]];
+    let inner: [str] = stack.pop();
+    print("inner {inner[0]}, stack empty: {stack.len() == 0}");
+}

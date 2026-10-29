@@ -1,0 +1,128 @@
+// Orders and stock: arrays, enums with match, Result with `?`, and string interpolation.
+unit kg;
+
+struct Product {
+    name: str,
+    price_cents: i64,
+    weight: f64[kg],
+    stock: i64,
+}
+
+struct Line {
+    product: str,
+    quantity: i64,
+}
+
+enum Shipping {
+    Pickup,
+    Courier(max_weight: f64[kg]),
+    Freight(cents_per_kg: i64),
+}
+
+fn find(catalog: [Product], name: str) -> Result[i64, str] {
+    for i in 0..catalog.len() {
+        if catalog[i].name == name {
+            return Ok(i);
+        }
+    }
+    return Err("no product called \"{name}\"");
+}
+
+fn line_total(catalog: [Product], line: Line) -> Result[i64, str] {
+    let i: i64 = find(catalog: catalog, name: line.product)?;
+    let p: Product = catalog[i];
+    if line.quantity > p.stock {
+        return Err("only {p.stock} {p.name} left, {line.quantity} wanted");
+    }
+    return Ok(p.price_cents * line.quantity);
+}
+
+fn order_weight(catalog: [Product], lines: [Line]) -> Result[f64[kg], str] {
+    var total: f64[kg] = 0.0[kg];
+    for line in lines {
+        let i: i64 = find(catalog: catalog, name: line.product)?;
+        total = total + catalog[i].weight * to_f64(line.quantity);
+    }
+    return Ok(total);
+}
+
+fn shipping_cost(how: Shipping, weight: f64[kg]) -> Result[i64, str] {
+    match how {
+        Pickup => {
+            return Ok(0);
+        }
+        Courier(max_weight) => {
+            if weight > max_weight {
+                return Err("{weight} is over the courier limit of {max_weight}");
+            }
+            return Ok(799);
+        }
+        Freight(cents_per_kg) => {
+            return Ok(cents_per_kg * to_i64(weight / 1.0[kg] + 0.999));
+        }
+    }
+}
+
+fn order_total(catalog: [Product], lines: [Line], how: Shipping) -> Result[i64, str] {
+    var cents: i64 = 0;
+    for line in lines {
+        let t: i64 = line_total(catalog: catalog, line: line)?;
+        cents = cents + t;
+    }
+    let weight: f64[kg] = order_weight(catalog: catalog, lines: lines)?;
+    let ship: i64 = shipping_cost(how: how, weight: weight)?;
+    return Ok(cents + ship);
+}
+
+fn money(cents: i64) -> str {
+    let rest: i64 = cents % 100;
+    if rest < 10 {
+        return "${cents / 100}.0{rest}";
+    }
+    return "${cents / 100}.{rest}";
+}
+
+fn report(r: Result[i64, str]) -> str {
+    var out: str = "";
+    match r {
+        Ok(value) => {
+            out = "total {money(value)}";
+        }
+        Err(error) => {
+            out = "cannot order: {error}";
+        }
+    }
+    return out;
+}
+
+fn sample_catalog() -> [Product] {
+    return [
+        Product { name: "kettle", price_cents: 2499, weight: 1.2[kg], stock: 5 },
+        Product { name: "teapot", price_cents: 1850, weight: 0.9[kg], stock: 2 },
+        Product { name: "anvil", price_cents: 12000, weight: 45.0[kg], stock: 1 },
+    ];
+}
+
+fn main() uses io {
+    let catalog: [Product] = sample_catalog();
+    let tea: [Line] = [Line { product: "kettle", quantity: 1 }, Line { product: "teapot", quantity: 2 }];
+    print(report(order_total(catalog: catalog, lines: tea, how: Shipping.Courier(10.0[kg]))));
+    let heavy: [Line] = [Line { product: "anvil", quantity: 1 }];
+    print(report(order_total(catalog: catalog, lines: heavy, how: Shipping.Courier(10.0[kg]))));
+    print(report(order_total(catalog: catalog, lines: heavy, how: Shipping.Freight(150))));
+    let greedy: [Line] = [Line { product: "teapot", quantity: 3 }];
+    print(report(order_total(catalog: catalog, lines: greedy, how: Shipping.Pickup)));
+    let typo: [Line] = [Line { product: "kettel", quantity: 1 }];
+    print(report(order_total(catalog: catalog, lines: typo, how: Shipping.Pickup)));
+}
+
+test "money keeps two digits" {
+    assert(money(1205) == "$12.05");
+    assert(money(99) == "$0.99");
+}
+
+test "pickup is free" {
+    let lines: [Line] = [Line { product: "kettle", quantity: 2 }];
+    let total: Result[i64, str] = order_total(catalog: sample_catalog(), lines: lines, how: Shipping.Pickup);
+    assert(report(total) == "total $49.98");
+}

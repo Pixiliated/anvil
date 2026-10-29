@@ -17,6 +17,7 @@ pub struct File {
 pub enum Item {
     Unit(UnitDecl),
     Struct(StructDecl),
+    Enum(EnumDecl),
     Fn(FnDecl),
     Test(TestDecl),
 }
@@ -38,13 +39,35 @@ pub struct UnitExpr {
 
 #[derive(Clone, Debug)]
 pub struct TypeExpr {
-    pub name: Ident,
-    pub unit: Option<UnitExpr>,
+    pub kind: TypeKind,
     pub span: Span,
 }
 
 #[derive(Clone, Debug)]
+pub enum TypeKind {
+    /// `f64[m/s]` carries a unit; `Option[i64]` carries type arguments; the parser decides by name.
+    Named { name: Ident, unit: Option<UnitExpr>, args: Vec<TypeExpr> },
+    /// `[T]`
+    Array(Box<TypeExpr>),
+}
+
+#[derive(Clone, Debug)]
 pub struct StructDecl {
+    pub name: Ident,
+    pub fields: Vec<(Ident, TypeExpr)>,
+    pub span: Span,
+}
+
+/// `enum Shape { Circle(radius: f64[m]), Empty }`
+#[derive(Clone, Debug)]
+pub struct EnumDecl {
+    pub name: Ident,
+    pub variants: Vec<VariantDecl>,
+    pub span: Span,
+}
+
+#[derive(Clone, Debug)]
+pub struct VariantDecl {
     pub name: Ident,
     pub fields: Vec<(Ident, TypeExpr)>,
     pub span: Span,
@@ -103,9 +126,30 @@ pub enum StmtKind {
     If { cond: Expr, then: Block, else_: Option<Box<Else>> },
     While { cond: Expr, body: Block },
     For { var: Ident, start: Expr, end: Expr, body: Block },
+    ForEach { var: Ident, iter: Expr, body: Block },
+    Match { scrutinee: Expr, arms: Vec<Arm>, span_end: Span },
     Return(Option<Expr>),
     Break,
     Continue,
+}
+
+/// `Rect(width, height: h) => { ... }`
+#[derive(Clone, Debug)]
+pub struct Arm {
+    pub variant: Ident,
+    /// None for `Empty`; Some for `Circle(...)`.
+    pub fields: Option<Vec<PatField>>,
+    pub fields_span: Span,
+    pub body: Block,
+    pub span: Span,
+}
+
+/// `field` binds the field to its own name; `field: name` or `field: _` renames or ignores it.
+#[derive(Clone, Debug)]
+pub struct PatField {
+    pub field: Ident,
+    pub binding: Option<Ident>,
+    pub span: Span,
 }
 
 #[derive(Clone, Debug)]
@@ -182,8 +226,19 @@ pub enum ExprKind {
     Result,
     Field(Box<Expr>, Ident),
     Call { callee: Ident, args: Vec<Arg> },
+    Method { receiver: Box<Expr>, method: Ident, args: Vec<Arg> },
+    Index(Box<Expr>, Box<Expr>),
+    Array(Vec<Expr>),
+    Interp(Vec<InterpPart>),
+    Try(Box<Expr>),
     StructLit { name: Ident, fields: Vec<(Ident, Expr)> },
     Unary(UnOp, Box<Expr>),
     Binary(BinOp, Box<Expr>, Box<Expr>),
     Paren(Box<Expr>),
+}
+
+#[derive(Clone, Debug)]
+pub enum InterpPart {
+    Lit(String),
+    Expr(Expr),
 }

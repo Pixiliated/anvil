@@ -7,5 +7,5 @@ fn safe_div(n: i64, d: i64) -> i64
 }
 
 fn main() uses io {
-    print(safe_div(n: 7, d: 2), " ", safe_div(n: -7, d: 2), " ", safe_div(n: 7, d: -2), " ", safe_div(n: -7, d: -2));
+    print("{safe_div(n: 7, d: 2)} {safe_div(n: -7, d: 2)} {safe_div(n: 7, d: -2)} {safe_div(n: -7, d: -2)}");
 }

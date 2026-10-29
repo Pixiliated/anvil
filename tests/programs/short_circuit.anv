@@ -8,5 +8,5 @@ fn main() uses io {
     print(true || boom(zero));
     print(true && boom(1));
     print(!(false || false));
-    print(true == false, " ", true != false);
+    print("{true == false} {true != false}");
 }

@@ -43,8 +43,8 @@ fn main() -> i64 uses io {
     let ball: Body = Body { mass: 0.43[kg], height: 0.0[m], speed: 20.0[m/s] };
     let dt: f64[s] = 0.01[s];
     let steps: i64 = flight_steps(start: ball, dt: dt);
-    print("landed after ", steps, " steps (", to_f64(steps) * dt, ")");
-    print("weight: ", weight(ball.mass));
+    print("landed after {steps} steps ({to_f64(steps) * dt})");
+    print("weight: {weight(ball.mass)}");
     return 0;
 }
 

@@ -5,20 +5,47 @@ people.
 
 ```
 unit m;
-unit s;
 
-fn speed(distance: f64[m], time: f64[s]) -> f64[m/s]
-    requires time > 0.0[s]
-{
-    return distance / time;
+enum Shape {
+    Circle(radius: f64[m]),
+    Rect(width: f64[m], height: f64[m]),
+}
+
+fn area(s: Shape) -> f64[m^2] {
+    match s {
+        Circle(radius) => { return 3.14159 * radius * radius; }
+        Rect(width, height) => { return width * height; }
+    }
+}
+
+fn parse_digit(c: str) -> Result[i64, str] {
+    if c == "0" { return Ok(0); }
+    if c == "1" { return Ok(1); }
+    return Err("not a binary digit: {c}");
+}
+
+fn binary(digits: [str]) -> Result[i64, str] {
+    var n: i64 = 0;
+    for d in digits {
+        let bit: i64 = parse_digit(d)?;    // returns the Err early
+        n = n * 2 + bit;
+    }
+    return Ok(n);
 }
 
 fn main() uses io {
-    print(speed(distance: 100.0[m], time: 9.58[s]));   // 10.438413361169102 m/s
+    let shapes: [Shape] = [Shape.Circle(1.0[m]), Shape.Rect(width: 2.0[m], height: 3.0[m])];
+    for s in shapes {
+        print("area {area(s)}");               // area 3.14159 m^2, then area 6.0 m^2
+    }
+    match binary(["1", "0", "1"]) {
+        Ok(value) => { print("binary 101 is {value}"); }
+        Err(error) => { print(error); }
+    }
 }
 
-test "speed is positive" {
-    assert(speed(distance: 1.0[m], time: 1.0[s]) > 0.0[m/s]);
+test "rectangles" {
+    assert(area(Shape.Rect(width: 2.0[m], height: 2.0[m])) == 4.0[m^2]);
 }
 ```
 
@@ -37,6 +64,10 @@ much of that judgement as possible into the compiler:
   so swapped arguments cannot compile.
 - **Checks built in.** Units of measure (`f64[m/s]`), effects (`uses io`), contracts
   (`requires`/`ensures`) and `test` blocks are part of the language, not libraries.
+- **Errors as values.** `Option` and `Result` with `?`, and `match` that must handle every
+  variant: there is no catch-all arm and no exception to forget.
+- **Values, not references.** Arrays and structs copy on assignment (cheaply: storage is shared
+  until written), so no two names ever see each other's changes.
 - **Deterministic and loud.** Integer overflow panics. Output is byte-identical on every run
   and platform. The same source gives a byte-identical executable.
 
@@ -45,14 +76,16 @@ in full (`anvil spec` prints it).
 
 ## Status
 
-v0.1: single-file programs with i64, f64 with units, bool, str, structs, functions, loops,
+v0.2: single-file programs with i64, f64 with units, bool, strings with interpolation,
+growable arrays, structs, enums with exhaustive `match`, `Option` and `Result` with `?`,
 contracts, effects and tests. There are two backends:
 
 - an **interpreter**, which is the reference semantics;
-- a **native compiler**: Cranelift to x86-64, linked with MSVC on Windows.
+- a **native compiler**: Cranelift to x86-64, linked with MSVC on Windows. Strings and arrays
+  are reference counted with copy-on-write; the tests check that every object is freed.
 
 The test suite runs every program through both and requires identical stdout, panic messages
-and exit codes. Arrays, enums, modules and other platforms are on the
+and exit codes. A formatter, modules, generics and other platforms are on the
 [roadmap](docs/ROADMAP.md).
 
 ## Using it
@@ -65,11 +98,11 @@ cargo build --release
 ```
 
 ```bash
-target/release/anvil run examples/projectile.anv
+target/release/anvil run examples/orders.anv
 ```
 
 ```bash
-target/release/anvil build examples/projectile.anv -o projectile.exe
+target/release/anvil build examples/orders.anv -o orders.exe
 ```
 
 | Command | Does |

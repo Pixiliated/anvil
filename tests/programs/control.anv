@@ -22,7 +22,7 @@ fn first_square_above(limit: i64) -> i64 {
 }
 
 fn main() uses io {
-    print(classify(-3), " ", classify(0), " ", classify(4), " ", classify(40));
+    print("{classify(-3)} {classify(0)} {classify(4)} {classify(40)}");
     var total: i64 = 0;
     for i in 0..20 {
         if i % 2 == 0 {
@@ -33,7 +33,7 @@ fn main() uses io {
         }
         total = total + i;
     }
-    print("odd sum: ", total);
+    print("odd sum: {total}");
     var pairs: i64 = 0;
     for a in 0..5 {
         for b in a..5 {
@@ -42,8 +42,8 @@ fn main() uses io {
             }
         }
     }
-    print("pairs: ", pairs);
-    print("square: ", first_square_above(50));
+    print("pairs: {pairs}");
+    print("square: {first_square_above(50)}");
     for _k in 5..2 {
         print("never");
     }

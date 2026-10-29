@@ -15,11 +15,11 @@ fn log_twice(n: i64) uses io
     requires n > 0
     ensures n > 0
 {
-    print("n=", n);
-    print("n=", n);
+    print("n={n}");
+    print("n={n}");
 }
 
 fn main() uses io {
-    print(clamp(v: 5, lo: 0, hi: 3), " ", clamp(v: -5, lo: 0, hi: 3), " ", clamp(v: 2, lo: 0, hi: 3));
+    print("{clamp(v: 5, lo: 0, hi: 3)} {clamp(v: -5, lo: 0, hi: 3)} {clamp(v: 2, lo: 0, hi: 3)}");
     log_twice(4);
 }

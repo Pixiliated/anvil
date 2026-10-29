@@ -1,0 +1,14 @@
+// expect: E0402
+// resolve: mechanical
+enum Shape {
+    Rect(width: i64, height: i64),
+}
+
+fn main() uses io {
+    let s: Shape = Shape.Rect(width: 2, height: 3);
+    match s {
+        Rect(height, width) => {
+            print("{width * height}");
+        }
+    }
+}

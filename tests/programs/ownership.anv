@@ -1,0 +1,139 @@
+// Edge cases for the native backend's reference counting. Each line must match the interpreter,
+// and the native run checks that nothing leaks.
+struct Named {
+    name: str,
+    marks: [i64],
+}
+
+struct Nothing {}
+
+enum Slot {
+    Free,
+    Used(owner: str, items: [str]),
+}
+
+fn make(name: str) -> Named {
+    return Named { name: name, marks: [1, 2, 3] };
+}
+
+fn both(a: [str], b: [str]) -> i64 {
+    return a.len() + b.len();
+}
+
+fn find_long(words: [str], min: i64) -> Option[str] {
+    for w in words {
+        if w.len() >= min {
+            return Some(w);
+        }
+    }
+    return None;
+}
+
+fn first_used(slots: [Slot]) -> str {
+    for s in slots {
+        match s {
+            Free => {
+                continue;
+            }
+            Used(owner, items: _) => {
+                return owner;
+            }
+        }
+    }
+    return "nobody";
+}
+
+fn longest_two(words: [str]) -> Option[str] {
+    let first: str = find_long(words: words, min: 5)?;
+    let second: str = find_long(words: words, min: 7)?;
+    return Some(first + "/" + second);
+}
+
+fn label(n: i64) -> str
+    ensures result.len() > 0
+{
+    if n == 0 {
+        return "zero";
+    }
+    return "n{n}";
+}
+
+fn countdown(n: i64) -> str {
+    if n == 0 {
+        return "go";
+    }
+    return "{n} " + countdown(n - 1);
+}
+
+fn show(o: Option[str]) -> str {
+    var out: str = "none";
+    match o {
+        Some(value) => {
+            out = value;
+        }
+        None => {}
+    }
+    return out;
+}
+
+fn main() uses io {
+    var xs: [i64] = [10, 20, 30, 1];
+    // The pop runs while the index is computed; the read uses the array from before the pop.
+    let picked: i64 = xs[xs.pop()];
+    print("picked {picked}, xs has {xs.len()}");
+
+    var s: str = "same";
+    s = s;
+    var words: [str] = ["a", "bb"];
+    words = words;
+    words[0] = words[1];
+    words.push(words[0]);
+    print("{s} {words[0]} {words[1]} {words[2]} {words.len()}");
+    print("both {both(a: words, b: words)}");
+    print("field of a temporary: {make("tmp").name} {make("t2").marks.len()}");
+
+    var slots: [Slot] = [Slot.Free, Slot.Used(owner: "ann", items: ["key"]), Slot.Free];
+    slots[2] = Slot.Used(owner: "bob", items: []);
+    slots[0] = slots[2];
+    print("first used: {first_used(slots)}");
+
+    let ws: [str] = ["hi", "hello", "wonderful"];
+    print("{show(longest_two(ws))} {show(longest_two(["tiny"]))} {show(longest_two(["seven", "ok"]))}");
+    print("{label(0)} {label(5)} {countdown(3)}");
+
+    var found: i64 = -1;
+    var count: i64 = 0;
+    for w in ws {
+        count = count + 1;
+        if w == "hello" {
+            found = count;
+            break;
+        }
+    }
+    print("found at {found}");
+
+    var empties: [Nothing] = [Nothing {}, Nothing {}];
+    empties.push(Nothing {});
+    let _e: Nothing = empties[2];
+    print("empties {empties.len()}");
+
+    var people: [Named] = [make("x")];
+    people[0].marks.push(4);
+    people[0].name = "renamed {people[0].marks.len()}";
+    let p: Named = people.pop();
+    print("{p.name} {p.marks[3]} {people.len()}");
+
+    var maybe: Option[[str]] = Some(["one"]);
+    match maybe {
+        Some(value) => {
+            maybe = Some([value[0], "two"]);
+        }
+        None => {}
+    }
+    match maybe {
+        Some(value: list) => {
+            print("list {list[0]} {list[1]}");
+        }
+        None => {}
+    }
+}

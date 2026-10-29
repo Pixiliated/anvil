@@ -17,5 +17,5 @@ fn main() uses io {
     print(2.0[Hz] * t);
     print(sqrt(16.0[m^2]));
     print(d / 1.0[m]);
-    print(3.0[m] * 2.0[m], " ", 1.0[s^-1], " ", -4.0[N]);
+    print("{3.0[m] * 2.0[m]} {1.0[s^-1]} {-4.0[N]}");
 }

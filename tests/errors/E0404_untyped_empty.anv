@@ -1,0 +1,5 @@
+// expect: E0404
+fn main() uses io {
+    let n: i64 = [].len();
+    print("{n}");
+}

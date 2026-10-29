@@ -13,7 +13,7 @@ fn advance(p: Particle) -> Particle {
 }
 
 fn show(p: Particle) uses io {
-    print(p.name, "#", p.id, " at (", p.pos.x, ", ", p.pos.y, ") alive=", p.alive);
+    print("{p.name}#{p.id} at ({p.pos.x}, {p.pos.y}) alive={p.alive}");
 }
 
 fn main() uses io {

@@ -1,0 +1,57 @@
+// The examples from docs/SPEC.md, kept running.
+unit m;
+
+enum Shape {
+    Circle(radius: f64[m]),
+    Rect(width: f64[m], height: f64[m]),
+    Empty,
+}
+
+fn parse(text: str) -> Result[i64, str] {
+    if text == "one" {
+        return Ok(1);
+    }
+    if text == "two" {
+        return Ok(2);
+    }
+    return Err("cannot read \"{text}\"");
+}
+
+fn total(texts: [str]) -> Result[i64, str] {
+    var sum: i64 = 0;
+    for t in texts {
+        let n: i64 = parse(t)?;     // on Err, total returns that Err at once
+        sum = sum + n;
+    }
+    return Ok(sum);
+}
+
+fn greet(name: str) -> str {
+    return "hi {name}";
+}
+
+fn main() uses io {
+    let s: Shape = Shape.Rect(width: 2.0[m], height: 3.0[m]);
+    match s {
+        Circle(radius) => { print("circle {radius}"); }
+        Rect(width, height: h) => { print("{width} by {h}"); }
+        Empty => { }
+    }
+    var xs: [i64] = [3, 1, 4];
+    xs.push(1);                  // append
+    let last: i64 = xs.pop();    // remove and return the last element
+    xs[0] = 10;
+    let n: i64 = xs.len();
+    let grid: [[i64]] = [[1, 2], [3, 4]];
+    print("{last} {n} {xs[0]} {grid[1][0]} {greet("Ada")} {{braces}}");
+    let ok: [str] = ["one", "two", "two"];
+    let bad: [str] = ["one", "three"];
+    match total(ok) {
+        Ok(value) => { print("ok {value}"); }
+        Err(error) => { print(error); }
+    }
+    match total(bad) {
+        Ok(value: v) => { print("ok {v}"); }
+        Err(error: e) => { print(e); }
+    }
+}

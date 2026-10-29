@@ -97,7 +97,8 @@ fn native_matches_goldens() {
         let exe = dir.join(Path::new(&rel).with_extension("exe").file_name().unwrap());
         let build = anvil(&["build", &rel, "-o", exe.to_str().unwrap()]);
         assert!(build.status.success(), "{rel}: build failed: {}", String::from_utf8_lossy(&build.stderr));
-        let out = Command::new(&exe).current_dir(root()).output().unwrap();
+        // The runtime fails loudly at exit if any heap object was not freed.
+        let out = Command::new(&exe).current_dir(root()).env("ANVIL_CHECK_LEAKS", "1").output().unwrap();
         problems.extend(compare(&rel, "native", &out, &want));
     }
     let _ = std::fs::remove_dir_all(&dir);

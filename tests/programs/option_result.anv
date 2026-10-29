@@ -1,0 +1,139 @@
+struct Account {
+    owner: str,
+    balance: i64,
+}
+
+fn find(xs: [i64], target: i64) -> Option[i64] {
+    for i in 0..xs.len() {
+        if xs[i] == target {
+            return Some(i);
+        }
+    }
+    return None;
+}
+
+fn digit(c: i64) -> Result[i64, str] {
+    if c < 0 || c > 9 {
+        return Err("{c} is not a digit");
+    }
+    return Ok(c);
+}
+
+// `?` returns the Err from this function as soon as one digit fails.
+fn number(digits: [i64]) -> Result[i64, str]
+    ensures match_ok(result)
+{
+    var n: i64 = 0;
+    for d in digits {
+        let v: i64 = digit(d)?;
+        n = n * 10 + v;
+    }
+    return Ok(n);
+}
+
+fn match_ok(r: Result[i64, str]) -> bool {
+    var ok: bool = false;
+    match r {
+        Ok(value: _) => {
+            ok = true;
+        }
+        Err(error) => {
+            ok = error.len() > 0;
+        }
+    }
+    return ok;
+}
+
+fn first_index_sum(a: [i64], b: [i64], target: i64) -> Option[i64] {
+    let i: i64 = find(xs: a, target: target)?;
+    let j: i64 = find(xs: b, target: target)?;
+    return Some(i + j);
+}
+
+fn withdraw(acct: Account, amount: i64) -> Result[Account, str] {
+    if amount > acct.balance {
+        return Err("{acct.owner} has only {acct.balance}");
+    }
+    return Ok(Account { owner: acct.owner, balance: acct.balance - amount });
+}
+
+fn pay_twice(acct: Account, amount: i64) -> Result[Account, str] {
+    var a: Account = withdraw(acct: acct, amount: amount)?;
+    a = withdraw(acct: a, amount: amount)?;
+    return Ok(a);
+}
+
+fn show_opt(o: Option[i64]) -> str {
+    var out: str = "";
+    match o {
+        Some(value) => {
+            out = "Some({value})";
+        }
+        None => {
+            out = "None";
+        }
+    }
+    return out;
+}
+
+fn show_res(r: Result[i64, str]) -> str {
+    var out: str = "";
+    match r {
+        Ok(value) => {
+            out = "Ok({value})";
+        }
+        Err(error) => {
+            out = "Err({error})";
+        }
+    }
+    return out;
+}
+
+fn show_acct(r: Result[Account, str]) -> str {
+    var out: str = "";
+    match r {
+        Ok(value) => {
+            out = "{value.owner} keeps {value.balance}";
+        }
+        Err(error) => {
+            out = "refused: {error}";
+        }
+    }
+    return out;
+}
+
+fn main() uses io {
+    let xs: [i64] = [5, 8, 13, 21];
+    print("{show_opt(find(xs: xs, target: 13))} {show_opt(find(xs: xs, target: 4))}");
+    print("{show_res(number([4, 0, 2]))} {show_res(number([1, 12, 3]))} {show_res(number([]))}");
+    print(show_opt(first_index_sum(a: xs, b: [21, 13], target: 13)));
+    print(show_opt(first_index_sum(a: xs, b: [1, 2], target: 13)));
+    print(show_opt(first_index_sum(a: [], b: [13], target: 13)));
+    let ada: Account = Account { owner: "Ada", balance: 100 };
+    print(show_acct(pay_twice(acct: ada, amount: 30)));
+    print(show_acct(pay_twice(acct: ada, amount: 60)));
+    print(show_acct(pay_twice(acct: ada, amount: 200)));
+    let maybe_names: [Option[str]] = [Some("x"), None, Some("z")];
+    var seen: str = "";
+    for m in maybe_names {
+        match m {
+            Some(value) => {
+                seen = seen + value;
+            }
+            None => {
+                seen = seen + "_";
+            }
+        }
+    }
+    print(seen);
+    var nums: Option[[i64]] = None;
+    nums = Some([1, 2]);
+    match nums {
+        Some(value: list) => {
+            print("got {list.len()} numbers");
+        }
+        None => {
+            print("no numbers");
+        }
+    }
+}

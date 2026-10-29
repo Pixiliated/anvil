@@ -7,8 +7,12 @@ pub enum Tok {
     Int(i64),
     Float(f64),
     Str(String),
+    /// A string with `{expr}` parts; each code part is its own token list ending in Eof.
+    Interp(Vec<LexPart>),
     // keywords
     Fn,
+    Enum,
+    Match,
     Let,
     Var,
     If,
@@ -41,6 +45,8 @@ pub enum Tok {
     Dot,
     DotDot,
     Arrow,
+    FatArrow,
+    Question,
     Assign,
     EqEq,
     NotEq,
@@ -66,7 +72,7 @@ impl Tok {
             Tok::Ident(s) => format!("identifier `{s}`"),
             Tok::Int(v) => format!("integer `{v}`"),
             Tok::Float(v) => format!("float `{v}`"),
-            Tok::Str(_) => "string literal".into(),
+            Tok::Str(_) | Tok::Interp(_) => "string literal".into(),
             Tok::Eof => "end of file".into(),
             other => format!("`{}`", other.text()),
         }
@@ -75,6 +81,8 @@ impl Tok {
     pub fn text(&self) -> &'static str {
         match self {
             Tok::Fn => "fn",
+            Tok::Enum => "enum",
+            Tok::Match => "match",
             Tok::Let => "let",
             Tok::Var => "var",
             Tok::If => "if",
@@ -106,6 +114,8 @@ impl Tok {
             Tok::Dot => ".",
             Tok::DotDot => "..",
             Tok::Arrow => "->",
+            Tok::FatArrow => "=>",
+            Tok::Question => "?",
             Tok::Assign => "=",
             Tok::EqEq => "==",
             Tok::NotEq => "!=",
@@ -122,12 +132,18 @@ impl Tok {
             Tok::Bang => "!",
             Tok::AndAnd => "&&",
             Tok::OrOr => "||",
-            Tok::Ident(_) | Tok::Int(_) | Tok::Float(_) | Tok::Str(_) | Tok::Eof => "",
+            Tok::Ident(_) | Tok::Int(_) | Tok::Float(_) | Tok::Str(_) | Tok::Interp(_) | Tok::Eof => "",
         }
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
+pub enum LexPart {
+    Lit(String),
+    Code(Vec<Token>),
+}
+
+#[derive(Clone, Debug, PartialEq)]
 pub struct Token {
     pub tok: Tok,
     pub span: Span,
@@ -136,6 +152,8 @@ pub struct Token {
 fn keyword(s: &str) -> Option<Tok> {
     Some(match s {
         "fn" => Tok::Fn,
+        "enum" => Tok::Enum,
+        "match" => Tok::Match,
         "let" => Tok::Let,
         "var" => Tok::Var,
         "if" => Tok::If,
@@ -160,10 +178,15 @@ fn keyword(s: &str) -> Option<Tok> {
 }
 
 pub fn lex(text: &str) -> Result<Vec<Token>, Diagnostic> {
+    lex_range(text, 0, text.len())
+}
+
+/// Lexes text[start..end]; spans stay relative to the whole text. Used again for `{expr}` parts.
+fn lex_range(text: &str, start: usize, end: usize) -> Result<Vec<Token>, Diagnostic> {
     let bytes = text.as_bytes();
     let mut out = Vec::new();
-    let mut i = 0;
-    while i < bytes.len() {
+    let mut i = start;
+    while i < end {
         let c = bytes[i];
         if c == b' ' || c == b'\t' || c == b'\n' || c == b'\r' {
             i += 1;
@@ -190,49 +213,14 @@ pub fn lex(text: &str) -> Result<Vec<Token>, Diagnostic> {
             continue;
         }
         if c == b'"' {
-            i += 1;
-            let mut s = String::new();
-            loop {
-                match bytes.get(i) {
-                    None | Some(b'\n') => {
-                        // No fix: where the string should end is a guess, and a wrong guess compiles.
-                        return Err(Diagnostic::new("E0002", Span::new(start, i), "unterminated string literal"));
-                    }
-                    Some(b'"') => {
-                        i += 1;
-                        break;
-                    }
-                    Some(b'\\') => {
-                        let esc = match bytes.get(i + 1) {
-                            Some(b'n') => '\n',
-                            Some(b't') => '\t',
-                            Some(b'"') => '"',
-                            Some(b'\\') => '\\',
-                            _ => {
-                                return Err(Diagnostic::new(
-                                    "E0002",
-                                    Span::new(i, (i + 2).min(bytes.len())),
-                                    "unknown escape; valid escapes are \\n \\t \\\" \\\\",
-                                ))
-                            }
-                        };
-                        s.push(esc);
-                        i += 2;
-                    }
-                    Some(_) => {
-                        let ch = text[i..].chars().next().unwrap();
-                        s.push(ch);
-                        i += ch.len_utf8();
-                    }
-                }
-            }
-            out.push(Token { tok: Tok::Str(s), span: Span::new(start, i) });
+            out.push(lex_string(text, &mut i)?);
             continue;
         }
-        let two = if i + 1 < bytes.len() { &text[i..i + 2] } else { "" };
+        let two = if i + 1 < end { &text[i..i + 2] } else { "" };
         let tok2 = match two {
             ".." => Some(Tok::DotDot),
             "->" => Some(Tok::Arrow),
+            "=>" => Some(Tok::FatArrow),
             "==" => Some(Tok::EqEq),
             "!=" => Some(Tok::NotEq),
             "<=" => Some(Tok::Le),
@@ -267,6 +255,7 @@ pub fn lex(text: &str) -> Result<Vec<Token>, Diagnostic> {
             b'%' => Tok::Percent,
             b'^' => Tok::Caret,
             b'!' => Tok::Bang,
+            b'?' => Tok::Question,
             _ => {
                 let ch = text[i..].chars().next().unwrap();
                 let span = Span::new(i, i + ch.len_utf8());
@@ -281,8 +270,136 @@ pub fn lex(text: &str) -> Result<Vec<Token>, Diagnostic> {
         i += 1;
         out.push(Token { tok, span: Span::new(start, i) });
     }
-    out.push(Token { tok: Tok::Eof, span: Span::new(text.len(), text.len()) });
+    out.push(Token { tok: Tok::Eof, span: Span::new(end, end) });
     Ok(out)
+}
+
+/// Index just past the string literal starting at `start` (a `"`), or None if it does not close
+/// on its line. Only finds the end; lex_string reports what is wrong inside.
+fn string_end(bytes: &[u8], start: usize) -> Option<usize> {
+    let mut i = start + 1;
+    loop {
+        match *bytes.get(i)? {
+            b'\n' => return None,
+            b'"' => return Some(i + 1),
+            b'\\' => i += 2,
+            b'{' if bytes.get(i + 1) == Some(&b'{') => i += 2,
+            b'{' => {
+                i += 1;
+                loop {
+                    match *bytes.get(i)? {
+                        b'\n' => return None,
+                        b'"' => i = string_end(bytes, i)?,
+                        b'}' => {
+                            i += 1;
+                            break;
+                        }
+                        _ => i += 1,
+                    }
+                }
+            }
+            _ => i += 1,
+        }
+    }
+}
+
+/// A string literal starting at `"`. `{expr}` interpolates; `{{` and `}}` are literal braces.
+fn lex_string(text: &str, i: &mut usize) -> Result<Token, Diagnostic> {
+    let bytes = text.as_bytes();
+    let start = *i;
+    *i += 1;
+    let mut parts = Vec::new();
+    let mut s = String::new();
+    loop {
+        match bytes.get(*i) {
+            None | Some(b'\n') => {
+                // No fix: where the string should end is a guess, and a wrong guess compiles.
+                return Err(Diagnostic::new("E0002", Span::new(start, *i), "unterminated string literal"));
+            }
+            Some(b'"') => {
+                *i += 1;
+                break;
+            }
+            Some(b'\\') => {
+                let esc = match bytes.get(*i + 1) {
+                    Some(b'n') => '\n',
+                    Some(b't') => '\t',
+                    Some(b'"') => '"',
+                    Some(b'\\') => '\\',
+                    _ => {
+                        return Err(Diagnostic::new(
+                            "E0002",
+                            Span::new(*i, (*i + 2).min(bytes.len())),
+                            "unknown escape; valid escapes are \\n \\t \\\" \\\\",
+                        ))
+                    }
+                };
+                s.push(esc);
+                *i += 2;
+            }
+            Some(b'{') if bytes.get(*i + 1) == Some(&b'{') => {
+                s.push('{');
+                *i += 2;
+            }
+            Some(b'}') if bytes.get(*i + 1) == Some(&b'}') => {
+                s.push('}');
+                *i += 2;
+            }
+            Some(b'}') => {
+                let span = Span::new(*i, *i + 1);
+                return Err(Diagnostic::new("E0004", span, "a `}` in a string is written `}}`").fix1(
+                    FixKind::Mechanical,
+                    "double it",
+                    span,
+                    "}}",
+                ));
+            }
+            Some(b'{') => {
+                let open = *i;
+                let mut j = open + 1;
+                let unclosed = |j: usize| {
+                    Diagnostic::new(
+                        "E0004",
+                        Span::new(open, j),
+                        "`{` in a string starts an interpolation that must close with `}` on the same line, \
+                         with no braces inside",
+                    )
+                    .note("write `{{` for a literal `{`", None)
+                };
+                loop {
+                    match bytes.get(j) {
+                        Some(b'}') => break,
+                        // A string inside the expression, as in "{f("x")}"; it may interpolate too.
+                        Some(b'"') => j = string_end(bytes, j).ok_or_else(|| unclosed(j))?,
+                        None | Some(b'\n') | Some(b'{') => return Err(unclosed(j)),
+                        Some(_) => j += 1,
+                    }
+                }
+                if text[open + 1..j].trim().is_empty() {
+                    return Err(Diagnostic::new("E0004", Span::new(open, j + 1), "empty `{}` in a string")
+                        .note("put an expression inside, or write `{{}}` for literal braces", None));
+                }
+                if !s.is_empty() {
+                    parts.push(LexPart::Lit(std::mem::take(&mut s)));
+                }
+                parts.push(LexPart::Code(lex_range(text, open + 1, j)?));
+                *i = j + 1;
+            }
+            Some(_) => {
+                let ch = text[*i..].chars().next().unwrap();
+                s.push(ch);
+                *i += ch.len_utf8();
+            }
+        }
+    }
+    let span = Span::new(start, *i);
+    if parts.is_empty() {
+        return Ok(Token { tok: Tok::Str(s), span });
+    }
+    if !s.is_empty() {
+        parts.push(LexPart::Lit(s));
+    }
+    Ok(Token { tok: Tok::Interp(parts), span })
 }
 
 fn lex_number(text: &str, i: &mut usize) -> Result<Token, Diagnostic> {

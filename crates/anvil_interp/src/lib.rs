@@ -3,20 +3,34 @@
 
 use anvil_front::ir::*;
 use std::io::Write;
+use std::rc::Rc;
 
+/// Arrays share storage until written (Rc::make_mut), which gives value semantics cheaply.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Value {
     Void,
     I64(i64),
     F64(f64),
     Bool(bool),
-    Str(std::rc::Rc<str>),
+    Str(Rc<str>),
     Struct(Vec<Value>),
+    Array(Rc<Vec<Value>>),
+    /// Variant index and that variant's fields.
+    Enum(usize, Vec<Value>),
 }
 
-/// A program-level failure: the text after "panic: ".
+/// Why evaluation stopped early: a panic (the text after "panic: "), or `?` returning a failure.
 #[derive(Debug, PartialEq)]
-pub struct Panic(pub String);
+enum Unwind {
+    Panic(String),
+    Return(Value),
+}
+
+type R<T> = Result<T, Unwind>;
+
+fn panic<T>(message: impl Into<String>) -> R<T> {
+    Err(Unwind::Panic(message.into()))
+}
 
 /// Interpreted calls deeper than this panic instead of exhausting the host stack.
 pub const MAX_CALL_DEPTH: usize = 10_000;
@@ -51,7 +65,8 @@ pub fn run_main(program: &Program, out: &mut dyn Write) -> Outcome {
         Ok(Value::I64(code)) if (0..=255).contains(&code) => Outcome::Exit(code as i32),
         Ok(Value::I64(code)) => Outcome::Panicked(main_exit_message(code)),
         Ok(other) => unreachable!("main returned {other:?}"),
-        Err(Panic(m)) => Outcome::Panicked(m),
+        Err(Unwind::Panic(m)) => Outcome::Panicked(m),
+        Err(Unwind::Return(v)) => unreachable!("`?` escaped main: {v:?}"),
     }
 }
 
@@ -62,7 +77,11 @@ pub fn run_test(program: &Program, index: usize, out: &mut dyn Write) -> Result<
     let mut frame = vec![Value::Void; test.locals.len()];
     let r = it.block(&test.body, &mut frame);
     let _ = it.out.flush();
-    r.map(|_| ()).map_err(|Panic(m)| m)
+    match r {
+        Ok(_) => Ok(()),
+        Err(Unwind::Panic(m)) => Err(m),
+        Err(Unwind::Return(v)) => unreachable!("`?` in a test: {v:?}"),
+    }
 }
 
 /// Runs `f` on a thread with a stack big enough for MAX_CALL_DEPTH interpreted calls.
@@ -75,7 +94,7 @@ pub fn run_on_big_stack<T: Send + 'static>(f: impl FnOnce() -> T + Send + 'stati
         .expect("interpreter thread crashed")
 }
 
-/// Text print() writes for one value; floats with a unit get " unit" appended.
+/// Text of a value for print and interpolation; floats with a unit get " unit" appended.
 pub fn print_text(v: &Value, ty: &Ty) -> String {
     match (v, ty) {
         (Value::I64(x), _) => x.to_string(),
@@ -83,15 +102,44 @@ pub fn print_text(v: &Value, ty: &Ty) -> String {
         (Value::F64(x), _) => format_f64(*x),
         (Value::Bool(b), _) => b.to_string(),
         (Value::Str(s), _) => s.to_string(),
-        (v, _) => unreachable!("print of {v:?}"),
+        (v, _) => unreachable!("text of {v:?}"),
     }
 }
 
+/// The value at `path` inside `root`, ready to be changed. Array storage on the way is made
+/// unique first, so other copies of the array never see the change.
+fn place_mut<'v>(mut slot: &'v mut Value, path: &[Step], indices: &[i64]) -> R<&'v mut Value> {
+    let mut next_index = indices.iter();
+    for step in path {
+        slot = match step {
+            Step::Field(i) => match slot {
+                Value::Struct(fields) => &mut fields[*i],
+                v => unreachable!("field of {v:?}"),
+            },
+            Step::Index { site, .. } => {
+                let i = *next_index.next().unwrap();
+                match slot {
+                    Value::Array(items) => {
+                        let items = Rc::make_mut(items);
+                        let len = items.len() as i64;
+                        if i < 0 || i >= len {
+                            return panic(index_message(i, len, site));
+                        }
+                        &mut items[i as usize]
+                    }
+                    v => unreachable!("index of {v:?}"),
+                }
+            }
+        };
+    }
+    Ok(slot)
+}
+
 impl<'p> Interp<'p> {
-    fn call(&mut self, fid: FuncId, args: Vec<Value>) -> Result<Value, Panic> {
+    fn call(&mut self, fid: FuncId, args: Vec<Value>) -> R<Value> {
         let f = &self.program.funcs[fid];
         if self.depth >= MAX_CALL_DEPTH {
-            return Err(Panic(format!("stack overflow: call depth exceeded {MAX_CALL_DEPTH} in `{}`", f.name)));
+            return panic(format!("stack overflow: call depth exceeded {MAX_CALL_DEPTH} in `{}`", f.name));
         }
         self.depth += 1;
         let mut frame = vec![Value::Void; f.locals.len()];
@@ -100,26 +148,27 @@ impl<'p> Interp<'p> {
         }
         for c in &f.requires {
             if !self.eval(&c.expr, &mut frame)?.as_bool() {
-                return Err(Panic(c.message.clone()));
+                return panic(c.message.clone());
             }
         }
-        let ret = match self.block(&f.body, &mut frame)? {
-            Flow::Return(v) => v,
-            _ => Value::Void,
+        let ret = match self.block(&f.body, &mut frame) {
+            Ok(Flow::Return(v)) | Err(Unwind::Return(v)) => v,
+            Ok(_) => Value::Void,
+            Err(p) => return Err(p),
         };
         if let Some(r) = f.result_local {
             frame[r] = ret.clone();
         }
         for c in &f.ensures {
             if !self.eval(&c.expr, &mut frame)?.as_bool() {
-                return Err(Panic(c.message.clone()));
+                return panic(c.message.clone());
             }
         }
         self.depth -= 1;
         Ok(ret)
     }
 
-    fn block(&mut self, stmts: &[Stmt], frame: &mut Vec<Value>) -> Result<Flow, Panic> {
+    fn block(&mut self, stmts: &[Stmt], frame: &mut Vec<Value>) -> R<Flow> {
         for s in stmts {
             match self.stmt(s, frame)? {
                 Flow::Normal => {}
@@ -129,19 +178,35 @@ impl<'p> Interp<'p> {
         Ok(Flow::Normal)
     }
 
-    fn stmt(&mut self, s: &Stmt, frame: &mut Vec<Value>) -> Result<Flow, Panic> {
+    /// Evaluates the index expressions of a place, left to right.
+    fn indices(&mut self, path: &[Step], frame: &mut Vec<Value>) -> R<Vec<i64>> {
+        let mut out = Vec::new();
+        for step in path {
+            if let Step::Index { index, .. } = step {
+                out.push(self.eval(index, frame)?.as_i64());
+            }
+        }
+        Ok(out)
+    }
+
+    /// Runs a loop body; Some(flow) when the loop must stop.
+    fn loop_body(&mut self, body: &[Stmt], frame: &mut Vec<Value>) -> R<Option<Flow>> {
+        Ok(match self.block(body, frame)? {
+            Flow::Break => Some(Flow::Normal),
+            Flow::Return(v) => Some(Flow::Return(v)),
+            Flow::Normal | Flow::Continue => None,
+        })
+    }
+
+    fn stmt(&mut self, s: &Stmt, frame: &mut Vec<Value>) -> R<Flow> {
         match s {
             Stmt::Let(l, e) => {
                 frame[*l] = self.eval(e, frame)?;
             }
             Stmt::Assign(l, path, e) => {
                 let v = self.eval(e, frame)?;
-                let mut slot = &mut frame[*l];
-                for i in path {
-                    let Value::Struct(fields) = slot else { unreachable!("field path into non-struct") };
-                    slot = &mut fields[*i];
-                }
-                *slot = v;
+                let indices = self.indices(path, frame)?;
+                *place_mut(&mut frame[*l], path, &indices)? = v;
             }
             Stmt::Expr(e) => {
                 self.eval(e, frame)?;
@@ -152,10 +217,8 @@ impl<'p> Interp<'p> {
             }
             Stmt::While(c, body) => {
                 while self.eval(c, frame)?.as_bool() {
-                    match self.block(body, frame)? {
-                        Flow::Break => break,
-                        Flow::Return(v) => return Ok(Flow::Return(v)),
-                        Flow::Normal | Flow::Continue => {}
+                    if let Some(flow) = self.loop_body(body, frame)? {
+                        return Ok(flow);
                     }
                 }
             }
@@ -165,13 +228,32 @@ impl<'p> Interp<'p> {
                 let mut i = s;
                 while i < e {
                     frame[*l] = Value::I64(i);
-                    match self.block(body, frame)? {
-                        Flow::Break => break,
-                        Flow::Return(v) => return Ok(Flow::Return(v)),
-                        Flow::Normal | Flow::Continue => {}
+                    if let Some(flow) = self.loop_body(body, frame)? {
+                        return Ok(flow);
                     }
                     i += 1;
                 }
+            }
+            Stmt::ForEach { var, held, iter, body } => {
+                let items = self.eval(iter, frame)?;
+                frame[*held] = items.clone();
+                let Value::Array(items) = items else { unreachable!("for over {items:?}") };
+                for item in items.iter() {
+                    frame[*var] = item.clone();
+                    if let Some(flow) = self.loop_body(body, frame)? {
+                        return Ok(flow);
+                    }
+                }
+            }
+            Stmt::Match { held, scrutinee, arms } => {
+                let v = self.eval(scrutinee, frame)?;
+                frame[*held] = v.clone();
+                let Value::Enum(tag, fields) = v else { unreachable!("match on {v:?}") };
+                let arm = arms.iter().find(|a| a.variant == tag).expect("match is exhaustive");
+                for (field, local) in &arm.bindings {
+                    frame[*local] = fields[*field].clone();
+                }
+                return self.block(&arm.body, frame);
             }
             Stmt::Return(v) => {
                 let v = match v {
@@ -186,7 +268,7 @@ impl<'p> Interp<'p> {
         Ok(Flow::Normal)
     }
 
-    fn eval(&mut self, e: &Expr, frame: &mut Vec<Value>) -> Result<Value, Panic> {
+    fn eval(&mut self, e: &Expr, frame: &mut Vec<Value>) -> R<Value> {
         Ok(match &e.kind {
             ExprKind::Int(v) => Value::I64(*v),
             ExprKind::Float(v) => Value::F64(*v),
@@ -198,18 +280,63 @@ impl<'p> Interp<'p> {
                 v => unreachable!("field of {v:?}"),
             },
             ExprKind::Call(fid, args) => {
-                let mut vals = Vec::with_capacity(args.len());
-                for a in args {
-                    vals.push(self.eval(a, frame)?);
-                }
+                let vals = self.eval_all(args, frame)?;
                 self.call(*fid, vals)?
             }
-            ExprKind::StructLit(_, fields) => {
-                let mut vals = Vec::with_capacity(fields.len());
-                for f in fields {
-                    vals.push(self.eval(f, frame)?);
+            ExprKind::StructLit(_, fields) => Value::Struct(self.eval_all(fields, frame)?),
+            ExprKind::ArrayLit(elems) => Value::Array(Rc::new(self.eval_all(elems, frame)?)),
+            ExprKind::Variant { variant, fields, .. } => Value::Enum(*variant, self.eval_all(fields, frame)?),
+            ExprKind::Index { base, index, site } => {
+                let items = self.eval(base, frame)?;
+                let i = self.eval(index, frame)?.as_i64();
+                let Value::Array(items) = items else { unreachable!("index of {items:?}") };
+                let len = items.len() as i64;
+                if i < 0 || i >= len {
+                    return panic(index_message(i, len, site));
                 }
-                Value::Struct(vals)
+                items[i as usize].clone()
+            }
+            ExprKind::Interp(parts) => {
+                let mut text = String::new();
+                for p in parts {
+                    let v = self.eval(p, frame)?;
+                    text.push_str(&print_text(&v, &p.ty));
+                }
+                Value::Str(text.into())
+            }
+            ExprKind::StrConcat(l, r) => {
+                let a = self.eval(l, frame)?;
+                let b = self.eval(r, frame)?;
+                Value::Str(format!("{}{}", a.as_str(), b.as_str()).into())
+            }
+            ExprKind::Push { local, path, value } => {
+                let v = self.eval(value, frame)?;
+                let indices = self.indices(path, frame)?;
+                match place_mut(&mut frame[*local], path, &indices)? {
+                    Value::Array(items) => Rc::make_mut(items).push(v),
+                    other => unreachable!("push to {other:?}"),
+                }
+                Value::Void
+            }
+            ExprKind::Pop { local, path, message } => {
+                let indices = self.indices(path, frame)?;
+                match place_mut(&mut frame[*local], path, &indices)? {
+                    Value::Array(items) => match Rc::make_mut(items).pop() {
+                        Some(v) => v,
+                        None => return panic(message.clone()),
+                    },
+                    other => unreachable!("pop from {other:?}"),
+                }
+            }
+            ExprKind::Try { held, inner, .. } => {
+                let v = self.eval(inner, frame)?;
+                frame[*held] = v.clone();
+                match v {
+                    Value::Enum(0, mut fields) => fields.swap_remove(0),
+                    // The failure variant (None or Err) has the same index and fields in the return type.
+                    Value::Enum(failure, fields) => return Err(Unwind::Return(Value::Enum(failure, fields))),
+                    other => unreachable!("`?` on {other:?}"),
+                }
             }
             ExprKind::IArith { op, l, r, overflow, div_zero } => {
                 let a = self.eval(l, frame)?.as_i64();
@@ -220,7 +347,7 @@ impl<'p> Interp<'p> {
                     IOp::Mul => a.checked_mul(b),
                     IOp::Div | IOp::Rem => {
                         if b == 0 {
-                            return Err(Panic(div_zero.clone()));
+                            return panic(div_zero.clone());
                         }
                         if *op == IOp::Div {
                             a.checked_div(b)
@@ -229,7 +356,10 @@ impl<'p> Interp<'p> {
                         }
                     }
                 };
-                Value::I64(v.ok_or_else(|| Panic(overflow.clone()))?)
+                match v {
+                    Some(v) => Value::I64(v),
+                    None => return panic(overflow.clone()),
+                }
             }
             ExprKind::FArith(op, l, r) => {
                 let a = self.eval(l, frame)?.as_f64();
@@ -248,56 +378,70 @@ impl<'p> Interp<'p> {
                     (Value::I64(x), Value::I64(y)) => cmp(*op, x, y),
                     (Value::F64(x), Value::F64(y)) => cmp(*op, x, y),
                     (Value::Bool(x), Value::Bool(y)) => cmp(*op, x, y),
+                    // Bytewise, like memcmp in the C runtime.
+                    (Value::Str(x), Value::Str(y)) => cmp(*op, x.as_bytes(), y.as_bytes()),
                     _ => unreachable!("compare {a:?} {b:?}"),
                 })
             }
             ExprKind::And(l, r) => Value::Bool(self.eval(l, frame)?.as_bool() && self.eval(r, frame)?.as_bool()),
             ExprKind::Or(l, r) => Value::Bool(self.eval(l, frame)?.as_bool() || self.eval(r, frame)?.as_bool()),
             ExprKind::Not(x) => Value::Bool(!self.eval(x, frame)?.as_bool()),
-            ExprKind::INeg { e, overflow } => {
-                Value::I64(self.eval(e, frame)?.as_i64().checked_neg().ok_or_else(|| Panic(overflow.clone()))?)
-            }
+            ExprKind::INeg { e, overflow } => match self.eval(e, frame)?.as_i64().checked_neg() {
+                Some(v) => Value::I64(v),
+                None => return panic(overflow.clone()),
+            },
             ExprKind::FNeg(x) => Value::F64(-self.eval(x, frame)?.as_f64()),
             ExprKind::Builtin(b, args) => self.builtin(b, args, frame)?,
         })
     }
 
-    fn builtin(&mut self, b: &Builtin, args: &[Expr], frame: &mut Vec<Value>) -> Result<Value, Panic> {
-        if let Builtin::Print = b {
-            let mut line = String::new();
-            for a in args {
-                let v = self.eval(a, frame)?;
-                line.push_str(&print_text(&v, &a.ty));
-            }
-            line.push('\n');
-            self.out.write_all(line.as_bytes()).expect("stdout write failed");
-            return Ok(Value::Void);
+    fn eval_all(&mut self, es: &[Expr], frame: &mut Vec<Value>) -> R<Vec<Value>> {
+        let mut vals = Vec::with_capacity(es.len());
+        for e in es {
+            vals.push(self.eval(e, frame)?);
         }
+        Ok(vals)
+    }
+
+    fn builtin(&mut self, b: &Builtin, args: &[Expr], frame: &mut Vec<Value>) -> R<Value> {
         let x = self.eval(&args[0], frame)?;
         Ok(match b {
-            Builtin::Print => unreachable!(),
+            Builtin::Print => {
+                let mut line = print_text(&x, &args[0].ty);
+                line.push('\n');
+                self.out.write_all(line.as_bytes()).expect("stdout write failed");
+                Value::Void
+            }
             Builtin::Assert { message } => {
                 if !x.as_bool() {
-                    return Err(Panic(message.clone()));
+                    return panic(message.clone());
                 }
                 Value::Void
             }
             Builtin::Sqrt => Value::F64(x.as_f64().sqrt()),
-            Builtin::AbsI64 { message } => Value::I64(x.as_i64().checked_abs().ok_or_else(|| Panic(message.clone()))?),
+            Builtin::AbsI64 { message } => match x.as_i64().checked_abs() {
+                Some(v) => Value::I64(v),
+                None => return panic(message.clone()),
+            },
             Builtin::AbsF64 => Value::F64(x.as_f64().abs()),
             Builtin::ToF64 => Value::F64(x.as_i64() as f64),
             Builtin::ToI64 { message } => {
                 let v = x.as_f64();
                 if !(TO_I64_MIN..TO_I64_MAX_EXCLUSIVE).contains(&v) {
-                    return Err(Panic(message.clone()));
+                    return panic(message.clone());
                 }
                 Value::I64(v as i64)
             }
+            Builtin::Len => match x {
+                Value::Str(s) => Value::I64(s.len() as i64),
+                Value::Array(items) => Value::I64(items.len() as i64),
+                other => unreachable!("len of {other:?}"),
+            },
         })
     }
 }
 
-fn cmp<T: PartialOrd>(op: CmpOp, a: T, b: T) -> bool {
+fn cmp<T: PartialOrd + ?Sized>(op: CmpOp, a: &T, b: &T) -> bool {
     match op {
         CmpOp::Eq => a == b,
         CmpOp::Ne => a != b,
@@ -325,6 +469,12 @@ impl Value {
         match self {
             Value::Bool(v) => *v,
             v => unreachable!("expected bool, got {v:?}"),
+        }
+    }
+    fn as_str(&self) -> &str {
+        match self {
+            Value::Str(s) => s,
+            v => unreachable!("expected str, got {v:?}"),
         }
     }
 }

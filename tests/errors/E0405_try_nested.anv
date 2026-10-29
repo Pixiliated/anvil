@@ -1,0 +1,16 @@
+// expect: E0405
+fn half(n: i64) -> Option[i64] {
+    if n % 2 != 0 {
+        return None;
+    }
+    return Some(n / 2);
+}
+
+fn quarter(n: i64) -> Option[i64] {
+    return Some(half(half(n)?)?);
+}
+
+fn main() uses io {
+    let _q: Option[i64] = quarter(8);
+    print("done");
+}

@@ -14,7 +14,8 @@ Anvil is a compiled language designed to be written by AI agents. The compiler i
 
 ## Rules
 1. **Both backends agree.** Every language change adds programs to `tests/programs` and must
-   give identical stdout, panic text and exit code in the interpreter and native code.
+   give identical stdout, panic text and exit code in the interpreter and native code. Native
+   test runs set `ANVIL_CHECK_LEAKS=1`, so a reference-counting mistake fails the test.
 2. **Every error code is tested.** A new code needs an explanation in `diag::explain`, an entry
    in `ALL_CODES`, and a file in `tests/errors`. Mark it `// resolve: mechanical` if its
    mechanical fixes must produce a clean program.

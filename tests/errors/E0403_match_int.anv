@@ -1,0 +1,9 @@
+// expect: E0403
+fn main() uses io {
+    let n: i64 = 3;
+    match n {
+        Some(value) => {
+            print("{value}");
+        }
+    }
+}

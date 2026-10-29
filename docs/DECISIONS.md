@@ -32,3 +32,20 @@ Short records of choices that are not obvious from the code. Newest last.
   a 64 MiB stack. Recorded in SPEC.md as the one known difference.
 - **The `anvil` crate name is taken on crates.io** (and Foundry ships a tool called Anvil). The
   language keeps the name; the package will publish as `anvil-lang`.
+
+## M1 (v0.2)
+
+- **Arrays are values.** Assignment copies; storage is shared until written (copy-on-write).
+  No aliasing means a change is only ever visible through the name it was made with.
+- **Native memory is reference counted**, with every local released when its function returns
+  and a store releasing the value it replaces. `ANVIL_CHECK_LEAKS=1` makes a native program
+  fail at exit if any object is still alive; the parity tests always set it.
+- **Enums flatten to a tag plus every variant's fields**, unused ones zero, so they stay in
+  scalars like structs. Array elements are 8-byte slots, one per scalar.
+- **No catch-all match arm.** A wildcard would hide new variants from every existing match.
+- **One `print` argument.** Interpolation is the one way to build text; the old multi-argument
+  form is an error with a mechanical fix that rewrites it, which migrated every test program.
+- **`?` only at the top of let, assignment and return**, so an early return never leaves
+  half-evaluated temporaries behind in native code.
+- **Strings may appear inside `{...}`**, after the first version forbade it and the author of
+  the tests tripped over the rule three times.

@@ -1,0 +1,20 @@
+// expect: E0400
+enum Dir {
+    North,
+    South,
+    Jump(height: i64),
+}
+
+fn name(d: Dir) -> i64 {
+    var n: i64 = 0;
+    match d {
+        North => {
+            n = 1;
+        }
+    }
+    return n;
+}
+
+fn main() uses io {
+    print(name(Dir.South));
+}

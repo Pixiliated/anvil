@@ -1,0 +1,20 @@
+// expect: E0401
+enum Coin {
+    Heads,
+    Tails,
+}
+
+fn main() uses io {
+    let c: Coin = Coin.Heads;
+    match c {
+        Heads => {
+            print("h");
+        }
+        Tails => {
+            print("t");
+        }
+        Heads => {
+            print("again");
+        }
+    }
+}

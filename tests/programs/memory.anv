@@ -1,0 +1,41 @@
+// Many short-lived strings and arrays: the native build checks every object is freed.
+struct Pair {
+    left: [str],
+    right: Option[str],
+}
+
+fn churn(n: i64) -> i64 {
+    var kept: [Pair] = [];
+    var total: i64 = 0;
+    for i in 0..n {
+        let text: str = "item {i}";
+        var p: Pair = Pair { left: [text, text + "!"], right: None };
+        if i % 3 == 0 {
+            p.right = Some(text);
+        }
+        let copy: Pair = p;
+        p.left.push("extra");
+        total = total + p.left.len() + copy.left.len();
+        if i % 100 == 0 {
+            kept.push(copy);
+        }
+    }
+    while kept.len() > 1 {
+        let gone: Pair = kept.pop();
+        total = total + gone.left[0].len();
+    }
+    return total;
+}
+
+fn main() uses io {
+    print(churn(20000));
+    var big: [i64] = [];
+    for i in 0..200000 {
+        big.push(i);
+    }
+    var sum: i64 = 0;
+    for x in big {
+        sum = sum + x;
+    }
+    print("{big.len()} {sum}");
+}

@@ -1,0 +1,5 @@
+// expect: E0406
+fn main() uses io {
+    let xs: [i64] = [1, 2, 3];
+    print("{xs.size()}");
+}

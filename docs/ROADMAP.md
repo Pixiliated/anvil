@@ -12,19 +12,23 @@ green and the interpreter and native backend agreeing on every program in `tests
 - [x] CLI: check, run, build (`--asm`), test, explain, spec; `--json` everywhere
 - [x] Parity corpus, error corpus (every code tested), mechanical-fix resolution tests
 
-## M1: Formatter
+## M1: Data (v0.2)
+- [x] Growable arrays `[T]` with value semantics, bounds-checked indexing, `push`, `pop`, `len`
+- [x] `for x in array`
+- [x] String values: interpolation, `+`, comparison, `len`
+- [x] Enums with payloads, exhaustive `match` with no catch-all
+- [x] `Option[T]`, `Result[T, E]` and `?`; errors are values, no exceptions
+- [x] Native backend: reference counting with copy-on-write, leak check in every native test
+
+## M2: Formatter
 - [ ] `anvil fmt` with one canonical layout, comments preserved
 - [ ] `anvil check` reports unformatted files as an error with a mechanical fix
 - [ ] Parser reports several syntax errors per run where recovery is reliable
 
-## M2: Arrays and strings
-- [ ] Fixed arrays `[T; N]` and slices, bounds-checked with located panics
-- [ ] `for x in array`
-- [ ] String values: length, concatenation, comparison, formatting numbers to strings
-
-## M3: Enums and errors
-- [ ] Enums with payloads, exhaustive `match`
-- [ ] Recoverable errors as values (a built-in result type), no exceptions
+## M3: Text and collections
+- [ ] Slicing arrays and strings by range, string search and split
+- [ ] Maps with deterministic iteration order
+- [ ] `==` for arrays, structs and enums whose parts all have it
 
 ## M4: Modules
 - [ ] Multiple files, explicit imports by name, no wildcard imports

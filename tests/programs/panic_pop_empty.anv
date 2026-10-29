@@ -1,0 +1,9 @@
+// exit: 101
+// panic: pop from an empty array at tests/programs/panic_pop_empty.anv:7:18
+fn main() uses io {
+    var stack: [str] = ["a"];
+    let a: str = stack.pop();
+    print(a);
+    let b: str = stack.pop();
+    print(b);
+}

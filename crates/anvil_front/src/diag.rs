@@ -171,37 +171,72 @@ pub fn explain(code: &str) -> Option<&'static str> {
     Some(match code {
         "E0001" => "Unexpected character. Anvil source is ASCII outside string literals and comments.",
         "E0002" => "Unterminated string literal. Strings end with \" on the same line; escapes are \\n \\t \\\" \\\\.",
-        "E0003" => "Invalid number literal. Integers are decimal digits (underscores allowed) and must fit in i64. \
-                    Floats need digits on both sides of the point, as in 1.0 or 2.5e-3; there is no 1. or .5.",
+        "E0003" => {
+            "Invalid number literal. Integers are decimal digits (underscores allowed) and must fit in i64. \
+                    Floats need digits on both sides of the point, as in 1.0 or 2.5e-3; there is no 1. or .5."
+        }
+        "E0004" => {
+            "Bad interpolation in a string. \"x = {x}\" inserts the text of x; the part in braces is one \
+                    expression on the same line, with no braces inside. Write {{ and }} for literal braces."
+        }
         "E0100" => "Syntax error: the parser expected something else here. The message names what it expected.",
-        "E0200" => "Unknown name. Variables, functions, types, units and fields must be declared before use \
-                    (functions, structs and units may be declared anywhere in the file).",
-        "E0201" => "Duplicate definition. Each function, struct, unit, field, parameter and test name is declared once.",
-        "E0202" => "Shadowing is not allowed. A name declared in a function cannot be declared again in that \
-                    function, even in an inner block. Pick a new, more specific name.",
-        "E0300" => "Type mismatch. Anvil has no implicit conversions: i64 and f64 never mix, and integer literals \
-                    are never floats. Convert explicitly with to_f64(x) or to_i64(x), or write 3.0 for a float.",
-        "E0301" => "Unit mismatch. f64 values carry units, written f64[m/s]. + - and comparisons need identical \
-                    units; * and / combine them. To drop a unit, divide by a literal: x / 1.0[m].",
-        "E0302" => "Operator not defined for these types. Arithmetic is defined for i64 and f64 (% only for i64), \
-                    comparisons for i64 and f64, == and != also for bool, && || ! for bool. There is no operator overloading.",
+        "E0200" => {
+            "Unknown name. Variables, functions, types, units and fields must be declared before use \
+                    (functions, structs and units may be declared anywhere in the file)."
+        }
+        "E0201" => {
+            "Duplicate definition. Each function, struct, unit, field, parameter and test name is declared once."
+        }
+        "E0202" => {
+            "Shadowing is not allowed. A name declared in a function cannot be declared again in that \
+                    function, even in an inner block. Pick a new, more specific name."
+        }
+        "E0300" => {
+            "Type mismatch. Anvil has no implicit conversions: i64 and f64 never mix, and integer literals \
+                    are never floats. Convert explicitly with to_f64(x) or to_i64(x), or write 3.0 for a float. \
+                    Text is built with interpolation, never by converting: \"{count} items\"."
+        }
+        "E0301" => {
+            "Unit mismatch. f64 values carry units, written f64[m/s]. + - and comparisons need identical \
+                    units; * and / combine them. To drop a unit, divide by a literal: x / 1.0[m]."
+        }
+        "E0302" => {
+            "Operator not defined for these types. Arithmetic is defined for i64 and f64 (% only for i64), \
+                    comparisons for i64, f64 and str, == and != also for bool, + also joins two str, && || ! for bool. \
+                    Enums are compared with match. There is no operator overloading."
+        }
         "E0303" => "Wrong number of arguments.",
-        "E0304" => "Argument names. Calls to a function with two or more parameters name every argument, \
+        "E0304" => {
+            "Argument names. Calls to a function with two or more parameters name every argument, \
                     in parameter order: area(width: 2.0, height: 3.0). Calls with one parameter do not name it. \
-                    Named arguments make swapped arguments impossible.",
+                    Named arguments make swapped arguments impossible."
+        }
         "E0305" => "Struct literal fields. A struct literal lists every field exactly once, in declaration order.",
         "E0306" => "Unknown field.",
-        "E0307" => "Unknown type. Types are i64, f64 (optionally with a unit, f64[m]), bool, str and declared structs.",
-        "E0308" => "Recursive struct. A struct cannot contain itself by value, directly or through other structs.",
-        "E0310" => "Assignment to an immutable binding. Declare it with var instead of let to make it mutable. \
-                    Parameters are always immutable: copy one into a var first.",
-        "E0311" => "Invalid assignment target. Only variables and their fields (p.x, a.b.c) can be assigned.",
+        "E0307" => {
+            "Unknown or malformed type. Types are i64, f64 (optionally with a unit, f64[m]), bool, str, \
+                    arrays [T], Option[T], Result[T, E] and declared structs and enums."
+        }
+        "E0308" => {
+            "Recursive type. A struct or enum cannot contain itself by value, directly or through other \
+                    types; hold the inner values in an array, [T], which stores them separately."
+        }
+        "E0310" => {
+            "Assignment to an immutable binding. Declare it with var instead of let to make it mutable. \
+                    Parameters are always immutable: copy one into a var first."
+        }
+        "E0311" => {
+            "Invalid assignment target. Only variables, their fields and array elements (p.x, xs[i].y) \
+                    can be assigned."
+        }
         "E0320" => "Missing return. A function with a return type must end every path with return.",
         "E0321" => "Return value mismatch: a return value in a function without a return type, or the reverse.",
         "E0322" => "`result` is only valid inside ensures clauses, where it names the return value.",
         "E0323" => "Unreachable code. Nothing may follow return, break or continue in the same block.",
-        "E0330" => "Effect not declared. Functions are pure unless they declare effects with uses io. \
-                    Calling print, or a function that uses io, requires uses io on the caller.",
+        "E0330" => {
+            "Effect not declared. Functions are pure unless they declare effects with uses io. \
+                    Calling print, or a function that uses io, requires uses io on the caller."
+        }
         "E0331" => "Effect declared but never used. Remove uses io so callers can see the function is pure.",
         "E0332" => "Unknown effect. The only effect in v0.1 is io.",
         "E0340" => "Unused variable or parameter. Remove it, or prefix it with _ if it is unused on purpose.",
@@ -212,14 +247,46 @@ pub fn explain(code: &str) -> Option<&'static str> {
         "E0380" => "Condition is not bool. Anvil has no truthiness: write x != 0, not x.",
         "E0390" => "Contracts and asserts must be pure: they cannot call functions that use io.",
         "E0391" => "Comparison chain. a < b < c is not allowed; write a < b && b < c.",
-        "E0392" => "Unused value. An expression statement must be a call; the value of a call that returns \
-                    something cannot be dropped silently. Bind it: let _unused: T = f(...);",
+        "E0392" => {
+            "Unused value. An expression statement must be a call; the value of a call that returns \
+                    something cannot be dropped silently. Bind it: let _unused: T = f(...);"
+        }
+        "E0400" => {
+            "Match is not exhaustive. A match lists one arm per variant; there is no catch-all arm, so \
+                    adding a variant to an enum makes every match that forgets it an error."
+        }
+        "E0401" => "Duplicate match arm. Each variant appears in one arm.",
+        "E0402" => {
+            "Match pattern fields. A pattern lists every field of its variant in declaration order: \
+                    Rect(width, height) binds both; Rect(width: w, height: _) renames one and ignores the other. \
+                    A variant without fields has no parentheses: Empty => { }."
+        }
+        "E0403" => "match works on enums (including Option and Result). Use if and else for other values.",
+        "E0404" => {
+            "Type cannot be inferred. None, Ok(x), Err(e) and [] need an expected type from context: a \
+                    let with its type, a parameter, a field or a return. Some(x) takes its type from x."
+        }
+        "E0405" => {
+            "Misused `?`. `e?` takes the success value of an Option or Result, or returns the failure \
+                    from the function at once, so the function must return the same kind: Option for Option, \
+                    Result with the same error type for Result. It may only be applied to the whole value of \
+                    let, var, an assignment or return: let n: i64 = parse(text)?;"
+        }
+        "E0406" => {
+            "Unknown method. Arrays have len(), push(x) and pop(); str has len(). push and pop change \
+                    the array in place, so they need a var. Other types have no methods: write a function."
+        }
+        "E0407" => {
+            "No text form. print and string interpolation take i64, f64, bool and str. Print structs \
+                    field by field, arrays in a loop and enums with match."
+        }
         _ => return None,
     })
 }
 
 pub const ALL_CODES: &[&str] = &[
-    "E0001", "E0002", "E0003", "E0100", "E0200", "E0201", "E0202", "E0300", "E0301", "E0302", "E0303", "E0304",
-    "E0305", "E0306", "E0307", "E0308", "E0310", "E0311", "E0320", "E0321", "E0322", "E0323", "E0330", "E0331",
-    "E0332", "E0340", "E0341", "E0350", "E0360", "E0370", "E0380", "E0390", "E0391", "E0392",
+    "E0001", "E0002", "E0003", "E0004", "E0100", "E0200", "E0201", "E0202", "E0300", "E0301", "E0302", "E0303",
+    "E0304", "E0305", "E0306", "E0307", "E0308", "E0310", "E0311", "E0320", "E0321", "E0322", "E0323", "E0330",
+    "E0331", "E0332", "E0340", "E0341", "E0350", "E0360", "E0370", "E0380", "E0390", "E0391", "E0392", "E0400",
+    "E0401", "E0402", "E0403", "E0404", "E0405", "E0406", "E0407",
 ];

@@ -1,0 +1,5 @@
+// expect: E0004
+// resolve: mechanical
+fn main() uses io {
+    print("closing } alone");
+}

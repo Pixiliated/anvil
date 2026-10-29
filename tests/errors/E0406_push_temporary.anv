@@ -1,0 +1,9 @@
+// expect: E0406
+fn make() -> [i64] {
+    return [];
+}
+
+fn main() uses io {
+    make().push(1);
+    print("done");
+}

@@ -1,0 +1,17 @@
+// expect: E0402
+enum Shape {
+    Rect(width: i64, height: i64),
+    Dot,
+}
+
+fn main() uses io {
+    let s: Shape = Shape.Dot;
+    match s {
+        Rect(width) => {
+            print("{width}");
+        }
+        Dot() => {
+            print("dot");
+        }
+    }
+}

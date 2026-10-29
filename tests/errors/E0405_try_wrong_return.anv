@@ -1,0 +1,16 @@
+// expect: E0405
+fn parse(d: i64) -> Result[i64, str] {
+    if d < 0 {
+        return Err("negative");
+    }
+    return Ok(d);
+}
+
+fn twice(d: i64) -> i64 {
+    let v: i64 = parse(d)?;
+    return v * 2;
+}
+
+fn main() uses io {
+    print("{twice(4)}");
+}

@@ -1,5 +1,5 @@
 fn greet(name: str) uses io {
-    print("hello, ", name, "!");
+    print("hello, {name}!");
 }
 
 fn main() uses io {

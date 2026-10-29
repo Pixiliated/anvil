@@ -1,0 +1,64 @@
+unit m;
+unit s;
+
+struct Person {
+    name: str,
+    age: i64,
+}
+
+fn greet(p: Person) -> str {
+    return "Hello, {p.name}! You are {p.age}.";
+}
+
+fn repeat(word: str, times: i64) -> str {
+    var out: str = "";
+    for _i in 0..times {
+        out = out + word;
+    }
+    return out;
+}
+
+fn longest(words: [str]) -> str {
+    var best: str = "";
+    for w in words {
+        if w.len() > best.len() {
+            best = w;
+        }
+    }
+    return best;
+}
+
+fn main() uses io {
+    let ada: Person = Person { name: "Ada", age: 36 };
+    print(greet(ada));
+    let speed: f64[m/s] = 12.5[m/s];
+    let n: i64 = -7;
+    let ok: bool = n < 0;
+    print("speed {speed}, n {n}, ok {ok}, sum {n + 10}, ratio {1.0 / 4.0}");
+    print("braces: {{literal}} and {{{n}}}");
+    print("escapes:\tTab \"quoted\" back\\slash");
+    let word: str = repeat(word: "ab", times: 3);
+    print("{word} has {word.len()} bytes");
+    print("concat: " + "one" + "-" + "two");
+    let nothing: str = "";
+    let accented: str = "héllo";
+    print("empty len {nothing.len()}, utf-8 bytes {accented.len()}");
+    let a: str = "apple";
+    let b: str = "banana";
+    let bananas: str = "bananas";
+    let ab: str = "ab";
+    print("{a < b} {a == a} {a != b} {b >= bananas} {nothing < a} {ab < b} {b < bananas}");
+    print(longest(["kiwi", "persimmon", "fig", "pear"]));
+    var log: [str] = [];
+    for i in 0..4 {
+        log.push("step {i}: {i * i}");
+    }
+    print(log[3]);
+    var t: str = "start";
+    t = "{t}+";
+    t = t + "{t}";
+    print(t);
+    let inner: str = "inner {n}";
+    let expected: str = "inner -7";
+    print("outer [{inner == expected}]");
+}
