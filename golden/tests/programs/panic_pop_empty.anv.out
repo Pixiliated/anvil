@@ -1,0 +1,4 @@
+exit: 101
+panic: pop from an empty array at tests/programs/panic_pop_empty.anv:5:18
+---
+a

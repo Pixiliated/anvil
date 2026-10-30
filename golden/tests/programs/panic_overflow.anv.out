@@ -1,0 +1,4 @@
+exit: 101
+panic: integer overflow in `+` at tests/programs/panic_overflow.anv:4:11
+---
+before

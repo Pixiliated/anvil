@@ -76,7 +76,7 @@ in full (`anvil spec` prints it).
 
 ## Status
 
-v0.3: single-file programs with i64, f64 with units, bool, strings with interpolation,
+v0.4: single-file programs with i64, f64 with units, bool, strings with interpolation,
 growable arrays, structs, enums with exhaustive `match`, `Option` and `Result` with `?`,
 contracts, effects and tests. There are two backends:
 
@@ -120,6 +120,24 @@ target/release/anvil build examples/orders.anv -o orders.exe
 
 Every command takes `--json`.
 
+### Projects
+
+A directory with an `anvil.toml` naming its files is a project. Project commands add approved
+output for every program (goldens, checked on both backends), a project record of milestones,
+decisions and findings with their history, and a review sheet for sign-off:
+
+| Command | Does |
+|---|---|
+| `anvil list` | the project's files |
+| `anvil golden check [--native]` | compare every program's output with its approved golden |
+| `anvil golden approve f.anv` | approve a program's current output |
+| `anvil verify [--native]` | check, test and golden-check everything; findings go into the record |
+| `anvil review` | verify, then write `out/review.md` for a person to sign off |
+| `anvil record query [KIND]` | milestones, decisions, findings or runs |
+
+This repository is itself an Anvil project: `anvil golden check --native` runs its whole parity
+corpus.
+
 ## For agents: the MCP server
 
 `anvil-mcp` serves every command above as an MCP tool over stdio, with the same arguments and
@@ -143,7 +161,8 @@ An agent starts with `spec` (the whole language), writes a file, then loops on `
 | `crates/anvil_ops` | every command, returning the JSON the CLI and MCP server send |
 | `crates/anvil_cli` | the `anvil` command and end-to-end tests |
 | `crates/anvil_mcp` | the `anvil-mcp` server, its stdio and parity tests |
-| `tests/programs` | programs with golden output, run on both backends |
+| `crates/anvil_record` | the project record (SQLite) |
+| `tests/programs` | programs whose approved output is in `golden/`, run on both backends |
 | `tests/errors` | one file per error code, with expected codes and fix checks |
 
 ## License

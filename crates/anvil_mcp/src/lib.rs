@@ -25,8 +25,14 @@ stable code, an exact range and fixes marked mechanical (safe) or changes_meanin
 and signatures without reading it all; `type_at` gives the type and declaration at a line and \
 column; `refs` finds where a function, type, Type.field, Enum.Variant or unit is declared and used. \
 `run` interprets main and returns its stdout; `test` runs the test blocks; `build` makes a native \
-executable. `explain` describes an error code. Every CLI command is a tool with the same arguments \
-(the CLI's `type-at` is `type_at`). Failing checks come back as tool errors.";
+executable. `explain` describes an error code. Projects (a directory with anvil.toml) add `list`, \
+`verify` (check, test and golden-check every file; findings go into the project record), \
+`golden_check` and `golden_approve` (approved output per program; approve only after reading the \
+output), `review` (writes out/review.md for a person to sign off) and the record: `record_query` \
+(start here in a project: milestones, decisions, findings with history, runs), `record_decide`, \
+`record_status`, `record_import_roadmap`, `record_export`. Every CLI command is a tool with the same \
+arguments (the CLI's `type-at` is `type_at`, `golden check` is `golden_check`). Failing checks come \
+back as tool errors.";
 
 /// Tool argument structs reject unknown fields, so a misspelt argument is an error, not ignored.
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -87,6 +93,69 @@ pub struct ExplainArgs {
 #[serde(deny_unknown_fields)]
 pub struct NoArgs {}
 
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct VerifyArgs {
+    /// Stop each run after this many statements and loop iterations (default 100000000).
+    pub max_steps: Option<u64>,
+    /// Also build and run each program natively (slower; checks the native backend and leaks).
+    pub native: Option<bool>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct GoldenCheckArgs {
+    /// One project file to check; leave it out to check them all.
+    pub file: Option<String>,
+    /// Stop each run after this many statements and loop iterations (default 100000000).
+    pub max_steps: Option<u64>,
+    /// Also build and run each program natively.
+    pub native: Option<bool>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct GoldenApproveArgs {
+    /// The project file whose current output becomes its golden.
+    pub file: String,
+    /// Stop the run after this many statements and loop iterations (default 100000000).
+    pub max_steps: Option<u64>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct RecordQueryArgs {
+    /// milestones, decisions, findings or runs; leave it out for a summary.
+    pub kind: Option<String>,
+    /// Only open findings.
+    pub open: Option<bool>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct DecideArgs {
+    /// One line naming the decision.
+    pub title: String,
+    /// Why, and what it rules out.
+    pub body: Option<String>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct StatusArgs {
+    /// Milestone id, such as M3 or M3.2.
+    pub milestone: String,
+    /// open, active, done or dropped.
+    pub status: String,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ImportArgs {
+    /// The roadmap file; leave it out for docs/ROADMAP.md in the project.
+    pub file: Option<String>,
+}
+
 #[derive(Clone)]
 pub struct AnvilServer {
     root: Arc<PathBuf>,
@@ -138,7 +207,7 @@ impl AnvilServer {
     async fn run(&self, Parameters(a): Parameters<RunArgs>) -> Result<CallToolResult, ErrorData> {
         self.op(move |root| {
             let mut out = Vec::new();
-            let mut report = anvil_ops::run(root, &a.file, Some(a.max_steps.unwrap_or(DEFAULT_MAX_STEPS)), &mut out);
+            let mut report = anvil_ops::run(root, &a.file, Some(steps(a.max_steps)), &mut out);
             report.json["stdout"] = serde_json::json!(String::from_utf8_lossy(&out));
             report
         })
@@ -154,7 +223,7 @@ impl AnvilServer {
     #[tool(description = "Run every test block. Any failing test is a tool error; each result has \
         the panic message and the test's output.")]
     async fn test(&self, Parameters(a): Parameters<RunArgs>) -> Result<CallToolResult, ErrorData> {
-        self.op(move |root| anvil_ops::test(root, &a.file, Some(a.max_steps.unwrap_or(DEFAULT_MAX_STEPS)))).await
+        self.op(move |root| anvil_ops::test(root, &a.file, Some(steps(a.max_steps)))).await
     }
 
     #[tool(description = "Apply every mechanical fix to the file in place, recheck, and repeat until \
@@ -192,6 +261,73 @@ impl AnvilServer {
     async fn spec(&self, Parameters(_): Parameters<NoArgs>) -> Result<CallToolResult, ErrorData> {
         self.op(|_| anvil_ops::spec()).await
     }
+
+    #[tool(description = "The project's files (from anvil.toml): functions, tests, whether each has a main \
+        and an approved golden.")]
+    async fn list(&self, Parameters(_): Parameters<NoArgs>) -> Result<CallToolResult, ErrorData> {
+        self.op(anvil_ops::list).await
+    }
+
+    #[tool(description = "Check, test and golden-check every project file, store what fails as findings in \
+        the project record (new ones open, fixed ones resolve) and return the open ones. Any open finding \
+        makes it a tool error.")]
+    async fn verify(&self, Parameters(a): Parameters<VerifyArgs>) -> Result<CallToolResult, ErrorData> {
+        self.op(move |root| anvil_ops::verify(root, a.native.unwrap_or(false), Some(steps(a.max_steps)))).await
+    }
+
+    #[tool(description = "Run verify, then write out/review.md: summary, open findings, every file's \
+        signatures and test and golden status, recent decisions, and boxes for a person to sign off. \
+        Returns the Markdown.")]
+    async fn review(&self, Parameters(a): Parameters<VerifyArgs>) -> Result<CallToolResult, ErrorData> {
+        self.op(move |root| anvil_ops::review(root, a.native.unwrap_or(false), Some(steps(a.max_steps)))).await
+    }
+
+    #[tool(description = "Compare each program's output, exit code and panic with its approved golden \
+        (golden/<file>.out); with native, also as an executable that must free every object. Any \
+        difference is a tool error naming the first differing line.")]
+    async fn golden_check(&self, Parameters(a): Parameters<GoldenCheckArgs>) -> Result<CallToolResult, ErrorData> {
+        self.op(move |root| {
+            anvil_ops::golden_check(root, a.file.as_deref(), a.native.unwrap_or(false), Some(steps(a.max_steps)))
+        })
+        .await
+    }
+
+    #[tool(description = "Store a program's current output as its golden and return that output and what \
+        changed. Read the output before approving: an approved golden is what every later check trusts.")]
+    async fn golden_approve(&self, Parameters(a): Parameters<GoldenApproveArgs>) -> Result<CallToolResult, ErrorData> {
+        self.op(move |root| anvil_ops::golden_approve(root, &a.file, Some(steps(a.max_steps)))).await
+    }
+
+    #[tool(description = "Read the project record: milestones, decisions, findings (with first seen, last \
+        seen and resolved times) or verify runs; no kind gives a summary with the current milestone.")]
+    async fn record_query(&self, Parameters(a): Parameters<RecordQueryArgs>) -> Result<CallToolResult, ErrorData> {
+        self.op(move |root| anvil_ops::record_query(root, a.kind.as_deref(), a.open.unwrap_or(false))).await
+    }
+
+    #[tool(description = "Record a decision in the project record, dated today.")]
+    async fn record_decide(&self, Parameters(a): Parameters<DecideArgs>) -> Result<CallToolResult, ErrorData> {
+        self.op(move |root| anvil_ops::record_decide(root, &a.title, a.body.as_deref())).await
+    }
+
+    #[tool(description = "Set a milestone's status in the project record: open, active, done or dropped.")]
+    async fn record_status(&self, Parameters(a): Parameters<StatusArgs>) -> Result<CallToolResult, ErrorData> {
+        self.op(move |root| anvil_ops::record_status(root, &a.milestone, &a.status)).await
+    }
+
+    #[tool(description = "Load milestones into the project record from a roadmap: `## M1: Title` headings \
+        and `- [ ]` / `- [x]` checkboxes. The first unfinished milestone becomes active.")]
+    async fn record_import_roadmap(&self, Parameters(a): Parameters<ImportArgs>) -> Result<CallToolResult, ErrorData> {
+        self.op(move |root| anvil_ops::record_import_roadmap(root, a.file.as_deref())).await
+    }
+
+    #[tool(description = "The whole project record as Markdown, for people.")]
+    async fn record_export(&self, Parameters(_): Parameters<NoArgs>) -> Result<CallToolResult, ErrorData> {
+        self.op(anvil_ops::record_export).await
+    }
+}
+
+fn steps(given: Option<u64>) -> u64 {
+    given.unwrap_or(DEFAULT_MAX_STEPS)
 }
 
 #[tool_handler]

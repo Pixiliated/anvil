@@ -1,5 +1,3 @@
-// exit: 101
-// panic: ensures failed at tests/programs/panic_ensures.anv:4:13: result > n
 fn next(n: i64) -> i64
     ensures result > n
 {

@@ -1,5 +1,3 @@
-// exit: 101
-// panic: division by zero at tests/programs/panic_divzero.anv:5:11
 fn main() uses io {
     let zero: i64 = 0;
     print(10 % zero);

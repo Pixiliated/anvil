@@ -1,2 +1,4 @@
 /target
 *.exe
+/out
+anvil_record.db

@@ -63,3 +63,17 @@ Short records of choices that are not obvious from the code. Newest last.
   to 100,000,000 steps so a loop cannot hang a session; the CLI has no default limit.
 - **Not taken from the engine (yet):** the SQLite project record and review sheets. A language
   repo's ROADMAP and DECISIONS are small enough, and there are no pictures to sign off.
+
+## M3 (v0.4)
+
+- **The rest of the engine's agent framework**: goldens, the SQLite project record (same rules:
+  a regression opens a new finding, unknown statuses and kinds are errors, a newer schema is
+  refused) and a review sheet. The review sheet is Markdown, since Anvil has no pictures.
+- **A golden stores exit code and panic as well as stdout**, so a program that should panic is
+  checked like any other; the old `// exit:` and `// panic:` headers are gone.
+- **The repository dogfoods it.** Moving the corpus was checked mechanically: all 32 old
+  expected outputs equalled the new goldens byte for byte before the old files were deleted.
+- **Findings are keyed by file, check and message**, with the position kept apart (`at`), so
+  editing other lines of a file does not resolve and reopen its findings.
+- **The record holds wall-clock times**; it is history about the project, never program output,
+  so determinism is unaffected.

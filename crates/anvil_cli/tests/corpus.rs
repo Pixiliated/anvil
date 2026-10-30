@@ -1,8 +1,8 @@
 //! End-to-end tests through the real `anvil` binary.
 //!
-//! tests/programs: each program has a golden NAME.stdout plus `// exit:` and `// panic:` headers.
-//! The interpreter and the native executable must both match the golden exactly.
-//! Set ANVIL_BLESS=1 to write missing goldens from the interpreter; review them before committing.
+//! The repository is itself an Anvil project (anvil.toml): every program in tests/programs and
+//! examples has an approved golden in golden/, and `anvil golden check --native` must pass, so
+//! the interpreter and the native executable agree with each other and with the approved output.
 //!
 //! tests/errors: each file lists `// expect: CODE...`; `// resolve: mechanical` means applying
 //! every mechanical fix must give a program that checks cleanly.
@@ -16,7 +16,11 @@ fn root() -> PathBuf {
 }
 
 fn anvil(args: &[&str]) -> Output {
-    Command::new(env!("CARGO_BIN_EXE_anvil")).args(args).current_dir(root()).output().unwrap()
+    anvil_in(&root(), args)
+}
+
+fn anvil_in(dir: &Path, args: &[&str]) -> Output {
+    Command::new(env!("CARGO_BIN_EXE_anvil")).args(args).current_dir(dir).output().unwrap()
 }
 
 fn files(dir: &str) -> Vec<String> {
@@ -35,74 +39,34 @@ fn header<'a>(text: &'a str, key: &str) -> Option<&'a str> {
     text.lines().take_while(|l| l.starts_with("//")).find_map(|l| l.strip_prefix(&format!("// {key}: ")))
 }
 
-struct Expected {
-    exit: i32,
-    stderr: String,
-    stdout: String,
-}
-
-fn expected(rel: &str) -> Expected {
-    let text = std::fs::read_to_string(root().join(rel)).unwrap();
-    let exit = header(&text, "exit").map(|s| s.parse().unwrap()).unwrap_or(0);
-    let stderr = header(&text, "panic").map(|m| format!("panic: {m}\n")).unwrap_or_default();
-    let golden = root().join(rel).with_extension("stdout");
-    let stdout = match std::fs::read_to_string(&golden) {
-        Ok(s) => s,
-        Err(_) if std::env::var("ANVIL_BLESS").is_ok() => {
-            let out = anvil(&["run", rel]);
-            std::fs::write(&golden, &out.stdout).unwrap();
-            String::from_utf8(out.stdout).unwrap()
-        }
-        Err(_) => panic!("{} has no golden {}; run with ANVIL_BLESS=1 and review it", rel, golden.display()),
-    };
-    if exit != 101 {
-        assert!(stderr.is_empty(), "{rel}: a panic header needs `// exit: 101`");
-    }
-    Expected { exit, stderr, stdout }
-}
-
-fn compare(rel: &str, how: &str, out: &Output, want: &Expected) -> Vec<String> {
-    let mut problems = Vec::new();
-    let stdout = String::from_utf8_lossy(&out.stdout);
-    let stderr = String::from_utf8_lossy(&out.stderr);
-    if stdout != want.stdout {
-        problems.push(format!("{rel} ({how}): stdout differs\n--- want\n{}--- got\n{stdout}", want.stdout));
-    }
-    if stderr != want.stderr {
-        problems.push(format!("{rel} ({how}): stderr differs\n  want {:?}\n  got  {stderr:?}", want.stderr));
-    }
-    if out.status.code() != Some(want.exit) {
-        problems.push(format!("{rel} ({how}): exit {:?}, want {}", out.status.code(), want.exit));
-    }
-    problems
+#[test]
+fn every_program_matches_its_golden_on_both_backends() {
+    let out = anvil(&["golden", "check", "--native", "--json"]);
+    let v = json_of(&out);
+    let bad: Vec<_> = v["results"].as_array().unwrap().iter().filter(|r| r["status"] != "ok").collect();
+    assert!(bad.is_empty() && out.status.success(), "{bad:#?}");
+    // Every program of the corpus is in the project and has a main.
+    assert_eq!(v["checked"].as_u64().unwrap() as usize, files("tests/programs").len() + files("examples").len());
 }
 
 #[test]
-fn interpreter_matches_goldens() {
-    let mut problems = Vec::new();
-    for rel in files("tests/programs") {
-        let want = expected(&rel);
-        problems.extend(compare(&rel, "interpreter", &anvil(&["run", &rel]), &want));
-    }
-    assert!(problems.is_empty(), "{}", problems.join("\n"));
-}
-
-#[test]
-fn native_matches_goldens() {
-    let dir = std::env::temp_dir().join(format!("anvil_native_{}", std::process::id()));
-    std::fs::create_dir_all(&dir).unwrap();
-    let mut problems = Vec::new();
-    for rel in files("tests/programs") {
-        let want = expected(&rel);
-        let exe = dir.join(Path::new(&rel).with_extension("exe").file_name().unwrap());
-        let build = anvil(&["build", &rel, "-o", exe.to_str().unwrap()]);
-        assert!(build.status.success(), "{rel}: build failed: {}", String::from_utf8_lossy(&build.stderr));
-        // The runtime fails loudly at exit if any heap object was not freed.
-        let out = Command::new(&exe).current_dir(root()).env("ANVIL_CHECK_LEAKS", "1").output().unwrap();
-        problems.extend(compare(&rel, "native", &out, &want));
-    }
-    let _ = std::fs::remove_dir_all(&dir);
-    assert!(problems.is_empty(), "{}", problems.join("\n"));
+fn run_reports_panics_exactly() {
+    let out = anvil(&["run", "tests/programs/panic_index.anv"]);
+    assert_eq!(out.status.code(), Some(101));
+    assert_eq!(
+        String::from_utf8_lossy(&out.stdout),
+        "0: 10
+1: 20
+2: 30
+"
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&out.stderr),
+        "panic: index 3 out of bounds for length 3 at tests/programs/panic_index.anv:5:22
+"
+    );
+    let out = anvil(&["run", "tests/programs/exit_code.anv"]);
+    assert_eq!(out.status.code(), Some(7));
 }
 
 #[test]
@@ -353,4 +317,127 @@ fn run_stops_at_the_step_limit() {
     assert!(String::from_utf8_lossy(&out.stderr).contains("step limit"));
     let out = anvil(&["test", "tests/test_blocks.anv", "--max-steps", "1", "--json"]);
     assert_eq!(json_of(&out)["passed"], 0);
+}
+
+/// A scratch project in the temp directory.
+struct Scratch(PathBuf);
+
+impl Scratch {
+    fn new(name: &str) -> Scratch {
+        let dir = std::env::temp_dir().join(format!("anvil_{name}_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("src")).unwrap();
+        std::fs::create_dir_all(dir.join("docs")).unwrap();
+        Scratch(dir)
+    }
+    fn write(&self, rel: &str, text: &str) {
+        std::fs::write(self.0.join(rel), text).unwrap();
+    }
+    fn anvil(&self, args: &[&str]) -> Output {
+        anvil_in(&self.0, args)
+    }
+    fn json(&self, args: &[&str]) -> serde_json::Value {
+        let mut a = args.to_vec();
+        a.push("--json");
+        json_of(&self.anvil(&a))
+    }
+}
+
+impl Drop for Scratch {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+const HELLO: &str = "fn main() uses io {\n    print(\"hello\");\n}\n";
+
+fn hello_project(name: &str) -> Scratch {
+    let p = Scratch::new(name);
+    p.write("anvil.toml", "[project]\nname = \"hello\"\nfiles = [\"src/*.anv\"]\n");
+    p.write("src/hello.anv", HELLO);
+    p.write(
+        "src/maths.anv",
+        "fn twice(n: i64) -> i64 {\n    return n * 2;\n}\n\ntest \"twice\" {\n    assert(twice(2) == 4);\n}\n",
+    );
+    p.write("docs/ROADMAP.md", "# Roadmap\n\n## M1: Start\n- [x] Hello\n\n## M2: Next\n- [ ] Maths\n- [ ] More\n");
+    p
+}
+
+#[test]
+fn goldens_record_and_review_on_a_project() {
+    let p = hello_project("project");
+    let list = p.json(&["list"]);
+    assert_eq!(list["files"].as_array().unwrap().len(), 2, "{list}");
+
+    // No golden yet: a loud failure that says how to approve one.
+    let missing = p.anvil(&["golden", "check", "--json"]);
+    assert_eq!(missing.status.code(), Some(1));
+    assert_eq!(json_of(&missing)["results"][0]["status"], "missing");
+    let approved = p.json(&["golden", "approve", "src/hello.anv"]);
+    assert_eq!(approved["stdout"], "hello\n", "{approved}");
+    assert_eq!(approved["change"], "new");
+    assert!(p.anvil(&["golden", "check"]).status.success());
+
+    // Clean verify, then a regression opens a finding and fixing it resolves it.
+    assert!(p.anvil(&["verify"]).status.success());
+    p.write("src/hello.anv", "fn main() uses io {\n    print(\"hullo\");\n}\n");
+    let broken = p.anvil(&["verify", "--json"]);
+    assert_eq!(broken.status.code(), Some(1));
+    let v = json_of(&broken);
+    assert_eq!(v["open"][0]["check"], "golden", "{v}");
+    assert!(v["open"][0]["message"].as_str().unwrap().contains("printed `hullo`, approved `hello`"), "{v}");
+    let id = v["open"][0]["id"].clone();
+    p.write("src/hello.anv", HELLO);
+    let fixed = p.json(&["verify"]);
+    assert_eq!(fixed["findings"]["resolved"], serde_json::json!([id]), "{fixed}");
+
+    // Compile errors become findings with their code and position.
+    p.write("src/maths.anv", "fn twice(n: i64) -> i64 {\n    return n * 2.0;\n}\n");
+    let v = json_of(&p.anvil(&["verify", "--json"]));
+    let open = v["open"].as_array().unwrap();
+    assert_eq!(open.len(), 1, "{v}");
+    assert_eq!((open[0]["check"].as_str(), open[0]["at"].as_str()), (Some("E0300"), Some("2:12")));
+    let findings = p.json(&["record", "query", "findings"]);
+    assert_eq!(findings["findings"].as_array().unwrap().len(), 2, "the resolved one stays in the history");
+    assert_eq!(p.json(&["record", "query", "--open"])["findings"].as_array().unwrap().len(), 1);
+    assert_eq!(p.json(&["record", "query", "runs"])["runs"].as_array().unwrap().len(), 4);
+
+    // Milestones from the roadmap, a decision, and the export.
+    let imported = p.json(&["record", "import-roadmap"]);
+    assert_eq!(imported["current"]["id"], "M2", "{imported}");
+    assert!(p.anvil(&["record", "status", "M2.2", "dropped"]).status.success());
+    assert_eq!(p.anvil(&["record", "status", "M9", "done"]).status.code(), Some(2));
+    assert_eq!(p.anvil(&["record", "status", "M2.1", "finished"]).status.code(), Some(2));
+    assert!(p.anvil(&["record", "decide", "Keep it small", "One file per idea."]).status.success());
+    let md = String::from_utf8(p.anvil(&["record", "export"]).stdout).unwrap();
+    assert!(md.contains("- [-] M2.2 More"), "{md}");
+    assert!(md.contains("Keep it small.** One file per idea."), "{md}");
+    assert!(md.contains("[E0300]"), "{md}");
+
+    // The review sheet: written to out/review.md, failing while a finding is open.
+    let review = p.anvil(&["review", "--json"]);
+    assert_eq!(review.status.code(), Some(1));
+    let sheet = std::fs::read_to_string(p.0.join("out/review.md")).unwrap();
+    for want in
+        ["# hello: review sheet", "current milestone: M2 Next", "`src/maths.anv`", "## Sign-off", "Keep it small"]
+    {
+        assert!(sheet.contains(want), "review sheet lacks `{want}`:\n{sheet}");
+    }
+}
+
+#[test]
+fn project_files_are_loud() {
+    let p = hello_project("loud");
+    let out = p.anvil(&["golden", "check", "../elsewhere.anv"]);
+    assert_eq!(out.status.code(), Some(2));
+    p.write("anvil.toml", "[project]\nname = \"x\"\nfiles = [\"src/*.anv\"]\nfiels = []\n");
+    let out = p.anvil(&["list"]);
+    assert_eq!(out.status.code(), Some(2));
+    assert!(String::from_utf8_lossy(&out.stderr).contains("fiels"), "{}", String::from_utf8_lossy(&out.stderr));
+    p.write("anvil.toml", "[project]\nname = \"x\"\nfiles = [\"lib/*.anv\"]\n");
+    assert!(String::from_utf8_lossy(&p.anvil(&["list"]).stderr).contains("matches no file"));
+    std::fs::remove_file(p.0.join("anvil.toml")).unwrap();
+    let out = p.anvil(&["verify"]);
+    assert_eq!(out.status.code(), Some(2));
+    assert!(String::from_utf8_lossy(&out.stderr).contains("[project]"), "the error shows a starting anvil.toml");
 }

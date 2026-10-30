@@ -1,0 +1,9 @@
+[package]
+name = "anvil_record"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+rusqlite = { version = "0.40.2", features = ["bundled"] }
+serde_json = "1.0.154"

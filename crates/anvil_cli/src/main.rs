@@ -40,9 +40,26 @@ struct Parsed {
 }
 
 fn parse_args() -> Result<Parsed, String> {
-    let mut it = std::env::args().skip(1);
-    let name = it.next().ok_or("missing command")?;
-    let command = COMMANDS.iter().find(|c| c.name == name).ok_or(format!("unknown command `{name}`"))?;
+    let mut it = std::env::args().skip(1).peekable();
+    let first = it.next().ok_or("missing command")?;
+    // Two-word commands (`golden check`, `record query`) take the next word too.
+    let two = it.peek().map(|second| format!("{first} {second}"));
+    let command = match two.as_deref().and_then(|n| COMMANDS.iter().find(|c| c.name == n)) {
+        Some(c) => {
+            it.next();
+            c
+        }
+        None => match COMMANDS.iter().find(|c| c.name == first) {
+            Some(c) => c,
+            None if COMMANDS.iter().any(|c| c.name.starts_with(&format!("{first} "))) => {
+                let subs: Vec<&str> =
+                    COMMANDS.iter().filter_map(|c| c.name.strip_prefix(&format!("{first} "))).collect();
+                return Err(format!("`{first}` needs one of: {}", subs.join(", ")));
+            }
+            None => return Err(format!("unknown command `{first}`")),
+        },
+    };
+    let name = command.name;
     let mut p = Parsed { command, positionals: Vec::new(), options: HashMap::new(), json: false };
     while let Some(arg) = it.next() {
         let long = match arg.as_str() {
@@ -93,6 +110,7 @@ fn dispatch(p: &Parsed) -> Result<Report, String> {
         Some(Some(v)) => Some(number::<u64>("--max-steps", v)?),
         _ => None,
     };
+    let native = p.options.contains_key("native");
     Ok(match p.command.name {
         "check" => anvil_ops::check(root, file),
         "run" => anvil_ops::run(root, file, steps, &mut std::io::stdout()),
@@ -107,6 +125,16 @@ fn dispatch(p: &Parsed) -> Result<Report, String> {
         "refs" => anvil_ops::refs(root, file, pos(1).unwrap()),
         "explain" => anvil_ops::explain(pos(0)),
         "spec" => anvil_ops::spec(),
+        "list" => anvil_ops::list(root),
+        "verify" => anvil_ops::verify(root, native, steps),
+        "review" => anvil_ops::review(root, native, steps),
+        "golden check" => anvil_ops::golden_check(root, pos(0), native, steps),
+        "golden approve" => anvil_ops::golden_approve(root, file, steps),
+        "record query" => anvil_ops::record_query(root, pos(0), p.options.contains_key("open")),
+        "record decide" => anvil_ops::record_decide(root, file, pos(1)),
+        "record status" => anvil_ops::record_status(root, file, pos(1).unwrap()),
+        "record import-roadmap" => anvil_ops::record_import_roadmap(root, pos(0)),
+        "record export" => anvil_ops::record_export(root),
         other => unreachable!("command `{other}` is in COMMANDS but not dispatched"),
     })
 }

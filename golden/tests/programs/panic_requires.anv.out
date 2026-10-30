@@ -1,0 +1,4 @@
+exit: 101
+panic: requires failed at tests/programs/panic_requires.anv:2:14: n >= 0
+---
+2

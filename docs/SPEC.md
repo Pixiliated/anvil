@@ -1,4 +1,4 @@
-# Anvil language specification (v0.3)
+# Anvil language specification (v0.4)
 
 Anvil is a small, compiled, general-purpose language designed to be written mostly by AI agents
 and read by humans. Its rules aim at three things: one obvious way to write each thing, code
@@ -303,9 +303,46 @@ where one exists, fixes. A fix is `mechanical` (safe to apply without thought) o
 `anvil fix` applies only mechanical ones. `type-at` and `refs` answer even for a file with
 type errors. `--max-steps` stops a run after that many statements and loop iterations.
 
-`anvil-mcp` serves the same commands as MCP tools over stdio (`type-at` is `type_at`), with
-the same arguments and the same JSON; a failing check is a tool error. Over MCP, `run` and
-`test` stop after 100,000,000 steps unless `max_steps` says otherwise.
+### Projects
+
+A directory with `anvil.toml` is a project:
+
+```toml
+[project]
+name = "orders"
+files = ["src/*.anv", "tools/report.anv"]   # `*` matches within one directory
+
+[golden]
+dir = "golden"                              # optional; this is the default
+```
+
+Unknown keys, patterns that match nothing and files listed twice are errors. Project commands
+find `anvil.toml` in the current directory or above:
+
+```
+anvil list                                  files: functions, tests, main, golden
+anvil golden check [FILE] [--native]        compare output with approved goldens
+anvil golden approve FILE                   approve a program's current output
+anvil verify [--native]                     check, test and golden-check every file;
+                                            store the findings in the record
+anvil review [--native]                     verify, then write out/review.md for sign-off
+anvil record query [KIND] [--open]          milestones, decisions, findings, runs
+anvil record decide TITLE [BODY]            record a decision
+anvil record status MILESTONE STATUS        open, active, done or dropped
+anvil record import-roadmap [FILE]          milestones from docs/ROADMAP.md
+anvil record export                         the record as Markdown
+```
+
+A **golden** (`golden/<file>.out`) is a program's approved output: its exit code, its panic
+message if any, and every byte it printed. `golden check --native` also builds each program and
+requires the executable to match and to free every object. Only `golden approve` writes one,
+after the output has been read. The **record** (`anvil_record.db`, not checked in) keeps
+milestones, decisions, and every problem `verify` finds, with when it was first seen and when it
+was resolved; a problem that comes back opens a new entry, so regressions keep their history.
+
+`anvil-mcp` serves the same commands as MCP tools over stdio (`type-at` is `type_at`, `golden check` is `golden_check`), with
+the same arguments and the same JSON; a failing check is a tool error. Over MCP, every run stops
+after 100,000,000 steps unless `max_steps` says otherwise.
 
 The interpreter and the native compiler must agree exactly: same stdout, same panic message,
 same exit code. The one known difference: the interpreter panics past 10,000 nested calls,

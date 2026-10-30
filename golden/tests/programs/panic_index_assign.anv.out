@@ -1,0 +1,4 @@
+exit: 101
+panic: index -1 out of bounds for length 2 at tests/programs/panic_index_assign.anv:5:5
+---
+rows: 2

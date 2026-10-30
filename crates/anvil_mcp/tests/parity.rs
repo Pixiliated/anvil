@@ -1,5 +1,5 @@
 //! The CLI and the MCP server must offer the same commands with the same arguments: the CLI's
-//! `a-b` is the tool `a_b`, positionals and options are parameters, and required positionals
+//! `a-b` and `a b` are the tool `a_b`, positionals and options are parameters, and required positionals
 //! are required parameters. `--json` is CLI-only (tools always answer in JSON).
 
 use anvil_mcp::AnvilServer;
@@ -7,7 +7,7 @@ use anvil_ops::{CLI_ONLY_OPTIONS, COMMANDS};
 use std::collections::BTreeSet;
 
 fn snake(s: &str) -> String {
-    s.replace('-', "_")
+    s.replace(['-', ' '], "_")
 }
 
 #[test]

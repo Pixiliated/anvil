@@ -3,6 +3,15 @@
 //! is the one list of commands and their arguments: the CLI parses with it and a test checks
 //! that the MCP server has a tool for each, with the same parameters.
 
+pub mod golden;
+mod proj;
+pub mod project;
+
+pub use proj::{
+    golden_approve, golden_check, list, record_decide, record_export, record_import_roadmap, record_query,
+    record_status, review, verify,
+};
+
 use anvil_front::check::{Analysis, Def};
 use anvil_front::diag::{self, Diagnostic, FixKind};
 use anvil_front::ir::{Program, PANIC_EXIT_CODE};
@@ -78,7 +87,66 @@ pub const COMMANDS: &[Command] = &[
         summary: "explain an error code (no code: list all)",
     },
     Command { name: "spec", positionals: &[], options: &[], summary: "the language specification" },
+    // Project commands: they find anvil.toml in the current directory or above.
+    Command {
+        name: "list",
+        positionals: &[],
+        options: &[],
+        summary: "the project's files: functions, tests, main, golden",
+    },
+    Command {
+        name: "verify",
+        positionals: &[],
+        options: &[STEPS, NATIVE],
+        summary: "check, test and golden-check every project file; store the findings in the record",
+    },
+    Command {
+        name: "review",
+        positionals: &[],
+        options: &[STEPS, NATIVE],
+        summary: "verify, then write out/review.md, the sheet a person signs off",
+    },
+    Command {
+        name: "golden check",
+        positionals: &["file?"],
+        options: &[STEPS, NATIVE],
+        summary: "compare programs' output, exit code and panic with their approved goldens",
+    },
+    Command {
+        name: "golden approve",
+        positionals: &["file"],
+        options: &[STEPS],
+        summary: "store a program's current output as its golden (look at it first)",
+    },
+    Command {
+        name: "record query",
+        positionals: &["kind?"],
+        options: &[("open", "", "only open findings")],
+        summary: "the project record: milestones, decisions, findings or runs (none: a summary)",
+    },
+    Command {
+        name: "record decide",
+        positionals: &["title", "body?"],
+        options: &[],
+        summary: "record a decision, dated today",
+    },
+    Command {
+        name: "record status",
+        positionals: &["milestone", "status"],
+        options: &[],
+        summary: "set a milestone's status: open, active, done or dropped",
+    },
+    Command {
+        name: "record import-roadmap",
+        positionals: &["file?"],
+        options: &[],
+        summary: "load milestones from a roadmap (default docs/ROADMAP.md)",
+    },
+    Command { name: "record export", positionals: &[], options: &[], summary: "the whole record as Markdown" },
 ];
+
+const STEPS: (&str, &str, &str) = ("max-steps", "N", "stop each run after N statements and loop iterations");
+const NATIVE: (&str, &str, &str) = ("native", "", "also build and run each program natively");
 
 pub const SPEC: &str = include_str!("../../../docs/SPEC.md");
 
@@ -129,7 +197,7 @@ fn pos(src: &SourceFile, offset: usize) -> Value {
 }
 
 /// Compile errors as a failed report.
-fn diagnostics(src: &SourceFile, diags: &[Diagnostic]) -> Report {
+pub(crate) fn diagnostics(src: &SourceFile, diags: &[Diagnostic]) -> Report {
     let ds: Vec<_> = diags.iter().map(|d| diag::to_json(src, d)).collect();
     let mut text = String::new();
     for d in diags {
@@ -227,7 +295,7 @@ pub fn build(root: &Path, file: &str, out: Option<&str>, asm: bool) -> Report {
 }
 
 /// Distinct per call within this process, for scratch directories (the MCP server builds many times).
-fn unique() -> u64 {
+pub(crate) fn unique() -> u64 {
     use std::sync::atomic::{AtomicU64, Ordering};
     static NEXT: AtomicU64 = AtomicU64::new(0);
     NEXT.fetch_add(1, Ordering::Relaxed)

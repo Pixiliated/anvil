@@ -1,0 +1,4 @@
+exit: 101
+panic: ensures failed at tests/programs/panic_ensures.anv:2:13: result > n
+---
+2

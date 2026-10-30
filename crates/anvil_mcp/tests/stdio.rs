@@ -152,3 +152,40 @@ fn fix_and_build_write_files() {
     drop(c);
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn project_tools_answer_over_stdio() {
+    let dir = std::env::temp_dir().join(format!("anvil_mcp_project_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("src")).unwrap();
+    std::fs::create_dir_all(dir.join("docs")).unwrap();
+    std::fs::write(dir.join("anvil.toml"), "[project]\nname = \"p\"\nfiles = [\"src/*.anv\"]\n").unwrap();
+    std::fs::write(dir.join("src/main.anv"), "fn main() uses io {\n    print(\"hi\");\n}\n").unwrap();
+    std::fs::write(dir.join("docs/ROADMAP.md"), "## M1: First\n- [ ] Start\n").unwrap();
+    let mut c = Client::start(&dir);
+
+    let (err, v) = c.call("list", json!({}));
+    assert!(!err && v["files"][0]["file"] == "src/main.anv", "{v}");
+    let (err, v) = c.call("golden_check", json!({}));
+    assert!(err && v["results"][0]["status"] == "missing", "{v}");
+    let (err, v) = c.call("golden_approve", json!({ "file": "src/main.anv" }));
+    assert!(!err && v["stdout"] == "hi\n", "{v}");
+    let (err, v) = c.call("golden_check", json!({ "native": true }));
+    assert!(!err && v["native"] == true, "{v}");
+    let (err, v) = c.call("verify", json!({}));
+    assert!(!err && v["findings"]["open"] == 0, "{v}");
+    let (err, v) = c.call("record_import_roadmap", json!({}));
+    assert!(!err && v["current"]["id"] == "M1", "{v}");
+    let (err, _) = c.call("record_decide", json!({ "title": "Use goldens" }));
+    assert!(!err);
+    let (err, v) = c.call("record_query", json!({}));
+    assert!(!err && v["decisions"] == 1 && v["last_run"]["open"] == 0, "{v}");
+    let (err, v) = c.call("record_status", json!({ "milestone": "M1", "status": "finished" }));
+    assert!(err && v["error"].as_str().unwrap().contains("open, active, done, dropped"), "{v}");
+    let (err, v) = c.call("review", json!({}));
+    assert!(!err && v["markdown"].as_str().unwrap().contains("## Sign-off"), "{v}");
+    let (err, v) = c.call("record_export", json!({}));
+    assert!(!err && v["markdown"].as_str().unwrap().contains("Use goldens"), "{v}");
+    drop(c);
+    let _ = std::fs::remove_dir_all(&dir);
+}

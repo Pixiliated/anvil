@@ -1,0 +1,4 @@
+exit: 101
+panic: to_i64 of a non-finite or out-of-range value at tests/programs/panic_to_i64.anv:4:11
+---
+-9223372036854775808

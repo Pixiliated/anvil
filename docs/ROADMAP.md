@@ -28,38 +28,46 @@ green and the interpreter and native backend agreeing on every program in `tests
 - [x] `anvil fix`: mechanical fixes applied until none is left
 - [x] Step limit for `run` and `test`
 
-## M3: Formatter
+## M3: Projects, goldens and the record (v0.4)
+- [x] `anvil.toml` projects and `anvil list`
+- [x] Goldens: `golden check` (interpreter, and `--native` with leak checks) and `golden approve`
+- [x] The project record (SQLite): milestones from the roadmap, decisions, findings with history,
+      verify runs; `record query/decide/status/import-roadmap/export`
+- [x] `verify` syncs findings into the record; `review` writes a sign-off sheet
+- [x] The repository is an Anvil project: its parity corpus runs through `golden check --native`
+
+## M4: Formatter
 - [ ] `anvil fmt` with one canonical layout, comments preserved
 - [ ] `anvil check` reports unformatted files as an error with a mechanical fix
 - [ ] Parser reports several syntax errors per run where recovery is reliable
 
-## M4: Text and collections
+## M5: Text and collections
 - [ ] Slicing arrays and strings by range, string search and split
 - [ ] Maps with deterministic iteration order
 - [ ] `==` for arrays, structs and enums whose parts all have it
 
-## M5: Modules
+## M6: Modules
 - [ ] Multiple files, explicit imports by name, no wildcard imports
 - [ ] Visibility (`pub`), one module per file
 
-## M6: Generics
+## M7: Generics
 - [ ] Generic functions and structs with explicit, use-site-visible constraints
 
-## M7: Verification
+## M8: Verification
 - [ ] `anvil test --native`
 - [ ] Differential fuzzing: random well-typed programs, interpreter vs native
 - [ ] Property tests in the language (`for all` over generated inputs, seeded)
 
-## M8: Platforms
+## M9: Platforms
 - [ ] Linux x86-64 and AArch64 (ELF), macOS (Mach-O)
 - [ ] Release binaries
 
-## M9: Language server
+## M10: Language server
 - [ ] Language server on the same facts as `type-at` and `refs`, plus completion
 
-## M10: Effects and interop
+## M11: Effects and interop
 - [ ] Effects for allocation, time and seeded randomness
 - [ ] C FFI with declared effects
 
-## M11: Publishing
+## M12: Publishing
 - [ ] crates.io as `anvil-lang` (`anvil` is taken), docs site, contribution guide
