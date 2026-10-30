@@ -1,4 +1,4 @@
-# Anvil language specification (v0.4)
+# Anvil language specification (v0.5)
 
 Anvil is a small, compiled, general-purpose language designed to be written mostly by AI agents
 and read by humans. Its rules aim at three things: one obvious way to write each thing, code
@@ -19,11 +19,12 @@ struct Body { mass: f64[kg], pos: f64[m], }
 enum Shape { Circle(radius: f64[m]), Empty, }
 fn name(param: Type, ...) -> Ret uses io requires cond ensures cond { body }
 test "description" { body }
+allow untested "reason"       // before a fn: switches one lint off for it (see Projects)
 ```
 
 Comments start with `//` and run to the end of the line. Identifiers are ASCII letters, digits
-and `_`, not starting with a digit. Keywords: `fn let var if else while for in match return
-break continue struct enum unit test requires ensures uses true false result`. The names
+and `_`, not starting with a digit. Keywords: `allow fn let var if else while for in match
+return break continue struct enum unit test requires ensures uses true false result`. The names
 `Some`, `None`, `Ok` and `Err` are reserved for the built-in enums.
 
 ## Types
@@ -289,11 +290,14 @@ anvil build   file.anv [-o out.exe] [--asm]
                                        native executable via Cranelift
 anvil test    file.anv [--max-steps N] run test blocks
 anvil fix     file.anv                 apply every mechanical fix until none is left
+anvil trace   file.anv [--test NAME] [--only F,G] [--limit N]
+                                       a run as a timeline: calls, returns, prints
+anvil profile file.anv [--test NAME]   calls and steps per function
 anvil outline file.anv                 items and signatures, without reading the whole file
 anvil type-at file.anv LINE COL        type and declaration at a position
 anvil refs    file.anv NAME            declaration and uses of NAME (fn, type, unit,
                                        Type.field, Enum.Variant, Enum.Variant.field)
-anvil explain [CODE]                   long explanation of an error code
+anvil explain [CODE]                   long explanation of an error code or a lint
 anvil spec                             print this document
 ```
 
@@ -302,6 +306,15 @@ where one exists, fixes. A fix is `mechanical` (safe to apply without thought) o
 `changes_meaning` (compiles, but may hide the real bug: understand the intent first);
 `anvil fix` applies only mechanical ones. `type-at` and `refs` answer even for a file with
 type errors. `--max-steps` stops a run after that many statements and loop iterations.
+
+`trace` and `profile` run `main`, or one test with `--test`, in the interpreter. A trace lists
+each call with its arguments, each return value and each printed line, with the step and call
+depth; values are written as Anvil source (`2.0[m]`, `Shape.Circle(1.5)`, `Some(3)`), cut
+after 8 elements, 80 string bytes or 200 characters, saying how much was cut. `--only` keeps
+the calls of the named functions (prints are always kept); `--limit` (default 1000) counts the
+events left out. A profile gives, per function, its calls, its steps including callees and its
+own steps. Both count steps, never time, so they give the same answer everywhere; a panic or
+the step limit ends the run and is reported, not treated as a failure of the command.
 
 ### Projects
 
@@ -331,6 +344,7 @@ anvil record decide TITLE [BODY]            record a decision
 anvil record status MILESTONE STATUS        open, active, done or dropped
 anvil record import-roadmap [FILE]          milestones from docs/ROADMAP.md
 anvil record export                         the record as Markdown
+anvil watch [--native] [--runs N]           verify, and again after every change
 ```
 
 A **golden** (`golden/<file>.out`) is a program's approved output: its exit code, its panic
@@ -339,10 +353,20 @@ requires the executable to match and to free every object. Only `golden approve`
 after the output has been read. The **record** (`anvil_record.db`, not checked in) keeps
 milestones, decisions, and every problem `verify` finds, with when it was first seen and when it
 was resolved; a problem that comes back opens a new entry, so regressions keep their history.
+When a program no longer matches its golden, `golden check` writes what it printed to
+`out/golden/<file>.out` and a line diff to `out/golden/<file>.diff` (`.native.out` and
+`.native.diff` for the executable).
 
-`anvil-mcp` serves the same commands as MCP tools over stdio (`type-at` is `type_at`, `golden check` is `golden_check`), with
-the same arguments and the same JSON; a failing check is a tool error. Over MCP, every run stops
-after 100,000,000 steps unless `max_steps` says otherwise.
+**Lints** are checks `verify` makes beyond type errors. There is one: **`untested`**, a function
+that no test and no golden-checked `main` runs (`main` itself is left to its golden). Fix it with
+a test; where no test can reach the function, write `allow untested "reason"` on its own line
+before the `fn`. The reason is required, an unknown lint or a repeated allow is an error, and
+an allow on a function that does run is reported as stale.
+
+`anvil-mcp` serves the same commands, except `watch`, as MCP tools over stdio (`type-at` is
+`type_at`, `golden check` is `golden_check`), with the same arguments and the same JSON; a
+failing check is a tool error. Over MCP, every run stops after 100,000,000 steps unless
+`max_steps` says otherwise.
 
 The interpreter and the native compiler must agree exactly: same stdout, same panic message,
 same exit code. The one known difference: the interpreter panics past 10,000 nested calls,

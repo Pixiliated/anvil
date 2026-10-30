@@ -157,8 +157,14 @@ fn errors_have_expected_codes_and_fixes_resolve() {
 fn every_error_code_has_a_test() {
     let out = anvil(&["explain", "--json"]);
     let all: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
-    let all: BTreeSet<String> =
-        all.as_array().unwrap().iter().map(|e| e["code"].as_str().unwrap().to_string()).collect();
+    // Lints come after the codes; verify_reports_untested_functions_and_stale_allows tests them.
+    let all: BTreeSet<String> = all
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|e| e["code"].as_str().unwrap().to_string())
+        .filter(|c| c.starts_with('E'))
+        .collect();
     let mut tested = BTreeSet::new();
     for rel in files("tests/errors") {
         let text = std::fs::read_to_string(root().join(&rel)).unwrap();
@@ -440,4 +446,231 @@ fn project_files_are_loud() {
     let out = p.anvil(&["verify"]);
     assert_eq!(out.status.code(), Some(2));
     assert!(String::from_utf8_lossy(&out.stderr).contains("[project]"), "the error shows a starting anvil.toml");
+}
+
+#[test]
+fn trace_shows_calls_returns_and_prints_in_order() {
+    let v = json_of(&anvil(&["trace", "examples/projectile.anv", "--limit", "6", "--json"]));
+    let e = &v["events"];
+    assert_eq!((e[0]["call"].as_str(), e[0]["depth"].as_u64()), (Some("main"), Some(1)), "{v}");
+    assert_eq!(e[1]["call"], "flight_steps");
+    assert_eq!(e[1]["args"], "start: Body { mass: 0.43[kg], height: 0.0[m], speed: 20.0[m/s] }, dt: 0.01[s]");
+    assert_eq!((e[3]["return"].as_str(), e[3]["value"].as_str()), (Some("weight"), Some("-4.2183[kg*m/s^2]")));
+    assert_eq!(e.as_array().unwrap().len(), 6);
+    assert_eq!((v["limit"].as_u64(), v["dropped"].as_u64()), (Some(6), Some(1630)), "{v}");
+    assert_eq!(v["end"], serde_json::json!({ "exit": 0 }));
+    // Steps, not time: the same trace every run.
+    assert_eq!(json_of(&anvil(&["trace", "examples/projectile.anv", "--limit", "6", "--json"])), v);
+
+    // `only` keeps those functions' calls; prints are always kept. A test can be traced too.
+    let v = json_of(&anvil(&["trace", "examples/orders.anv", "--only", "money", "--json"]));
+    let events = v["events"].as_array().unwrap();
+    assert!(events.iter().all(|e| e.get("call").is_none_or(|c| c == "money")), "{v}");
+    assert!(events.iter().any(|e| e.get("call").is_some()) && events.iter().any(|e| e.get("print").is_some()), "{v}");
+    let t = json_of(&anvil(&["trace", "examples/orders.anv", "--test", "pickup is free", "--json"]));
+    assert_eq!(t["run"], "test \"pickup is free\"");
+    assert_eq!(t["end"], serde_json::json!({ "passed": true }));
+
+    // A panic ends the timeline; it is what was observed, not a failure of trace.
+    let out = anvil(&["trace", "tests/programs/panic_index.anv"]);
+    assert!(out.status.success());
+    let text = String::from_utf8(out.stdout).unwrap();
+    assert!(text.contains("       5    | 0: 10\n"), "{text}");
+    assert!(text.ends_with("end: panic: index 3 out of bounds for length 3 at tests/programs/panic_index.anv:5:22\n"));
+
+    // Loud about what it cannot do.
+    for (args, want) in [
+        (
+            vec!["trace", "examples/orders.anv", "--test", "nope"],
+            "no test \"nope\"; its tests: \"money keeps two digits\"",
+        ),
+        (vec!["trace", "examples/orders.anv", "--only", "fnd"], "did you mean `find`?"),
+        (vec!["trace", "examples/orders.anv", "--limit", "0"], "at least 1"),
+        (vec!["profile", "tests/programs/arith.anv", "--test", "x"], "its tests: it has none"),
+    ] {
+        let out = anvil(&args);
+        assert_eq!(out.status.code(), Some(2), "{args:?}");
+        let err = String::from_utf8_lossy(&out.stderr);
+        assert!(err.contains(want), "{args:?}: {err}");
+    }
+}
+
+#[test]
+fn trace_writes_values_as_anvil_source_and_cuts_long_ones() {
+    let p = Scratch::new("values");
+    p.write(
+        "v.anv",
+        r#"enum Shape {
+    Circle(radius: f64),
+    Rect(width: f64, height: f64),
+    Empty,
+}
+
+struct Box { label: str, sizes: [i64], shape: Shape, }
+
+fn keep(b: Box, maybe: Option[i64], shapes: [Shape]) -> Result[i64, str] {
+    match maybe {
+        Some(value) => {
+            if value == shapes.len() {
+                return Ok(value);
+            }
+        }
+        None => { }
+    }
+    return Err(b.label);
+}
+
+fn main() {
+    var sizes: [i64] = [];
+    for i in 0..20 {
+        sizes.push(i);
+    }
+    let b: Box = Box { label: "a \"quoted\"\nlabel", sizes: sizes, shape: Shape.Circle(1.5) };
+    let shapes: [Shape] = [Shape.Rect(width: 1.0, height: 2.0), Shape.Empty];
+    let r: Result[i64, str] = keep(b: b, maybe: Some(3), shapes: shapes);
+    match r {
+        Ok(value: _) => { }
+        Err(error: _) => { }
+    }
+}
+"#,
+    );
+    let v = p.json(&["trace", "v.anv", "--only", "keep"]);
+    assert_eq!(
+        v["events"][0]["args"],
+        r#"b: Box { label: "a \"quoted\"\nlabel", sizes: [0, 1, 2, 3, 4, 5, 6, 7, ... 12 more], shape: Shape.Circle(1.5) }, maybe: Some(3), shapes: [Shape.Rect(width: 1.0, height: 2.0), Shape.Empty]"#,
+        "{v}"
+    );
+    assert_eq!(v["events"][1]["value"], r#"Err("a \"quoted\"\nlabel")"#);
+
+    p.write(
+        "long.anv",
+        r#"fn echo(s: str) -> str {
+    return s;
+}
+
+fn main() -> i64 {
+    var s: str = "";
+    for _i in 0..300 {
+        s = s + "x";
+    }
+    let t: str = echo(s);
+    return t.len() - 300;
+}
+"#,
+    );
+    let v = p.json(&["trace", "long.anv", "--only", "echo"]);
+    assert_eq!(v["events"][0]["args"], format!("s: \"{}\" ... 220 more bytes", "x".repeat(80)), "{v}");
+}
+
+#[test]
+fn profile_counts_calls_and_steps_per_function() {
+    let v = json_of(&anvil(&["profile", "tests/programs/recursion.anv", "--json"]));
+    let f = |name: &str| v["functions"].as_array().unwrap().iter().find(|f| f["name"] == name).unwrap().clone();
+    assert_eq!((f("fib")["calls"].as_u64(), f("fib")["steps"].as_u64()), (Some(21891), Some(43782)), "{v}");
+    // A recursive function's own nested calls count once in its total; main's total is the run.
+    assert_eq!(f("main")["steps"], v["steps"]);
+    assert_eq!(v["steps"], 53842);
+    let own: u64 = v["functions"].as_array().unwrap().iter().map(|f| f["self_steps"].as_u64().unwrap()).sum();
+    assert_eq!(own, 53842, "own steps add up to the whole run");
+    assert_eq!(v["functions"][0]["name"], "fib", "most expensive first");
+    let t = json_of(&anvil(&["profile", "examples/orders.anv", "--test", "money keeps two digits", "--json"]));
+    assert_eq!(t["functions"].as_array().unwrap().len(), 1, "{t}");
+    assert!(t["not_run"].as_array().unwrap().contains(&serde_json::json!("find")));
+}
+
+#[test]
+fn verify_reports_untested_functions_and_stale_allows() {
+    let p = hello_project("untested");
+    p.write(
+        "src/maths.anv",
+        r#"fn twice(n: i64) -> i64 {
+    return n * 2;
+}
+
+fn thrice(n: i64) -> i64 {
+    return n * 3;
+}
+
+allow untested "kept for the next milestone"
+fn half(n: i64) -> i64 {
+    return n / 2;
+}
+
+test "twice" {
+    assert(twice(2) == 4);
+}
+"#,
+    );
+    let v = json_of(&p.anvil(&["verify", "--json"]));
+    let open: Vec<(&str, &str, &str)> = v["open"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|f| (f["check"].as_str().unwrap(), f["file"].as_str().unwrap(), f["at"].as_str().unwrap()))
+        .collect();
+    // main is left to its golden (missing here); `half` is allowed; `thrice` never runs.
+    assert_eq!(open, [("golden", "src/hello.anv", ""), ("untested", "src/maths.anv", "5:4")], "{v}");
+
+    p.write(
+        "src/maths.anv",
+        "allow untested \"stale\"\nfn twice(n: i64) -> i64 {\n    return n * 2;\n}\n\ntest \"twice\" {\n    assert(twice(2) == 4);\n}\n",
+    );
+    let v = json_of(&p.anvil(&["verify", "--json"]));
+    let stale = v["open"].as_array().unwrap().iter().find(|f| f["check"] == "allow").unwrap();
+    assert!(stale["message"].as_str().unwrap().contains("`twice` runs"), "{v}");
+    let outline = p.json(&["outline", "src/maths.anv"]);
+    assert_eq!(outline["items"][0]["allows"], serde_json::json!([{ "lint": "untested", "reason": "stale" }]));
+    assert!(String::from_utf8(anvil(&["explain", "untested"]).stdout).unwrap().starts_with("untested: "));
+}
+
+#[test]
+fn a_differing_golden_leaves_the_actual_output_and_a_diff() {
+    let p = hello_project("golden_diff");
+    let program = |second: &str| {
+        format!("fn main() uses io {{\n    print(\"one\");\n    print(\"{second}\");\n    print(\"three\");\n}}\n")
+    };
+    p.write("src/hello.anv", &program("two"));
+    assert!(p.anvil(&["golden", "approve", "src/hello.anv"]).status.success());
+    p.write("src/hello.anv", &program("2"));
+    let v = json_of(&p.anvil(&["golden", "check", "--json"]));
+    let detail = v["results"][0]["detail"].as_str().unwrap();
+    assert!(
+        detail.ends_with("actual output in out/golden/src/hello.anv.out, diff in out/golden/src/hello.anv.diff"),
+        "{v}"
+    );
+    let read = |rel: &str| std::fs::read_to_string(p.0.join(rel)).unwrap();
+    assert_eq!(read("out/golden/src/hello.anv.out"), "exit: 0\n---\none\n2\nthree\n");
+    assert_eq!(read("out/golden/src/hello.anv.diff"), "...\n  ---\n  one\n- two\n+ 2\n  three\n");
+    // Matching again removes them, so out/golden never shows a stale failure.
+    p.write("src/hello.anv", &program("two"));
+    assert!(p.anvil(&["golden", "check"]).status.success());
+    assert!(!p.0.join("out/golden/src/hello.anv.out").exists());
+}
+
+#[test]
+fn watch_verifies_again_after_a_change() {
+    use std::io::{BufRead, BufReader};
+    let p = hello_project("watch");
+    assert!(p.anvil(&["golden", "approve", "src/hello.anv"]).status.success());
+    let mut child = Command::new(env!("CARGO_BIN_EXE_anvil"))
+        .args(["watch", "--runs", "2", "--json"])
+        .current_dir(&p.0)
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .unwrap();
+    let mut lines = BufReader::new(child.stdout.take().unwrap()).lines();
+    let mut next = || -> serde_json::Value { serde_json::from_str(&lines.next().unwrap().unwrap()).unwrap() };
+    let first = next();
+    assert_eq!(first["ok"], true, "{first}");
+    p.write("src/hello.anv", "fn main() uses io {\n    print(\"hullo there\");\n}\n");
+    let second = next();
+    assert_eq!(
+        (second["ok"].as_bool(), second["open"][0]["check"].as_str()),
+        (Some(false), Some("golden")),
+        "{second}"
+    );
+    assert_eq!(next(), serde_json::json!({ "ok": false, "runs": 2 }));
+    assert_eq!(child.wait().unwrap().code(), Some(1));
 }

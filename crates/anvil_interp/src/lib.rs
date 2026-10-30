@@ -1,6 +1,9 @@
 //! Reference interpreter over the typed IR. It defines what a program means; the native backend
 //! is tested against it (same stdout, same panic message, same exit code).
 
+mod show;
+pub use show::{show, SHOWN_BYTES, SHOWN_CHARS, SHOWN_ITEMS};
+
 use anvil_front::ir::*;
 use std::io::Write;
 use std::rc::Rc;
@@ -50,6 +53,117 @@ pub struct Interp<'p> {
     depth: usize,
     /// Statements and loop iterations left before the run stops; None is unlimited.
     steps_left: Option<u64>,
+    /// Steps taken so far.
+    taken: u64,
+    rec: Option<&'p mut Recorder>,
+}
+
+/// What a run did, for `profile`, `trace` and coverage. Counts are always kept; the timeline only
+/// when `trace` is set. Everything here is deterministic: steps, not time.
+pub struct Recorder {
+    /// Steps the whole run took.
+    pub steps: u64,
+    /// Indexed by FuncId.
+    pub funcs: Vec<FuncStats>,
+    pub trace: Option<Trace>,
+    /// Active calls: function, steps taken when it began, steps its finished callees took.
+    stack: Vec<(FuncId, u64, u64)>,
+    /// Frames of each function on the stack, so recursion counts inclusive steps once.
+    active: Vec<u32>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct FuncStats {
+    pub calls: u64,
+    /// Steps from entering to leaving, callees included (a recursive function's own nested calls
+    /// are counted once, in the outermost one).
+    pub steps: u64,
+    /// Steps in the function's own body, callees excluded.
+    pub self_steps: u64,
+}
+
+/// A bounded timeline of calls, returns and prints.
+pub struct Trace {
+    /// Functions whose calls and returns are kept (by FuncId); None keeps all. Prints are always kept.
+    pub only: Option<Vec<bool>>,
+    pub limit: usize,
+    pub events: Vec<Event>,
+    /// Events left out after `limit` was reached.
+    pub dropped: u64,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum Event {
+    /// `step` is the number of steps taken before the event; main's body runs at depth 1.
+    Call {
+        step: u64,
+        depth: usize,
+        func: FuncId,
+        args: Vec<Value>,
+    },
+    Return {
+        step: u64,
+        depth: usize,
+        func: FuncId,
+        value: Value,
+    },
+    Print {
+        step: u64,
+        depth: usize,
+        text: String,
+    },
+}
+
+impl Recorder {
+    pub fn new(program: &Program) -> Recorder {
+        let n = program.funcs.len();
+        Recorder { steps: 0, funcs: vec![FuncStats::default(); n], trace: None, stack: Vec::new(), active: vec![0; n] }
+    }
+
+    /// A recorder that also keeps a timeline of at most `limit` events, of the functions in
+    /// `only` (all when None).
+    pub fn tracing(program: &Program, only: Option<Vec<bool>>, limit: usize) -> Recorder {
+        let mut r = Recorder::new(program);
+        r.trace = Some(Trace { only, limit, events: Vec::new(), dropped: 0 });
+        r
+    }
+
+    fn event(&mut self, func: Option<FuncId>, make: impl FnOnce() -> Event) {
+        let Some(t) = &mut self.trace else { return };
+        if let (Some(f), Some(only)) = (func, &t.only) {
+            if !only[f] {
+                return;
+            }
+        }
+        if t.events.len() < t.limit {
+            t.events.push(make());
+        } else {
+            t.dropped += 1;
+        }
+    }
+
+    fn enter(&mut self, func: FuncId, args: &[Value], taken: u64, depth: usize) {
+        self.funcs[func].calls += 1;
+        self.stack.push((func, taken, 0));
+        self.active[func] += 1;
+        self.event(Some(func), || Event::Call { step: taken, depth, func, args: args.to_vec() });
+    }
+
+    fn leave(&mut self, result: Option<&Value>, taken: u64, depth: usize) {
+        let (func, start, callees) = self.stack.pop().expect("leave without enter");
+        let inclusive = taken - start;
+        self.funcs[func].self_steps += inclusive - callees;
+        self.active[func] -= 1;
+        if self.active[func] == 0 {
+            self.funcs[func].steps += inclusive;
+        }
+        if let Some(parent) = self.stack.last_mut() {
+            parent.2 += inclusive;
+        }
+        if let Some(v) = result {
+            self.event(Some(func), || Event::Return { step: taken, depth, func, value: v.clone() });
+        }
+    }
 }
 
 /// How a run ended. Exit codes match the native executable: main's value, or 101 on panic.
@@ -68,10 +182,20 @@ pub fn step_limit_message(limit: u64) -> String {
 /// Runs main. Needs a large stack for deep recursion; see `run_on_big_stack`. A step is one
 /// statement or one loop iteration; `max_steps` None runs without a limit.
 pub fn run_main(program: &Program, out: &mut dyn Write, max_steps: Option<u64>) -> Outcome {
+    run_main_recorded(program, out, max_steps, None)
+}
+
+/// `run_main`, counting into `rec` when given.
+pub fn run_main_recorded(
+    program: &Program,
+    out: &mut dyn Write,
+    max_steps: Option<u64>,
+    rec: Option<&mut Recorder>,
+) -> Outcome {
     let main = program.main.expect("run_main needs a main function");
-    let mut it = Interp { program, out, depth: 0, steps_left: max_steps };
+    let mut it = Interp { program, out, depth: 0, steps_left: max_steps, taken: 0, rec };
     let result = it.call(main, Vec::new());
-    let _ = it.out.flush();
+    it.finish();
     match result {
         Ok(Value::Void) => Outcome::Exit(0),
         Ok(Value::I64(code)) if (0..=255).contains(&code) => Outcome::Exit(code as i32),
@@ -85,11 +209,22 @@ pub fn run_main(program: &Program, out: &mut dyn Write, max_steps: Option<u64>) 
 
 /// Runs one test body. Ok(()) if it finished, Err(message) if it panicked or ran out of steps.
 pub fn run_test(program: &Program, index: usize, out: &mut dyn Write, max_steps: Option<u64>) -> Result<(), String> {
+    run_test_recorded(program, index, out, max_steps, None)
+}
+
+/// `run_test`, counting into `rec` when given. The test body itself belongs to no function.
+pub fn run_test_recorded(
+    program: &Program,
+    index: usize,
+    out: &mut dyn Write,
+    max_steps: Option<u64>,
+    rec: Option<&mut Recorder>,
+) -> Result<(), String> {
     let test = &program.tests[index];
-    let mut it = Interp { program, out, depth: 0, steps_left: max_steps };
+    let mut it = Interp { program, out, depth: 0, steps_left: max_steps, taken: 0, rec };
     let mut frame = vec![Value::Void; test.locals.len()];
     let r = it.block(&test.body, &mut frame);
-    let _ = it.out.flush();
+    it.finish();
     match r {
         Ok(_) => Ok(()),
         Err(Unwind::Panic(m)) => Err(m),
@@ -157,15 +292,40 @@ impl<'p> Interp<'p> {
             }
             *n -= 1;
         }
+        self.taken += 1;
         Ok(())
     }
 
+    /// Flushes output and closes the calls a panic or the step limit left open.
+    fn finish(&mut self) {
+        let _ = self.out.flush();
+        if let Some(r) = &mut self.rec {
+            while !r.stack.is_empty() {
+                r.leave(None, self.taken, 0);
+            }
+            r.steps = self.taken;
+        }
+    }
+
     fn call(&mut self, fid: FuncId, args: Vec<Value>) -> R<Value> {
-        let f = &self.program.funcs[fid];
         if self.depth >= MAX_CALL_DEPTH {
-            return panic(format!("stack overflow: call depth exceeded {MAX_CALL_DEPTH} in `{}`", f.name));
+            let name = &self.program.funcs[fid].name;
+            return panic(format!("stack overflow: call depth exceeded {MAX_CALL_DEPTH} in `{name}`"));
         }
         self.depth += 1;
+        if let Some(r) = &mut self.rec {
+            r.enter(fid, &args, self.taken, self.depth);
+        }
+        let result = self.call_body(fid, args);
+        if let (Some(r), Ok(v)) = (&mut self.rec, &result) {
+            r.leave(Some(v), self.taken, self.depth);
+        }
+        self.depth -= 1;
+        result
+    }
+
+    fn call_body(&mut self, fid: FuncId, args: Vec<Value>) -> R<Value> {
+        let f = &self.program.funcs[fid];
         let mut frame = vec![Value::Void; f.locals.len()];
         for (p, a) in f.params.iter().zip(args) {
             frame[*p] = a;
@@ -188,7 +348,6 @@ impl<'p> Interp<'p> {
                 return panic(c.message.clone());
             }
         }
-        self.depth -= 1;
         Ok(ret)
     }
 
@@ -434,6 +593,10 @@ impl<'p> Interp<'p> {
         Ok(match b {
             Builtin::Print => {
                 let mut line = print_text(&x, &args[0].ty);
+                if let Some(r) = &mut self.rec {
+                    let (step, depth) = (self.taken, self.depth);
+                    r.event(None, || Event::Print { step, depth, text: line.clone() });
+                }
                 line.push('\n');
                 self.out.write_all(line.as_bytes()).expect("stdout write failed");
                 Value::Void

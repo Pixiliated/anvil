@@ -18,7 +18,7 @@ pub enum Item {
     Unit(UnitDecl),
     Struct(StructDecl),
     Enum(EnumDecl),
-    Fn(FnDecl),
+    Fn(Box<FnDecl>),
     Test(TestDecl),
 }
 
@@ -92,6 +92,18 @@ pub struct FnDecl {
     pub requires: Vec<Expr>,
     pub ensures: Vec<Expr>,
     pub body: Block,
+    pub span: Span,
+    /// `allow LINT "reason"` lines written before `fn`.
+    pub allows: Vec<AllowDecl>,
+}
+
+/// `allow untested "reason"`: switches one lint off for one function, saying why.
+#[derive(Clone, Debug)]
+pub struct AllowDecl {
+    pub lint: Ident,
+    pub reason: String,
+    pub reason_span: Span,
+    /// The whole line, for removal fixes.
     pub span: Span,
 }
 

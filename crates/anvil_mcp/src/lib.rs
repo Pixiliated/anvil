@@ -25,14 +25,17 @@ stable code, an exact range and fixes marked mechanical (safe) or changes_meanin
 and signatures without reading it all; `type_at` gives the type and declaration at a line and \
 column; `refs` finds where a function, type, Type.field, Enum.Variant or unit is declared and used. \
 `run` interprets main and returns its stdout; `test` runs the test blocks; `build` makes a native \
-executable. `explain` describes an error code. Projects (a directory with anvil.toml) add `list`, \
+executable. `trace` shows a run as a timeline of calls with their arguments, returns and prints \
+(narrow it with `only`); `profile` counts calls and steps per function (steps, not time, so the \
+numbers are the same everywhere). `explain` describes an error code or a lint. Projects (a directory with anvil.toml) add `list`, \
 `verify` (check, test and golden-check every file; findings go into the project record), \
 `golden_check` and `golden_approve` (approved output per program; approve only after reading the \
 output), `review` (writes out/review.md for a person to sign off) and the record: `record_query` \
 (start here in a project: milestones, decisions, findings with history, runs), `record_decide`, \
-`record_status`, `record_import_roadmap`, `record_export`. Every CLI command is a tool with the same \
-arguments (the CLI's `type-at` is `type_at`, `golden check` is `golden_check`). Failing checks come \
-back as tool errors.";
+`record_status`, `record_import_roadmap`, `record_export`. `verify` also reports functions that no \
+test and no golden-checked main runs (the `untested` lint; `allow untested \"why\"` before a fn \
+switches it off). Every CLI command except `watch` is a tool with the same arguments (the CLI's \
+`type-at` is `type_at`, `golden check` is `golden_check`). Failing checks come back as tool errors.";
 
 /// Tool argument structs reject unknown fields, so a misspelt argument is an error, not ignored.
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -85,7 +88,7 @@ pub struct RefsArgs {
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ExplainArgs {
-    /// An error code such as E0301; leave it out to list every code.
+    /// An error code such as E0301, or a lint such as untested; leave it out to list them all.
     pub code: Option<String>,
 }
 
@@ -100,6 +103,32 @@ pub struct VerifyArgs {
     pub max_steps: Option<u64>,
     /// Also build and run each program natively (slower; checks the native backend and leaks).
     pub native: Option<bool>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct TraceArgs {
+    /// Path of the .anv file, relative to the server's root or absolute.
+    pub file: String,
+    /// Trace this test (by name) instead of main.
+    pub test: Option<String>,
+    /// Keep the calls and returns of these functions only, comma-separated; prints are always kept.
+    pub only: Option<String>,
+    /// Keep at most this many events (default 1000); the rest are counted as dropped.
+    pub limit: Option<u64>,
+    /// Stop the run after this many statements and loop iterations (default 100000000).
+    pub max_steps: Option<u64>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ProfileArgs {
+    /// Path of the .anv file, relative to the server's root or absolute.
+    pub file: String,
+    /// Profile this test (by name) instead of main.
+    pub test: Option<String>,
+    /// Stop the run after this many statements and loop iterations (default 100000000).
+    pub max_steps: Option<u64>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -252,7 +281,25 @@ impl AnvilServer {
         self.op(move |root| anvil_ops::refs(root, &a.file, &a.name)).await
     }
 
-    #[tool(description = "Explain an error code, or list every code with its explanation.")]
+    #[tool(description = "Run main (or one test) in the interpreter and return a timeline: each call with \
+        its arguments written as Anvil values, each return value and each printed line, with the step \
+        and call depth. A panic or the step limit ends the timeline; it is reported, not a tool error.")]
+    async fn trace(&self, Parameters(a): Parameters<TraceArgs>) -> Result<CallToolResult, ErrorData> {
+        self.op(move |root| {
+            let (test, only) = (a.test.as_deref(), a.only.as_deref());
+            anvil_ops::trace(root, &a.file, test, only, a.limit, Some(steps(a.max_steps)))
+        })
+        .await
+    }
+
+    #[tool(description = "Run main (or one test) in the interpreter and count, per function, its calls, \
+        its steps with callees and its own steps; also the functions that never ran. Steps are \
+        statements and loop iterations, so the numbers are deterministic.")]
+    async fn profile(&self, Parameters(a): Parameters<ProfileArgs>) -> Result<CallToolResult, ErrorData> {
+        self.op(move |root| anvil_ops::profile(root, &a.file, a.test.as_deref(), Some(steps(a.max_steps)))).await
+    }
+
+    #[tool(description = "Explain an error code or a lint, or list every code and lint with its explanation.")]
     async fn explain(&self, Parameters(a): Parameters<ExplainArgs>) -> Result<CallToolResult, ErrorData> {
         self.op(move |_| anvil_ops::explain(a.code.as_deref())).await
     }

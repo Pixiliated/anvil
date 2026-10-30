@@ -1,0 +1,7 @@
+// expect: E0502
+// resolve: mechanical
+allow untested "reached only through main"
+allow untested "said twice"
+fn helper() -> i64 {
+    return 1;
+}

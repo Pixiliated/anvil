@@ -82,9 +82,19 @@ impl Parser {
             Tok::Unit => self.unit_decl().map(Item::Unit),
             Tok::Struct => self.struct_decl().map(Item::Struct),
             Tok::Enum => self.enum_decl().map(Item::Enum),
-            Tok::Fn => self.fn_decl().map(Item::Fn),
+            Tok::Fn => self.fn_decl(Vec::new()).map(|f| Item::Fn(Box::new(f))),
+            Tok::Allow => {
+                let mut allows = Vec::new();
+                while self.peek() == &Tok::Allow {
+                    allows.push(self.allow_decl()?);
+                }
+                if self.peek() != &Tok::Fn {
+                    return Err(self.unexpected("`fn` or another `allow` (an allow applies to the function after it)"));
+                }
+                self.fn_decl(allows).map(|f| Item::Fn(Box::new(f)))
+            }
             Tok::Test => self.test_decl().map(Item::Test),
-            _ => Err(self.unexpected("`fn`, `struct`, `enum`, `unit` or `test`")),
+            _ => Err(self.unexpected("`fn`, `struct`, `enum`, `unit`, `test` or `allow`")),
         }
     }
 
@@ -226,7 +236,17 @@ impl Parser {
         Ok((uses, Some(start.to(self.prev_span()))))
     }
 
-    fn fn_decl(&mut self) -> PResult<FnDecl> {
+    fn allow_decl(&mut self) -> PResult<AllowDecl> {
+        let start = self.bump().span;
+        let lint = self.ident("a lint name, such as `untested`")?;
+        let (reason, reason_span) = match self.peek().clone() {
+            Tok::Str(s) => (s, self.bump().span),
+            _ => return Err(self.unexpected("the reason in quotes: allow untested \"why\"")),
+        };
+        Ok(AllowDecl { lint, reason, reason_span, span: start.to(reason_span) })
+    }
+
+    fn fn_decl(&mut self, allows: Vec<AllowDecl>) -> PResult<FnDecl> {
         let start = self.bump().span;
         let name = self.ident("function name")?;
         self.expect(Tok::LParen)?;
@@ -268,7 +288,7 @@ impl Parser {
         }
         let body = self.block()?;
         let span = start.to(body.span);
-        Ok(FnDecl { name, params, ret, uses, uses_span, uses_insert, requires, ensures, body, span })
+        Ok(FnDecl { name, params, ret, uses, uses_span, uses_insert, requires, ensures, body, span, allows })
     }
 
     fn test_decl(&mut self) -> PResult<TestDecl> {

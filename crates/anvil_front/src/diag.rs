@@ -280,13 +280,35 @@ pub fn explain(code: &str) -> Option<&'static str> {
             "No text form. print and string interpolation take i64, f64, bool and str. Print structs \
                     field by field, arrays in a loop and enums with match."
         }
+        "E0500" => {
+            "Unknown lint in an allow. `allow LINT \"reason\"` names one of the lints that \
+                    `anvil explain` lists after the error codes."
+        }
+        "E0501" => {
+            "An allow needs a reason. Write why the lint does not apply to this function, so a \
+                    reader can judge whether it still holds: allow untested \"prints only; the golden covers it\"."
+        }
+        "E0502" => "Duplicate allow. Each lint is allowed at most once per function.",
         _ => return None,
     })
+}
+
+/// Lints: checks `anvil verify` makes beyond type errors, each switched off for one function by
+/// `allow LINT "reason"` before its `fn`. An allow that switches off nothing is a finding too.
+pub const LINTS: &[(&str, &str)] = &[(
+    "untested",
+    "A function that no test and no golden-checked main ever runs. Add a test that calls it, or, \
+     if a test cannot reach it, write `allow untested \"why\"` before its `fn`. An allow on a \
+     function that does run is reported as stale.",
+)];
+
+pub fn lint(name: &str) -> Option<&'static str> {
+    LINTS.iter().find(|(n, _)| *n == name).map(|(_, text)| *text)
 }
 
 pub const ALL_CODES: &[&str] = &[
     "E0001", "E0002", "E0003", "E0004", "E0100", "E0200", "E0201", "E0202", "E0300", "E0301", "E0302", "E0303",
     "E0304", "E0305", "E0306", "E0307", "E0308", "E0310", "E0311", "E0320", "E0321", "E0322", "E0323", "E0330",
     "E0331", "E0332", "E0340", "E0341", "E0350", "E0360", "E0370", "E0380", "E0390", "E0391", "E0392", "E0400",
-    "E0401", "E0402", "E0403", "E0404", "E0405", "E0406", "E0407",
+    "E0401", "E0402", "E0403", "E0404", "E0405", "E0406", "E0407", "E0500", "E0501", "E0502",
 ];

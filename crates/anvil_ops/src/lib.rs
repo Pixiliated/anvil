@@ -4,12 +4,14 @@
 //! that the MCP server has a tool for each, with the same parameters.
 
 pub mod golden;
+mod inspect;
 mod proj;
 pub mod project;
 
+pub use inspect::{profile, trace, TRACE_LIMIT};
 pub use proj::{
     golden_approve, golden_check, list, record_decide, record_export, record_import_roadmap, record_query,
-    record_status, review, verify,
+    record_status, review, verify, watch,
 };
 
 use anvil_front::check::{Analysis, Def};
@@ -32,6 +34,10 @@ pub struct Command {
 
 /// `--json` exists only in the CLI: MCP tools always answer in JSON.
 pub const CLI_ONLY_OPTIONS: &[&str] = &["json"];
+
+/// Commands with no MCP tool, and why.
+pub const CLI_ONLY_COMMANDS: &[(&str, &str)] =
+    &[("watch", "it runs until stopped; an MCP client calls verify after each change instead")];
 
 pub const COMMANDS: &[Command] = &[
     Command { name: "check", positionals: &["file"], options: &[], summary: "type-check a file" },
@@ -87,6 +93,23 @@ pub const COMMANDS: &[Command] = &[
         summary: "explain an error code (no code: list all)",
     },
     Command { name: "spec", positionals: &[], options: &[], summary: "the language specification" },
+    Command {
+        name: "trace",
+        positionals: &["file"],
+        options: &[
+            ("test", "NAME", "trace this test instead of main"),
+            ("only", "NAMES", "keep the calls of these functions only (comma-separated); prints are always kept"),
+            ("limit", "N", "keep at most N events (default 1000)"),
+            STEPS,
+        ],
+        summary: "a timeline of calls, arguments, returns and prints",
+    },
+    Command {
+        name: "profile",
+        positionals: &["file"],
+        options: &[("test", "NAME", "profile this test instead of main"), STEPS],
+        summary: "calls and steps per function",
+    },
     // Project commands: they find anvil.toml in the current directory or above.
     Command {
         name: "list",
@@ -143,6 +166,12 @@ pub const COMMANDS: &[Command] = &[
         summary: "load milestones from a roadmap (default docs/ROADMAP.md)",
     },
     Command { name: "record export", positionals: &[], options: &[], summary: "the whole record as Markdown" },
+    Command {
+        name: "watch",
+        positionals: &[],
+        options: &[NATIVE, STEPS, ("runs", "N", "stop after N verify passes")],
+        summary: "verify, and again after every change (CLI only)",
+    },
 ];
 
 const STEPS: (&str, &str, &str) = ("max-steps", "N", "stop each run after N statements and loop iterations");
@@ -413,12 +442,18 @@ pub fn outline(root: &Path, file: &str) -> Report {
         let v = match item {
             Item::Fn(f) => {
                 let sig = one_line(&text(Span::new(f.span.start, f.body.span.start)));
+                for a in &f.allows {
+                    human.push_str(&format!("{:>4}  {}\n", line(a.span), text(a.span)));
+                }
                 human.push_str(&format!("{:>4}  {sig}\n", line(f.span)));
+                let allows: Vec<_> =
+                    f.allows.iter().map(|a| json!({ "lint": a.lint.name, "reason": a.reason })).collect();
                 json!({
                     "kind": "fn", "name": f.name.name, "line": line(f.span), "signature": sig,
                     "uses_io": f.uses.iter().any(|u| u.name == "io"),
                     "requires": f.requires.iter().map(|e| text(e.span)).collect::<Vec<_>>(),
                     "ensures": f.ensures.iter().map(|e| text(e.span)).collect::<Vec<_>>(),
+                    "allows": allows,
                 })
             }
             Item::Struct(s) => {
@@ -542,17 +577,21 @@ pub fn refs(root: &Path, file: &str, name: &str) -> Report {
     Report::ok(json!({ "ok": true, "declarations": out, "errors_in_file": a.diags.len() }), human)
 }
 
+/// One error code or lint, or every code followed by every lint.
 pub fn explain(code: Option<&str>) -> Report {
     match code {
-        Some(code) => match diag::explain(code) {
+        Some(code) => match diag::explain(code).or_else(|| diag::lint(code)) {
             Some(text) => Report::ok(json!({ "code": code, "explanation": text }), format!("{code}: {text}\n")),
-            None => Report::usage(format!("unknown error code `{code}`")),
+            None => Report::usage(format!("unknown error code or lint `{code}`")),
         },
         None => {
-            let all: Vec<_> =
-                diag::ALL_CODES.iter().map(|c| json!({ "code": c, "explanation": diag::explain(c) })).collect();
-            let text: String =
-                diag::ALL_CODES.iter().map(|c| format!("{c}: {}\n", diag::explain(c).unwrap())).collect();
+            let entries: Vec<(&str, &str)> = diag::ALL_CODES
+                .iter()
+                .map(|c| (*c, diag::explain(c).unwrap()))
+                .chain(diag::LINTS.iter().copied())
+                .collect();
+            let all: Vec<_> = entries.iter().map(|(c, t)| json!({ "code": c, "explanation": t })).collect();
+            let text: String = entries.iter().map(|(c, t)| format!("{c}: {t}\n")).collect();
             Report::ok(Value::Array(all), text)
         }
     }

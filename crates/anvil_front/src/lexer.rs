@@ -10,6 +10,7 @@ pub enum Tok {
     /// A string with `{expr}` parts; each code part is its own token list ending in Eof.
     Interp(Vec<LexPart>),
     // keywords
+    Allow,
     Fn,
     Enum,
     Match,
@@ -96,6 +97,7 @@ impl Tok {
             Tok::Struct => "struct",
             Tok::Unit => "unit",
             Tok::Test => "test",
+            Tok::Allow => "allow",
             Tok::Requires => "requires",
             Tok::Ensures => "ensures",
             Tok::Uses => "uses",
@@ -151,6 +153,7 @@ pub struct Token {
 
 fn keyword(s: &str) -> Option<Tok> {
     Some(match s {
+        "allow" => Tok::Allow,
         "fn" => Tok::Fn,
         "enum" => Tok::Enum,
         "match" => Tok::Match,

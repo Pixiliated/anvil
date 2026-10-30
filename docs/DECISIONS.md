@@ -77,3 +77,19 @@ Short records of choices that are not obvious from the code. Newest last.
   editing other lines of a file does not resolve and reopen its findings.
 - **The record holds wall-clock times**; it is history about the project, never program output,
   so determinism is unaffected.
+
+## M4 (v0.5)
+
+- **What the engine's sim timeline and telemetry became.** `trace` is the timeline (calls,
+  arguments, returns, prints) and `profile` the telemetry, both from the interpreter. They count
+  steps, never time, so the numbers are the same on every machine and can go in a test.
+- **Values in a trace are written as Anvil source** (`2.0[m]`, `Shape.Circle(1.5)`, `Some(3)`),
+  cut after 8 elements, 80 string bytes or 200 characters, always saying how much was cut.
+- **A panic is what `trace` observed, not a failure of `trace`**, so the command succeeds and the
+  end of the timeline says how the run ended.
+- **`untested` is the first lint**, and lints use the engine's escape hatch: a per-function
+  `allow untested "reason"` with a required reason, never a looser global setting. `main` is
+  left to its golden, which `verify` already reports when it is missing.
+- **`watch` is the one command with no tool.** It runs until stopped; an MCP client calls
+  `verify` after its own edits. The parity test reads the exception and its reason from
+  `CLI_ONLY_COMMANDS`, as the engine's `parity.rs` does.

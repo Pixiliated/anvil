@@ -2,6 +2,7 @@
 //! and every operation that can fail carries its finished panic message, so the interpreter and
 //! the native backend cannot disagree about what a failure says.
 
+use crate::span::Span;
 use crate::units::Unit;
 use std::fmt;
 
@@ -67,6 +68,10 @@ pub struct Check {
 #[derive(Clone, Debug)]
 pub struct Func {
     pub name: String,
+    /// The name in the declaration.
+    pub span: Span,
+    /// `allow LINT "reason"` lines, as (lint, reason).
+    pub allows: Vec<(String, String)>,
     pub params: Vec<LocalId>,
     pub ret: Ty,
     pub uses_io: bool,

@@ -111,6 +111,10 @@ fn dispatch(p: &Parsed) -> Result<Report, String> {
         _ => None,
     };
     let native = p.options.contains_key("native");
+    let text = |name: &str| p.options.get(name).and_then(|v| v.as_deref());
+    let count = |name: &str| -> Result<Option<u64>, String> {
+        text(name).map(|v| number::<u64>(&format!("--{name}"), v)).transpose()
+    };
     Ok(match p.command.name {
         "check" => anvil_ops::check(root, file),
         "run" => anvil_ops::run(root, file, steps, &mut std::io::stdout()),
@@ -125,6 +129,8 @@ fn dispatch(p: &Parsed) -> Result<Report, String> {
         "refs" => anvil_ops::refs(root, file, pos(1).unwrap()),
         "explain" => anvil_ops::explain(pos(0)),
         "spec" => anvil_ops::spec(),
+        "trace" => anvil_ops::trace(root, file, text("test"), text("only"), count("limit")?, steps),
+        "profile" => anvil_ops::profile(root, file, text("test"), steps),
         "list" => anvil_ops::list(root),
         "verify" => anvil_ops::verify(root, native, steps),
         "review" => anvil_ops::review(root, native, steps),
@@ -135,6 +141,21 @@ fn dispatch(p: &Parsed) -> Result<Report, String> {
         "record status" => anvil_ops::record_status(root, file, pos(1).unwrap()),
         "record import-roadmap" => anvil_ops::record_import_roadmap(root, pos(0)),
         "record export" => anvil_ops::record_export(root),
+        "watch" => {
+            let json = p.json;
+            anvil_ops::watch(root, native, steps, count("runs")?, &mut |r: &Report, more: bool| {
+                if json {
+                    println!("{}", r.json);
+                } else {
+                    print!("{}", r.stdout);
+                    eprint!("{}", r.stderr);
+                    if more {
+                        eprintln!("watching for changes (Ctrl+C to stop)");
+                    }
+                }
+                let _ = std::io::stdout().flush();
+            })
+        }
         other => unreachable!("command `{other}` is in COMMANDS but not dispatched"),
     })
 }

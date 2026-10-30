@@ -1,9 +1,10 @@
 //! The CLI and the MCP server must offer the same commands with the same arguments: the CLI's
 //! `a-b` and `a b` are the tool `a_b`, positionals and options are parameters, and required positionals
-//! are required parameters. `--json` is CLI-only (tools always answer in JSON).
+//! are required parameters. `--json` is CLI-only (tools always answer in JSON), and so are the
+//! commands in `CLI_ONLY_COMMANDS`, each with its reason.
 
 use anvil_mcp::AnvilServer;
-use anvil_ops::{CLI_ONLY_OPTIONS, COMMANDS};
+use anvil_ops::{CLI_ONLY_COMMANDS, CLI_ONLY_OPTIONS, COMMANDS};
 use std::collections::BTreeSet;
 
 fn snake(s: &str) -> String {
@@ -14,11 +15,17 @@ fn snake(s: &str) -> String {
 fn every_cli_command_has_an_mcp_tool_and_back() {
     let tools = AnvilServer::tools();
     let tool_names: BTreeSet<String> = tools.iter().map(|t| t.name.to_string()).collect();
-    let command_names: BTreeSet<String> = COMMANDS.iter().map(|c| snake(c.name)).collect();
+    let cli_only = |name: &str| CLI_ONLY_COMMANDS.iter().any(|(n, _)| *n == name);
+    for (name, why) in CLI_ONLY_COMMANDS {
+        assert!(COMMANDS.iter().any(|c| c.name == *name), "CLI-only command `{name}` is not a command");
+        assert!(!why.is_empty(), "CLI-only command `{name}` needs a reason");
+    }
+    let command_names: BTreeSet<String> =
+        COMMANDS.iter().filter(|c| !cli_only(c.name)).map(|c| snake(c.name)).collect();
     assert_eq!(tool_names, command_names, "commands and tools differ");
 
     let mut problems = Vec::new();
-    for c in COMMANDS {
+    for c in COMMANDS.iter().filter(|c| !cli_only(c.name)) {
         let tool = tools.iter().find(|t| t.name == snake(c.name)).unwrap();
         let schema = serde_json::Value::Object((*tool.input_schema).clone());
         let props: BTreeSet<String> =

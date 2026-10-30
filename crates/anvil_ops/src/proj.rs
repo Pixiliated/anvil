@@ -1,9 +1,10 @@
 //! Project-wide operations: everything that needs `anvil.toml`. The project is found from the
 //! directory the command runs in (the CLI's current directory, the MCP server's root).
 
-use crate::golden::{self, Checked};
+use crate::golden::{self, Checked, Counts};
 use crate::project::Project;
 use crate::{diagnostics, load, Report, EXIT_FAILED, EXIT_OK};
+use anvil_interp::Recorder;
 use anvil_record::{Record, Seen};
 use serde_json::{json, Value};
 use std::path::Path;
@@ -97,7 +98,12 @@ fn check_one(project: &Project, file: &str, native: bool, max_steps: Option<u64>
     let src = match load(&project.root, file) {
         Ok(s) => s,
         Err(r) => {
-            return Checked { file: file.into(), status: "error", detail: r.json["error"].as_str().map(String::from) }
+            return Checked {
+                file: file.into(),
+                status: "error",
+                detail: r.json["error"].as_str().map(String::from),
+                counts: None,
+            }
         }
     };
     match anvil_front::compile(&src) {
@@ -106,6 +112,7 @@ fn check_one(project: &Project, file: &str, native: bool, max_steps: Option<u64>
             file: file.into(),
             status: "error",
             detail: Some(format!("{} compile error(s), first: {}", d.len(), d[0].message)),
+            counts: None,
         },
     }
 }
@@ -148,7 +155,7 @@ pub fn golden_approve(root: &Path, file: &str, max_steps: Option<u64>) -> Report
         return Report::usage(format!("{rel} has no main, so it has no output to approve"));
     }
     let out = match golden::interpret(program, max_steps) {
-        Ok(o) => o,
+        Ok((o, _)) => o,
         Err(m) => return failed(json!({ "ok": false, "stopped": m }), format!("error: {m}\n")),
     };
     let previous = try_or_usage!(golden::read(&project, &rel));
@@ -157,6 +164,7 @@ pub fn golden_approve(root: &Path, file: &str, max_steps: Option<u64>) -> Report
         Some(p) => golden::difference(p, &out).unwrap_or_else(|| "unchanged".into()),
     };
     let path = try_or_usage!(golden::write(&project, &rel, &out));
+    golden::clear_actual(&project, &rel);
     let mut json = out.to_json();
     json["ok"] = json!(true);
     json["golden"] = json!(path.display().to_string());
@@ -164,7 +172,8 @@ pub fn golden_approve(root: &Path, file: &str, max_steps: Option<u64>) -> Report
     ok(json, format!("approved {rel} ({change}):\n{}", out.to_text()))
 }
 
-/// One verify pass over a file: compile errors, then failing tests, then the golden.
+/// One verify pass over a file: compile errors, then failing tests, then the golden, then the
+/// `untested` lint over what the tests and the golden-checked main ran.
 fn verify_file(project: &Project, file: &str, native: bool, max_steps: Option<u64>, seen: &mut Vec<Seen>) -> Value {
     let mut add = |check: &str, message: String, at: String| {
         seen.push(Seen { file: file.into(), check: check.into(), message, at });
@@ -188,9 +197,18 @@ fn verify_file(project: &Project, file: &str, native: bool, max_steps: Option<u6
         }
     };
     let tests = program.tests.clone();
+    let funcs = program.funcs.clone();
+    let program_main = program.main;
     let p2 = program.clone();
-    let results = anvil_interp::run_on_big_stack(move || {
-        (0..p2.tests.len()).map(|i| anvil_interp::run_test(&p2, i, &mut Vec::new(), max_steps)).collect::<Vec<_>>()
+    let (results, mut ran) = anvil_interp::run_on_big_stack(move || {
+        let mut ran = vec![false; p2.funcs.len()];
+        let mut results = Vec::new();
+        for i in 0..p2.tests.len() {
+            let mut rec = Recorder::new(&p2);
+            results.push(anvil_interp::run_test_recorded(&p2, i, &mut Vec::new(), max_steps, Some(&mut rec)));
+            mark_ran(&mut ran, &Counts::of(&rec));
+        }
+        (results, ran)
     });
     let mut test_failures = 0;
     for (t, r) in tests.iter().zip(&results) {
@@ -203,7 +221,47 @@ fn verify_file(project: &Project, file: &str, native: bool, max_steps: Option<u6
     if g.failed() {
         add("golden", format!("{}: {}", g.status, g.detail.clone().unwrap_or_default()), String::new());
     }
-    json!({ "file": file, "errors": 0, "tests": tests.len(), "tests_failed": test_failures, "golden": g.status })
+    if let Some(c) = &g.counts {
+        mark_ran(&mut ran, c);
+    }
+    let mut untested = Vec::new();
+    // main runs only under its golden, and a missing golden is already a finding.
+    let main = g.status != "no_main";
+    for (i, (f, ran)) in funcs.iter().zip(&ran).enumerate() {
+        if main && program_main == Some(i) {
+            continue;
+        }
+        let (l, c) = src.line_col(f.span.start);
+        let allowed = f.allows.iter().any(|(lint, _)| lint == "untested");
+        if !ran && !allowed {
+            untested.push(f.name.clone());
+            add(
+                "untested",
+                format!("`{}` never runs in a test or a golden-checked main; test it, or write `allow untested \"why\"` before it", f.name),
+                format!("{l}:{c}"),
+            );
+        } else if *ran && allowed {
+            add(
+                "allow",
+                format!(
+                    "`{}` runs in a test or a golden-checked main, so its `allow untested` is stale: remove it",
+                    f.name
+                ),
+                format!("{l}:{c}"),
+            );
+        }
+    }
+    let steps = g.counts.as_ref().map(|c| c.steps);
+    json!({
+        "file": file, "errors": 0, "tests": tests.len(), "tests_failed": test_failures, "golden": g.status,
+        "steps": steps, "untested": untested,
+    })
+}
+
+fn mark_ran(ran: &mut [bool], counts: &Counts) {
+    for (r, f) in ran.iter_mut().zip(&counts.funcs) {
+        *r |= f.calls > 0;
+    }
 }
 
 struct Verified {
@@ -406,4 +464,57 @@ pub fn record_export(root: &Path) -> Report {
     let (project, record) = try_or_usage!(open_record(root));
     let md = try_or_usage!(record.export_markdown(&project.name));
     ok(json!({ "ok": true, "markdown": md }), md)
+}
+
+/// What watch compares between passes: every file verify reads, with its modification time and
+/// size (None when missing). A file added to or removed from the project changes the list itself.
+fn snapshot(root: &Path) -> Vec<(std::path::PathBuf, Option<(std::time::SystemTime, u64)>)> {
+    let paths = match Project::discover(root) {
+        Ok(p) => {
+            let mut paths = vec![p.root.join("anvil.toml")];
+            for f in &p.files {
+                paths.push(p.root.join(f));
+                paths.push(golden::path(&p, f));
+            }
+            paths
+        }
+        Err(_) => vec![root.join("anvil.toml")],
+    };
+    paths
+        .into_iter()
+        .map(|p| {
+            let stamp = std::fs::metadata(&p).ok().and_then(|m| Some((m.modified().ok()?, m.len())));
+            (p, stamp)
+        })
+        .collect()
+}
+
+/// `verify`, then again after every change to anvil.toml, a project file or a golden, handing
+/// each pass's report to `emit` with whether another pass will follow. Runs until stopped, or
+/// for `runs` passes; the returned report is the last pass's verdict. CLI only (see `CLI_ONLY_COMMANDS`).
+pub fn watch(
+    root: &Path,
+    native: bool,
+    max_steps: Option<u64>,
+    runs: Option<u64>,
+    emit: &mut dyn FnMut(&Report, bool),
+) -> Report {
+    if runs == Some(0) {
+        return Report::usage("--runs must be at least 1");
+    }
+    let mut done = 0;
+    loop {
+        let before = snapshot(root);
+        let report = verify(root, native, max_steps);
+        done += 1;
+        let last = runs.is_some_and(|n| done >= n);
+        emit(&report, !last);
+        if last {
+            let json = json!({ "ok": !report.failed, "runs": done });
+            return if report.failed { failed(json, String::new()) } else { ok(json, String::new()) };
+        }
+        while snapshot(root) == before {
+            std::thread::sleep(std::time::Duration::from_millis(200));
+        }
+    }
 }

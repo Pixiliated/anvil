@@ -1,0 +1,5 @@
+// expect: E0500
+allow untestd "the typo is the point"
+fn helper() -> i64 {
+    return 1;
+}

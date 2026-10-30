@@ -1,0 +1,5 @@
+// expect: E0501
+allow untested "  "
+fn helper() -> i64 {
+    return 1;
+}

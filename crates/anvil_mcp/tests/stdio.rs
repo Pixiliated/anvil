@@ -186,6 +186,14 @@ fn project_tools_answer_over_stdio() {
     assert!(!err && v["markdown"].as_str().unwrap().contains("## Sign-off"), "{v}");
     let (err, v) = c.call("record_export", json!({}));
     assert!(!err && v["markdown"].as_str().unwrap().contains("Use goldens"), "{v}");
+
+    // Watching a run: the same JSON as the CLI.
+    let (err, v) = c.call("trace", json!({ "file": "src/main.anv" }));
+    assert!(!err && v["events"][1]["print"] == "hi" && v["end"]["exit"] == 0, "{v}");
+    let (err, v) = c.call("profile", json!({ "file": "src/main.anv", "max_steps": 0 }));
+    assert!(!err && v["end"]["stopped"].as_str().unwrap().contains("after 0 steps"), "{v}");
+    let (err, v) = c.call("trace", json!({ "file": "src/main.anv", "test": "none" }));
+    assert!(err && v["error"].as_str().unwrap().contains("it has none"), "{v}");
     drop(c);
     let _ = std::fs::remove_dir_all(&dir);
 }

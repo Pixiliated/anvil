@@ -2,7 +2,7 @@
 //! rather than stopping at the first, and never lets one error cause another (Ty::Error).
 
 use crate::ast::{self, BinOp, Else, ExprKind as AK, InterpPart, StmtKind, TypeKind, UnOp};
-use crate::diag::{Diagnostic, Edit, FixKind};
+use crate::diag::{self, Diagnostic, Edit, FixKind};
 use crate::ir::*;
 use crate::span::{SourceFile, Span};
 use crate::units::Unit;
@@ -216,7 +216,7 @@ impl<'a> Checker<'a> {
                 ast::Item::Unit(u) => unit_decls.push(u),
                 ast::Item::Struct(s) => struct_decls.push(s),
                 ast::Item::Enum(e) => enum_decls.push(e),
-                ast::Item::Fn(f) => fn_decls.push(f),
+                ast::Item::Fn(f) => fn_decls.push(&**f),
                 ast::Item::Test(t) => test_decls.push(t),
             }
         }
@@ -718,6 +718,40 @@ impl<'a> Checker<'a> {
         }
     }
 
+    /// Valid `allow LINT "reason"` lines as (lint, reason); `fn_start` is where the `fn` keyword begins.
+    fn allows(&mut self, decls: &[ast::AllowDecl], fn_start: usize) -> Vec<(String, String)> {
+        let mut allows: Vec<(String, String)> = Vec::new();
+        for (i, a) in decls.iter().enumerate() {
+            // Removing a line takes the space up to the next line's text with it.
+            let line = Span::new(a.span.start, decls.get(i + 1).map_or(fn_start, |n| n.span.start));
+            let name = &a.lint.name;
+            if diag::lint(name).is_none() {
+                let lints: Vec<String> = diag::LINTS.iter().map(|(n, _)| n.to_string()).collect();
+                let mut d = Diagnostic::new("E0500", a.lint.span, format!("unknown lint `{name}`"));
+                if let Some(s) = closest(name, lints.iter()) {
+                    d = d.fix1(FixKind::ChangesMeaning, format!("did you mean `{s}`?"), a.lint.span, s);
+                } else {
+                    d = d.note(format!("the lints are: {}", lints.join(", ")), None);
+                }
+                self.err(d);
+            } else if a.reason.trim().is_empty() {
+                self.err(Diagnostic::new("E0501", a.reason_span, format!("`allow {name}` needs a reason")));
+            } else if allows.iter().any(|(l, _)| l == name) {
+                self.err(
+                    Diagnostic::new("E0502", a.span, format!("`{name}` is already allowed for this function")).fix1(
+                        FixKind::Mechanical,
+                        "remove the duplicate allow",
+                        line,
+                        "",
+                    ),
+                );
+            } else {
+                allows.push((name.clone(), a.reason.clone()));
+            }
+        }
+        allows
+    }
+
     fn func(&mut self, d: &ast::FnDecl) -> Func {
         let id = self.sigs.iter().position(|s| s.span == d.name.span).unwrap();
         let ret = self.sigs[id].ret.clone();
@@ -784,8 +818,11 @@ impl<'a> Checker<'a> {
         }
         self.finish_locals(&b);
         self.check_effect_usage(&b, d.uses_span, d.uses_insert);
+        let allows = self.allows(&d.allows, d.span.start);
         Func {
             name: d.name.name.clone(),
+            span: d.name.span,
+            allows,
             params,
             ret,
             uses_io,

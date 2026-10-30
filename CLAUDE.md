@@ -30,5 +30,7 @@ Anvil is a compiled language designed to be written by AI agents. The compiler i
 7. **One implementation per command.** Commands live in `anvil_ops` and in its `COMMANDS`
    table; the CLI and `anvil-mcp` only parse and print. A new command or option needs a tool
    parameter too, or the parity test fails.
-8. **Small docs.** Tick ROADMAP checkboxes; add a few lines to DECISIONS per milestone.
-9. Commit only when the human asks.
+8. **Lints are fixed, not silenced.** Every function runs in a test or a golden-checked main. Use
+   `allow untested "reason"` only where a test cannot reach the function, with a real reason.
+9. **Small docs.** Tick ROADMAP checkboxes; add a few lines to DECISIONS per milestone.
+10. Commit only when the human asks.

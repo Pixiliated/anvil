@@ -76,7 +76,7 @@ in full (`anvil spec` prints it).
 
 ## Status
 
-v0.4: single-file programs with i64, f64 with units, bool, strings with interpolation,
+v0.5: single-file programs with i64, f64 with units, bool, strings with interpolation,
 growable arrays, structs, enums with exhaustive `match`, `Option` and `Result` with `?`,
 contracts, effects and tests. There are two backends:
 
@@ -115,7 +115,9 @@ target/release/anvil build examples/orders.anv -o orders.exe
 | `anvil outline f.anv` | list items and signatures |
 | `anvil type-at f.anv LINE COL` | type and declaration at a position |
 | `anvil refs f.anv NAME` | where a function, type, field, variant or unit is declared and used |
-| `anvil explain [CODE]` | explain an error code |
+| `anvil trace f.anv [--test NAME] [--only F,G]` | a run as a timeline: calls with their arguments, returns, prints |
+| `anvil profile f.anv [--test NAME]` | calls and steps per function |
+| `anvil explain [CODE]` | explain an error code or a lint |
 | `anvil spec` | print the language specification |
 
 Every command takes `--json`.
@@ -133,15 +135,21 @@ decisions and findings with their history, and a review sheet for sign-off:
 | `anvil golden approve f.anv` | approve a program's current output |
 | `anvil verify [--native]` | check, test and golden-check everything; findings go into the record |
 | `anvil review` | verify, then write `out/review.md` for a person to sign off |
+| `anvil watch` | verify, and again after every change |
 | `anvil record query [KIND]` | milestones, decisions, findings or runs |
+
+`verify` also applies the `untested` lint: every function must run in a test or in a
+golden-checked `main`. Where that cannot be, `allow untested "why"` before the `fn` says so, and
+an allow that is no longer needed is reported too. A program that no longer matches its golden
+leaves its actual output and a diff in `out/golden/`.
 
 This repository is itself an Anvil project: `anvil golden check --native` runs its whole parity
 corpus.
 
 ## For agents: the MCP server
 
-`anvil-mcp` serves every command above as an MCP tool over stdio, with the same arguments and
-the same JSON (a test keeps the two in step). A failing check is a tool error. To add it to
+`anvil-mcp` serves every command above except `watch` as an MCP tool over stdio, with the same
+arguments and the same JSON (a test keeps the two in step). A failing check is a tool error. To add it to
 Claude Code:
 
 ```bash
@@ -149,7 +157,8 @@ claude mcp add anvil -- target/release/anvil-mcp --root .
 ```
 
 An agent starts with `spec` (the whole language), writes a file, then loops on `check` and
-`fix`; `outline`, `type_at` and `refs` let it navigate a file without reading all of it.
+`fix`; `outline`, `type_at` and `refs` let it navigate a file without reading all of it, and
+`trace` and `profile` show what a run did, counted in steps so the answer never varies.
 
 ## Layout
 

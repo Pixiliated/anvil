@@ -2,7 +2,8 @@
 //! code and any panic. `golden check` runs every project file that has a main and compares: on
 //! the interpreter, and with `native` also as an executable, which must free every object it
 //! made. Only `golden approve` writes a golden, one file at a time, after a person or agent has
-//! looked at the output.
+//! looked at the output. When a program differs, its actual output and a line diff are written
+//! to `out/golden/<file>.out` and `.diff` (`.native.out` and `.native.diff` for the executable).
 //!
 //! ```text
 //! exit: 101
@@ -14,6 +15,7 @@
 use crate::project::Project;
 use anvil_front::ir::{Program, PANIC_EXIT_CODE};
 use anvil_front::span::SourceFile;
+use anvil_interp::{FuncStats, Recorder};
 use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -85,18 +87,121 @@ pub fn difference(want: &Output, got: &Output) -> Option<String> {
     None
 }
 
+/// What one interpreted run cost: its steps and, per function, calls and steps.
+#[derive(Clone, Debug)]
+pub struct Counts {
+    pub steps: u64,
+    pub funcs: Vec<FuncStats>,
+}
+
+impl Counts {
+    pub fn of(rec: &Recorder) -> Counts {
+        Counts { steps: rec.steps, funcs: rec.funcs.clone() }
+    }
+}
+
 /// Runs main in the interpreter; Err when the step limit stops it.
-pub fn interpret(program: Program, max_steps: Option<u64>) -> Result<Output, String> {
-    let (outcome, bytes) = anvil_interp::run_on_big_stack(move || {
+pub fn interpret(program: Program, max_steps: Option<u64>) -> Result<(Output, Counts), String> {
+    let (outcome, bytes, counts) = anvil_interp::run_on_big_stack(move || {
         let mut buf = Vec::new();
-        let o = anvil_interp::run_main(&program, &mut buf, max_steps);
-        (o, buf)
+        let mut rec = Recorder::new(&program);
+        let o = anvil_interp::run_main_recorded(&program, &mut buf, max_steps, Some(&mut rec));
+        (o, buf, Counts::of(&rec))
     });
     let stdout = String::from_utf8_lossy(&bytes).into_owned();
     match outcome {
-        anvil_interp::Outcome::Exit(exit) => Ok(Output { exit, panic: None, stdout }),
-        anvil_interp::Outcome::Panicked(m) => Ok(Output { exit: PANIC_EXIT_CODE, panic: Some(m), stdout }),
+        anvil_interp::Outcome::Exit(exit) => Ok((Output { exit, panic: None, stdout }, counts)),
+        anvil_interp::Outcome::Panicked(m) => Ok((Output { exit: PANIC_EXIT_CODE, panic: Some(m), stdout }, counts)),
         anvil_interp::Outcome::OutOfSteps(n) => Err(anvil_interp::step_limit_message(n)),
+    }
+}
+
+/// A line diff of two texts: `  ` in both, `- ` only in `want`, `+ ` only in `got`. Long runs of
+/// equal lines are cut to two lines of context on each side.
+pub fn diff_lines(want: &str, got: &str) -> String {
+    let w: Vec<&str> = want.split_inclusive('\n').collect();
+    let g: Vec<&str> = got.split_inclusive('\n').collect();
+    let mut ops: Vec<(char, &str)> = Vec::new();
+    if w.len().saturating_mul(g.len()) > 4_000_000 {
+        // Too long for the table below: show both sides whole.
+        ops.extend(w.iter().map(|l| ('-', *l)));
+        ops.extend(g.iter().map(|l| ('+', *l)));
+    } else {
+        // lcs[i][j]: longest common subsequence of w[i..] and g[j..].
+        let mut lcs = vec![vec![0u32; g.len() + 1]; w.len() + 1];
+        for i in (0..w.len()).rev() {
+            for j in (0..g.len()).rev() {
+                lcs[i][j] = if w[i] == g[j] { lcs[i + 1][j + 1] + 1 } else { lcs[i + 1][j].max(lcs[i][j + 1]) };
+            }
+        }
+        let (mut i, mut j) = (0, 0);
+        while i < w.len() || j < g.len() {
+            if i < w.len() && j < g.len() && w[i] == g[j] {
+                ops.push((' ', w[i]));
+                i += 1;
+                j += 1;
+            } else if i < w.len() && (j == g.len() || lcs[i + 1][j] >= lcs[i][j + 1]) {
+                // What was approved goes first, then what was printed instead.
+                ops.push(('-', w[i]));
+                i += 1;
+            } else {
+                ops.push(('+', g[j]));
+                j += 1;
+            }
+        }
+    }
+    let changed: Vec<usize> = ops.iter().enumerate().filter(|(_, (k, _))| *k != ' ').map(|(i, _)| i).collect();
+    let near = |i: usize| changed.iter().any(|&c| c.abs_diff(i) <= 2);
+    let mut out = String::new();
+    let mut skipped = false;
+    for (i, (kind, line)) in ops.iter().enumerate() {
+        if !near(i) {
+            skipped = true;
+            continue;
+        }
+        if skipped {
+            out.push_str("...\n");
+            skipped = false;
+        }
+        out.push(*kind);
+        out.push(' ');
+        out.push_str(line);
+        if !line.ends_with('\n') {
+            out.push_str("\n(no newline at the end)\n");
+        }
+    }
+    if skipped {
+        out.push_str("...\n");
+    }
+    out
+}
+
+fn out_dir(project: &Project) -> PathBuf {
+    project.root.join("out").join("golden")
+}
+
+/// Writes the actual output and its diff against the golden; returns where, for the message.
+fn write_actual(project: &Project, file: &str, suffix: &str, want: &Output, got: &Output) -> String {
+    let out = out_dir(project).join(format!("{file}{suffix}.out"));
+    let diff = out_dir(project).join(format!("{file}{suffix}.diff"));
+    let written = out.parent().map(std::fs::create_dir_all).unwrap_or(Ok(())).and_then(|_| {
+        std::fs::write(&out, got.to_text())?;
+        std::fs::write(&diff, diff_lines(&want.to_text(), &got.to_text()))
+    });
+    match written {
+        Ok(()) => format!("; actual output in {}, diff in {}", rel(project, &out), rel(project, &diff)),
+        Err(e) => format!("; could not write {}: {e}", out.display()),
+    }
+}
+
+fn rel(project: &Project, p: &Path) -> String {
+    p.strip_prefix(&project.root).unwrap_or(p).display().to_string().replace('\\', "/")
+}
+
+/// Removes what `write_actual` left for a file, so out/golden never shows a stale failure.
+pub fn clear_actual(project: &Project, file: &str) {
+    for suffix in [".out", ".diff", ".native.out", ".native.diff"] {
+        let _ = std::fs::remove_file(out_dir(project).join(format!("{file}{suffix}")));
     }
 }
 
@@ -153,6 +258,8 @@ pub struct Checked {
     pub file: String,
     pub status: &'static str,
     pub detail: Option<String>,
+    /// The interpreted run of main, when there was one.
+    pub counts: Option<Counts>,
 }
 
 impl Checked {
@@ -160,7 +267,8 @@ impl Checked {
         !matches!(self.status, "ok" | "no_main")
     }
     pub fn to_json(&self) -> Value {
-        json!({ "file": self.file, "status": self.status, "detail": self.detail })
+        let steps = self.counts.as_ref().map(|c| c.steps);
+        json!({ "file": self.file, "status": self.status, "detail": self.detail, "steps": steps })
     }
 }
 
@@ -173,7 +281,7 @@ pub fn check_file(
     max_steps: Option<u64>,
 ) -> Checked {
     let file = src.name.clone();
-    let done = |status, detail: Option<String>| Checked { file: file.clone(), status, detail };
+    let done = |status, detail: Option<String>| Checked { file: file.clone(), status, detail, counts: None };
     if program.main.is_none() {
         return done("no_main", None);
     }
@@ -188,12 +296,15 @@ pub fn check_file(
         Err(e) => return done("error", Some(e)),
     };
     let native_program = native_too.then(|| program.clone());
-    let got = match interpret(program, max_steps) {
+    let (got, counts) = match interpret(program, max_steps) {
         Ok(o) => o,
         Err(m) => return done("stopped", Some(m)),
     };
+    let with = |status, detail: Option<String>| Checked { counts: Some(counts.clone()), ..done(status, detail) };
+    clear_actual(project, &file);
     if let Some(d) = difference(&want, &got) {
-        return done("differs", Some(format!("interpreter {d}")));
+        let written = write_actual(project, &file, "", &want, &got);
+        return with("differs", Some(format!("interpreter {d}{written}")));
     }
     if let Some(p) = native_program {
         let scratch = std::env::temp_dir().join(format!("anvil_golden_{}_{}", std::process::id(), crate::unique()));
@@ -202,11 +313,12 @@ pub fn check_file(
         match result {
             Ok(n) => {
                 if let Some(d) = difference(&want, &n) {
-                    return done("differs", Some(format!("native {d}")));
+                    let written = write_actual(project, &file, ".native", &want, &n);
+                    return with("differs", Some(format!("native {d}{written}")));
                 }
             }
-            Err(e) => return done("error", Some(format!("native: {e}"))),
+            Err(e) => return with("error", Some(format!("native: {e}"))),
         }
     }
-    done("ok", None)
+    with("ok", None)
 }
