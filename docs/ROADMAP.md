@@ -49,10 +49,10 @@ green and the interpreter and native backend agreeing on every program in `tests
 - [x] `anvil check` reports unformatted files as an error with a mechanical fix
 - [x] Parser reports several syntax errors per run where recovery is reliable
 
-## M6: Text and collections
-- [ ] Slicing arrays and strings by range, string search and split
-- [ ] Maps with deterministic iteration order
-- [ ] `==` for arrays, structs and enums whose parts all have it
+## M6: Text and collections (v0.7)
+- [x] Slicing arrays and strings by range, string search and split
+- [x] Maps with deterministic iteration order
+- [x] `==` for arrays, structs and enums whose parts all have it
 
 ## M7: Modules
 - [ ] Multiple files, explicit imports by name, no wildcard imports

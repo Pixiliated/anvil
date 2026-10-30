@@ -1,0 +1,4 @@
+exit: 101
+panic: duplicate key in the map literal at tests/programs/panic_map_duplicate.anv:5:28
+---
+building

@@ -81,8 +81,9 @@ in full (`anvil spec` prints it).
 
 ## Status
 
-v0.6: single-file programs with i64, f64 with units, bool, strings with interpolation,
-growable arrays, structs, enums with exhaustive `match`, `Option` and `Result` with `?`,
+v0.7: single-file programs with i64, f64 with units, bool, strings with interpolation,
+search and split, growable arrays and slices, maps in key order, structs, enums with
+exhaustive `match`, structural `==`, `Option` and `Result` with `?`,
 contracts, effects and tests. There are two backends:
 
 - an **interpreter**, which is the reference semantics;
@@ -90,7 +91,7 @@ contracts, effects and tests. There are two backends:
   are reference counted with copy-on-write; the tests check that every object is freed.
 
 The test suite runs every program through both and requires identical stdout, panic messages
-and exit codes. Collections, modules, generics and other platforms are on the
+and exit codes. Modules, generics and other platforms are on the
 [roadmap](docs/ROADMAP.md).
 
 ## Using it

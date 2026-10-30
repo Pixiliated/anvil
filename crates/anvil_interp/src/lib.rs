@@ -8,7 +8,8 @@ use anvil_front::ir::*;
 use std::io::Write;
 use std::rc::Rc;
 
-/// Arrays share storage until written (Rc::make_mut), which gives value semantics cheaply.
+/// Arrays and maps share storage until written (Rc::make_mut), which gives value semantics
+/// cheaply. The derived `==` is Anvil's: structural, with floats compared as IEEE values.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Value {
     Void,
@@ -20,6 +21,22 @@ pub enum Value {
     Array(Rc<Vec<Value>>),
     /// Variant index and that variant's fields.
     Enum(usize, Vec<Value>),
+    /// Entries in ascending key order (i64 keys by value, str keys bytewise).
+    Map(Rc<Vec<(Value, Value)>>),
+}
+
+/// The order of map keys: i64 by value, str bytewise (as `<` on str).
+fn key_order(a: &Value, b: &Value) -> std::cmp::Ordering {
+    match (a, b) {
+        (Value::I64(x), Value::I64(y)) => x.cmp(y),
+        (Value::Str(x), Value::Str(y)) => x.as_bytes().cmp(y.as_bytes()),
+        _ => unreachable!("map key {a:?}"),
+    }
+}
+
+/// Ok(index) of `key`, or Err(the index where it would go).
+fn find_key(entries: &[(Value, Value)], key: &Value) -> Result<usize, usize> {
+    entries.binary_search_by(|(k, _)| key_order(k, key))
 }
 
 /// Why evaluation stopped early: a panic (the text after "panic: "), `?` returning a failure,
@@ -471,6 +488,67 @@ impl<'p> Interp<'p> {
             ExprKind::StructLit(_, fields) => Value::Struct(self.eval_all(fields, frame)?),
             ExprKind::ArrayLit(elems) => Value::Array(Rc::new(self.eval_all(elems, frame)?)),
             ExprKind::Variant { variant, fields, .. } => Value::Enum(*variant, self.eval_all(fields, frame)?),
+            ExprKind::Slice { base, from, to, site } => {
+                let v = self.eval(base, frame)?;
+                let f = self.eval(from, frame)?.as_i64();
+                let t = self.eval(to, frame)?.as_i64();
+                let len = match &v {
+                    Value::Array(items) => items.len() as i64,
+                    Value::Str(s) => s.len() as i64,
+                    other => unreachable!("slice of {other:?}"),
+                };
+                if f < 0 || t > len || f > t {
+                    return panic(slice_message(f, t, len, site));
+                }
+                let (f, t) = (f as usize, t as usize);
+                match v {
+                    Value::Array(items) => Value::Array(Rc::new(items[f..t].to_vec())),
+                    Value::Str(s) if s.is_char_boundary(f) && s.is_char_boundary(t) => Value::Str(s[f..t].into()),
+                    _ => return panic(slice_char_message(f as i64, t as i64, site)),
+                }
+            }
+            ExprKind::MapLit { entries, duplicate } => {
+                let mut out: Vec<(Value, Value)> = Vec::with_capacity(entries.len());
+                for (k, v) in entries {
+                    let key = self.eval(k, frame)?;
+                    let value = self.eval(v, frame)?;
+                    match find_key(&out, &key) {
+                        Ok(_) => return panic(duplicate.clone()),
+                        Err(at) => out.insert(at, (key, value)),
+                    }
+                }
+                Value::Map(Rc::new(out))
+            }
+            ExprKind::MapSet { local, path, key, value } => {
+                let k = self.eval(key, frame)?;
+                let v = self.eval(value, frame)?;
+                let indices = self.indices(path, frame)?;
+                match place_mut(&mut frame[*local], path, &indices)? {
+                    Value::Map(entries) => {
+                        let entries = Rc::make_mut(entries);
+                        match find_key(entries, &k) {
+                            Ok(at) => entries[at].1 = v,
+                            Err(at) => entries.insert(at, (k, v)),
+                        }
+                    }
+                    other => unreachable!("set on {other:?}"),
+                }
+                Value::Void
+            }
+            ExprKind::MapRemove { local, path, key, missing } => {
+                let k = self.eval(key, frame)?;
+                let indices = self.indices(path, frame)?;
+                match place_mut(&mut frame[*local], path, &indices)? {
+                    Value::Map(entries) => match find_key(entries, &k) {
+                        Ok(at) => {
+                            Rc::make_mut(entries).remove(at);
+                        }
+                        Err(_) => return panic(missing.clone()),
+                    },
+                    other => unreachable!("remove on {other:?}"),
+                }
+                Value::Void
+            }
             ExprKind::Index { base, index, site } => {
                 let items = self.eval(base, frame)?;
                 let i = self.eval(index, frame)?.as_i64();
@@ -565,6 +643,9 @@ impl<'p> Interp<'p> {
                     (Value::Bool(x), Value::Bool(y)) => cmp(*op, x, y),
                     // Bytewise, like memcmp in the C runtime.
                     (Value::Str(x), Value::Str(y)) => cmp(*op, x.as_bytes(), y.as_bytes()),
+                    // Arrays, structs, enums and maps have == and != only.
+                    _ if *op == CmpOp::Eq => a == b,
+                    _ if *op == CmpOp::Ne => a != b,
                     _ => unreachable!("compare {a:?} {b:?}"),
                 })
             }
@@ -624,8 +705,45 @@ impl<'p> Interp<'p> {
             Builtin::Len => match x {
                 Value::Str(s) => Value::I64(s.len() as i64),
                 Value::Array(items) => Value::I64(items.len() as i64),
+                Value::Map(entries) => Value::I64(entries.len() as i64),
                 other => unreachable!("len of {other:?}"),
             },
+            Builtin::MapKeys | Builtin::MapValues => {
+                let Value::Map(entries) = x else { unreachable!("keys of {x:?}") };
+                let keys = matches!(b, Builtin::MapKeys);
+                Value::Array(Rc::new(entries.iter().map(|(k, v)| if keys { k.clone() } else { v.clone() }).collect()))
+            }
+            Builtin::MapGet | Builtin::MapHas => {
+                let key = self.eval(&args[1], frame)?;
+                let Value::Map(entries) = x else { unreachable!("get on {x:?}") };
+                let found = find_key(&entries, &key).ok();
+                match (b, found) {
+                    (Builtin::MapHas, f) => Value::Bool(f.is_some()),
+                    (_, Some(at)) => Value::Enum(OPTION_SOME, vec![entries[at].1.clone()]),
+                    (_, None) => Value::Enum(OPTION_NONE, Vec::new()),
+                }
+            }
+            Builtin::StrContains | Builtin::StrFind | Builtin::StrStartsWith | Builtin::StrEndsWith => {
+                let t = self.eval(&args[1], frame)?;
+                let (s, t) = (x.as_str(), t.as_str());
+                match b {
+                    Builtin::StrContains => Value::Bool(s.contains(t)),
+                    Builtin::StrStartsWith => Value::Bool(s.starts_with(t)),
+                    Builtin::StrEndsWith => Value::Bool(s.ends_with(t)),
+                    _ => match s.find(t) {
+                        Some(at) => Value::Enum(OPTION_SOME, vec![Value::I64(at as i64)]),
+                        None => Value::Enum(OPTION_NONE, Vec::new()),
+                    },
+                }
+            }
+            Builtin::StrSplit { message } => {
+                let sep = self.eval(&args[1], frame)?;
+                if sep.as_str().is_empty() {
+                    return panic(message.clone());
+                }
+                let parts = x.as_str().split(sep.as_str()).map(|p| Value::Str(p.into())).collect();
+                Value::Array(Rc::new(parts))
+            }
         })
     }
 }

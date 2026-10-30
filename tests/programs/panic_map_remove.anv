@@ -1,0 +1,7 @@
+// Removing a key the map does not have panics; check with has first.
+fn main() uses io {
+    var m: Map[i64, str] = [1: "one"];
+    m.remove(1);
+    print("{m.len()} {m.has(1)}");
+    m.remove(1);
+}

@@ -404,6 +404,7 @@ impl Printer<'_> {
             ExprKind::Method { receiver, method, args } if args.len() > 1 => {
                 (format!("{}.{}(", self.expr(receiver), method.name), self.arg_list(args), ")")
             }
+            ExprKind::MapLit(entries) if entries.len() > 1 => ("[".to_string(), self.entry_list(entries), "]"),
             ExprKind::StructLit { name, fields } if fields.len() > 1 => {
                 let fs = fields.iter().map(|(f, v)| format!("{}: {}", f.name, self.expr(v))).collect();
                 (format!("{} {{", name.name), fs, "}")
@@ -481,6 +482,9 @@ impl Printer<'_> {
                 format!("{}.{}({})", self.expr(receiver), method.name, self.args(args))
             }
             ExprKind::Index(base, i) => format!("{}[{}]", self.expr(base), self.expr(i)),
+            ExprKind::Slice(base, from, to) => format!("{}[{}..{}]", self.expr(base), self.expr(from), self.expr(to)),
+            ExprKind::MapLit(entries) if entries.is_empty() => "[:]".into(),
+            ExprKind::MapLit(entries) => format!("[{}]", self.entry_list(entries).join(", ")),
             ExprKind::Array(items) => {
                 let items: Vec<String> = items.iter().map(|i| self.expr(i)).collect();
                 format!("[{}]", items.join(", "))
@@ -500,6 +504,10 @@ impl Printer<'_> {
 
     fn args(&self, args: &[Arg]) -> String {
         self.arg_list(args).join(", ")
+    }
+
+    fn entry_list(&self, entries: &[(Expr, Expr)]) -> Vec<String> {
+        entries.iter().map(|(k, v)| format!("{}: {}", self.expr(k), self.expr(v))).collect()
     }
 
     fn arg_list(&self, args: &[Arg]) -> Vec<String> {

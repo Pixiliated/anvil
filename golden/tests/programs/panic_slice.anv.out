@@ -1,0 +1,4 @@
+exit: 101
+panic: slice 2..5 out of bounds for length 3 at tests/programs/panic_slice.anv:5:21
+---
+2

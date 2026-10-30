@@ -11,7 +11,7 @@ use std::collections::{HashMap, HashSet};
 const BUILTINS: &[&str] = &["print", "assert", "sqrt", "abs", "to_f64", "to_i64"];
 /// Constructors of the built-in Option and Result enums, usable without a type prefix.
 const CONSTRUCTORS: &[&str] = &["Some", "None", "Ok", "Err"];
-const TYPE_NAMES: &[&str] = &["i64", "f64", "bool", "str", "Option", "Result"];
+const TYPE_NAMES: &[&str] = &["i64", "f64", "bool", "str", "Option", "Result", "Map"];
 const INDENT: &str = "    ";
 
 fn printable(ty: &Ty) -> bool {
@@ -381,6 +381,18 @@ impl<'a> Checker<'a> {
                 self.result_of(tys[0].clone(), tys[1].clone())
             };
         }
+        if n == "Map" {
+            if args.len() != 2 {
+                self.err(Diagnostic::new("E0307", t.span, "Map takes 2 type arguments: Map[K, V]"));
+                return Ty::Error;
+            }
+            let k = self.resolve_type(&args[0]);
+            let v = self.resolve_type(&args[1]);
+            if k == Ty::Error || v == Ty::Error || !self.map_key(&k, args[0].span) {
+                return Ty::Error;
+            }
+            return Ty::Map(Box::new(k), Box::new(v));
+        }
         if !args.is_empty() {
             let msg = if matches!(n, "i64" | "bool" | "str") {
                 format!("only f64 carries units, not {n}")
@@ -420,6 +432,19 @@ impl<'a> Checker<'a> {
                 Ty::Error
             }
         }
+    }
+
+    /// Map keys are i64 or str: the two types with an order every program agrees on.
+    fn map_key(&mut self, k: &Ty, span: Span) -> bool {
+        if matches!(k, Ty::I64 | Ty::Str) {
+            return true;
+        }
+        let t = self.show(k);
+        self.err(
+            Diagnostic::new("E0408", span, format!("map keys are i64 or str, not {t}"))
+                .note("keys are kept in order; key by an i64 id or a str name", None),
+        );
+        false
     }
 
     fn builtin_enum(&mut self, name: String, variants: Vec<VariantDef>) -> Ty {
@@ -965,11 +990,15 @@ impl<'a> Checker<'a> {
                     Ty::Error => Ty::Error,
                     other => {
                         let t = self.show(other);
-                        self.err(Diagnostic::new(
+                        let mut d = Diagnostic::new(
                             "E0300",
                             iter.span,
                             format!("for loops run over an array or a range start..end, not {t}"),
-                        ));
+                        );
+                        if let Ty::Map(..) = other {
+                            d = d.note("loop over its keys or values: for k in m.keys() { }", None);
+                        }
+                        self.err(d);
                         Ty::Error
                     }
                 };
@@ -1640,6 +1669,73 @@ impl<'a> Checker<'a> {
                     }
                 }
             }
+            AK::Slice(base, from, to) => {
+                let x = self.expr(b, base);
+                let f = self.expect(b, from, &Ty::I64);
+                let t = self.expect(b, to, &Ty::I64);
+                match x.ty.clone() {
+                    ty @ (Ty::Array(_) | Ty::Str) => {
+                        let site = self.site(e.span);
+                        (ExprKind::Slice { base: Box::new(x), from: Box::new(f), to: Box::new(t), site }, ty)
+                    }
+                    Ty::Error => return Self::err_expr(),
+                    other => {
+                        let t = self.show(&other);
+                        self.err(Diagnostic::new(
+                            "E0302",
+                            e.span,
+                            format!("only arrays and str can be sliced, not {t}"),
+                        ));
+                        return Self::err_expr();
+                    }
+                }
+            }
+            AK::MapLit(entries) => {
+                // The expected type was already reported as wrong; one error is enough.
+                if hint == Some(&Ty::Error) {
+                    for (ke, ve) in entries {
+                        self.expr(b, ke);
+                        self.expr(b, ve);
+                    }
+                    return Self::err_expr();
+                }
+                let (k, v, hinted) = match (hint, entries.first()) {
+                    (Some(Ty::Map(k, v)), _) => ((**k).clone(), (**v).clone(), true),
+                    (_, Some((k0, v0))) => {
+                        let k = self.expr(b, k0).ty;
+                        let v = self.expr(b, v0).ty;
+                        (k, v, false)
+                    }
+                    (_, None) => {
+                        self.err(
+                            Diagnostic::new(
+                                "E0404",
+                                e.span,
+                                "the key and value types of `[:]` cannot be inferred here",
+                            )
+                            .note("state the type: let m: Map[str, i64] = [:];", None),
+                        );
+                        return Self::err_expr();
+                    }
+                };
+                if k == Ty::Error || v == Ty::Error || (!hinted && !self.map_key(&k, entries[0].0.span)) {
+                    for (ke, ve) in entries.iter().skip(if hinted { 0 } else { 1 }) {
+                        self.expr(b, ke);
+                        self.expr(b, ve);
+                    }
+                    return Self::err_expr();
+                }
+                let vals: Vec<(Expr, Expr)> =
+                    entries.iter().map(|(ke, ve)| (self.expect(b, ke, &k), self.expect(b, ve, &v))).collect();
+                let duplicate = duplicate_key_message(&self.site(e.span));
+                (ExprKind::MapLit { entries: vals, duplicate }, Ty::Map(Box::new(k), Box::new(v)))
+            }
+            AK::Array(elems) if hint == Some(&Ty::Error) => {
+                for x in elems {
+                    self.expr(b, x);
+                }
+                return Self::err_expr();
+            }
             AK::Array(elems) => {
                 let elem_hint = match hint {
                     Some(Ty::Array(t)) => Some((**t).clone()),
@@ -1741,7 +1837,13 @@ impl<'a> Checker<'a> {
 
     fn binary(&mut self, b: &mut Body, e: &ast::Expr, op: BinOp, l: &ast::Expr, r: &ast::Expr) -> Expr {
         let x = self.expr(b, l);
-        let y = self.expr(b, r);
+        // `opt == None`, `xs == []`: the left side gives the right its type.
+        let y = if matches!(op, BinOp::Eq | BinOp::Ne) && matches!(x.ty, Ty::Enum(_) | Ty::Array(_) | Ty::Map(..)) {
+            let hint = x.ty.clone();
+            self.expr_hint(b, r, Some(&hint))
+        } else {
+            self.expr(b, r)
+        };
         if x.ty == Ty::Error || y.ty == Ty::Error {
             return Self::err_expr();
         }
@@ -1817,6 +1919,11 @@ impl<'a> Checker<'a> {
                 if lt == Ty::Bool && rt == Ty::Bool && matches!(op, BinOp::Eq | BinOp::Ne) {
                     return Expr { kind: ExprKind::Cmp(cmp_op(op), bx(x), bx(y)), ty: Ty::Bool };
                 }
+                // Structural: equal when every part is (floats as IEEE values).
+                let aggregate = matches!(lt, Ty::Array(_) | Ty::Struct(_) | Ty::Enum(_) | Ty::Map(..));
+                if aggregate && lt == rt && matches!(op, BinOp::Eq | BinOp::Ne) {
+                    return Expr { kind: ExprKind::Cmp(cmp_op(op), bx(x), bx(y)), ty: Ty::Bool };
+                }
                 // i64 mixed with f64: point at the integer side.
                 let mixed = match (&lt, &rt) {
                     (Ty::I64, Ty::F64(u)) => Some((l, &x, u.clone())),
@@ -1852,12 +1959,8 @@ impl<'a> Checker<'a> {
             d = d.note("% is only defined for i64", None);
         } else if lt == Ty::Str || rt == Ty::Str {
             d = d.note("build text with interpolation: \"{a} and {b}\"", None);
-        } else if matches!(lt, Ty::Enum(_)) {
-            d = d.note("compare enums with match", None);
-        } else if matches!(lt, Ty::Array(_)) {
-            d = d.note("compare arrays element by element", None);
-        } else if matches!(lt, Ty::Struct(_)) {
-            d = d.note("compare structs field by field", None);
+        } else if lt == rt && matches!(lt, Ty::Array(_) | Ty::Struct(_) | Ty::Enum(_) | Ty::Map(..)) {
+            d = d.note("only i64, f64 and str are ordered; == and != compare any two values of one type", None);
         }
         self.err(d);
         Self::err_expr()
@@ -2187,6 +2290,7 @@ impl<'a> Checker<'a> {
                     Ty::Struct(_) => "print the fields one by one",
                     Ty::Array(_) => "print the elements in a loop",
                     Ty::Enum(_) => "match on it and print each case",
+                    Ty::Map(..) => "print the entries in a loop over m.keys()",
                     _ => "only values have text",
                 };
                 self.err(
@@ -2488,91 +2592,173 @@ impl<'a> Checker<'a> {
             return self.variant_ctor(b, e, (eid, receiver.span), method, Some(args));
         }
         let m = method.name.as_str();
-        for a in args {
-            if let Some(n) = &a.name {
-                self.err(Diagnostic::new("E0304", n.span, format!("`{m}` takes positional arguments")).fix1(
-                    FixKind::Mechanical,
-                    "remove the name",
-                    Span::new(n.span.start, a.value.span.start),
-                    "",
-                ));
+        // `set` names its two arguments, like any call with two parameters; the rest take one or none.
+        if m != "set" {
+            for a in args {
+                if let Some(n) = &a.name {
+                    self.err(Diagnostic::new("E0304", n.span, format!("`{m}` takes positional arguments")).fix1(
+                        FixKind::Mechanical,
+                        "remove the name",
+                        Span::new(n.span.start, a.value.span.start),
+                        "",
+                    ));
+                }
             }
         }
         let want_args = match m {
-            "push" => 1,
-            _ => 0,
+            "pop" | "len" | "keys" | "values" => Some(0),
+            "push" | "remove" | "has" | "get" | "contains" | "find" | "starts_with" | "ends_with" | "split" => Some(1),
+            _ => None,
         };
-        if matches!(m, "push" | "pop" | "len") && args.len() != want_args {
-            self.err(Diagnostic::new(
-                "E0303",
-                e.span,
-                format!("`{m}` takes {want_args} argument(s), found {}", args.len()),
-            ));
+        if let Some(want) = want_args {
+            if args.len() != want {
+                self.err(Diagnostic::new(
+                    "E0303",
+                    e.span,
+                    format!("`{m}` takes {want} argument(s), found {}", args.len()),
+                ));
+                for a in args {
+                    self.expr(b, &a.value);
+                }
+                return Self::err_expr();
+            }
+        }
+        if matches!(m, "push" | "pop" | "set" | "remove") {
+            return self.mutating_method(b, e, receiver, method, args);
+        }
+        let x = self.expr(b, receiver);
+        if x.ty == Ty::Error {
             for a in args {
                 self.expr(b, &a.value);
             }
             return Self::err_expr();
         }
-        if m == "push" || m == "pop" {
-            if !is_place(receiver) {
-                let x = self.expr(b, receiver);
-                if x.ty != Ty::Error {
-                    self.err(
-                        Diagnostic::new(
-                            "E0406",
-                            receiver.span,
-                            format!("`{m}` changes an array in place, so it needs a var"),
-                        )
-                        .note("bind the array first: var xs: [i64] = make(); xs.push(1);", None),
-                    );
+        let site = self.site(e.span);
+        let (builtin, ty) = match (m, x.ty.clone()) {
+            ("len", Ty::Str | Ty::Array(_) | Ty::Map(..)) => (Builtin::Len, Ty::I64),
+            ("contains", Ty::Str) => (Builtin::StrContains, Ty::Bool),
+            ("starts_with", Ty::Str) => (Builtin::StrStartsWith, Ty::Bool),
+            ("ends_with", Ty::Str) => (Builtin::StrEndsWith, Ty::Bool),
+            ("find", Ty::Str) => (Builtin::StrFind, self.option_of(Ty::I64)),
+            ("split", Ty::Str) => (Builtin::StrSplit { message: split_message(&site) }, Ty::Array(Box::new(Ty::Str))),
+            ("has", Ty::Map(..)) => (Builtin::MapHas, Ty::Bool),
+            ("get", Ty::Map(_, v)) => (Builtin::MapGet, self.option_of(*v)),
+            ("keys", Ty::Map(k, _)) => (Builtin::MapKeys, Ty::Array(k)),
+            ("values", Ty::Map(_, v)) => (Builtin::MapValues, Ty::Array(v)),
+            _ => {
+                for a in args {
+                    self.expr(b, &a.value);
                 }
+                let t = self.show(&x.ty);
+                let have = match x.ty {
+                    Ty::Array(_) => "arrays have len, push and pop",
+                    Ty::Str => "str has len, contains, find, starts_with, ends_with and split",
+                    Ty::Map(..) => "maps have len, has, get, set, remove, keys and values",
+                    _ => "only arrays, str and maps have methods; write a function that takes the value",
+                };
+                self.err(Diagnostic::new("E0406", method.span, format!("{t} has no method `{m}`")).note(have, None));
                 return Self::err_expr();
             }
-            let Some((local, path, ty)) = self.place(b, receiver) else {
-                return Self::err_expr();
-            };
-            let elem = match ty {
-                Ty::Array(t) => *t,
-                Ty::Error => return Self::err_expr(),
-                other => {
-                    let t = self.show(&other);
-                    self.err(Diagnostic::new(
-                        "E0406",
-                        method.span,
-                        format!("`{m}` is an array method; {t} has no `{m}`"),
-                    ));
-                    return Self::err_expr();
-                }
-            };
-            if m == "pop" {
-                // pop reads the array; push and assignment only write it.
-                b.meta[local].used = true;
-            }
-            if m == "push" {
-                let v = self.expect(b, &args[0].value, &elem);
-                return Expr { kind: ExprKind::Push { local, path, value: Box::new(v) }, ty: Ty::Void };
-            }
-            let message = pop_message(&self.site(e.span));
-            return Expr { kind: ExprKind::Pop { local, path, message }, ty: elem };
-        }
-        let x = self.expr(b, receiver);
+        };
+        let arg_ty = match &x.ty {
+            Ty::Map(k, _) => (**k).clone(),
+            _ => Ty::Str,
+        };
+        let mut vals = vec![x];
         for a in args {
-            self.expr(b, &a.value);
+            vals.push(self.expect(b, &a.value, &arg_ty));
         }
-        if x.ty == Ty::Error {
+        Expr { kind: ExprKind::Builtin(builtin, vals), ty }
+    }
+
+    /// `push` and `pop` on arrays, `set` and `remove` on maps: they change a value in place, so
+    /// the receiver must be a var (or a field or element of one).
+    fn mutating_method(
+        &mut self,
+        b: &mut Body,
+        e: &ast::Expr,
+        receiver: &ast::Expr,
+        method: &ast::Ident,
+        args: &[ast::Arg],
+    ) -> Expr {
+        let m = method.name.as_str();
+        let kind = if matches!(m, "push" | "pop") { "an array" } else { "a map" };
+        if !is_place(receiver) {
+            let x = self.expr(b, receiver);
+            for a in args {
+                self.expr(b, &a.value);
+            }
+            if x.ty != Ty::Error {
+                let example = if kind == "an array" {
+                    "bind the array first: var xs: [i64] = make(); xs.push(1);"
+                } else {
+                    "bind the map first: var m: Map[str, i64] = make(); m.set(key: \"a\", value: 1);"
+                };
+                self.err(
+                    Diagnostic::new(
+                        "E0406",
+                        receiver.span,
+                        format!("`{m}` changes {kind} in place, so it needs a var"),
+                    )
+                    .note(example, None),
+                );
+            }
             return Self::err_expr();
         }
-        if m == "len" && matches!(x.ty, Ty::Str | Ty::Array(_)) {
-            return Expr { kind: ExprKind::Builtin(Builtin::Len, vec![x]), ty: Ty::I64 };
-        }
-        let t = self.show(&x.ty);
-        let have = match x.ty {
-            Ty::Array(_) => "arrays have len, push and pop",
-            Ty::Str => "str has len",
-            _ => "only arrays and str have methods; write a function that takes the value",
+        let Some((local, path, ty)) = self.place(b, receiver) else {
+            for a in args {
+                self.expr(b, &a.value);
+            }
+            return Self::err_expr();
         };
-        self.err(Diagnostic::new("E0406", method.span, format!("{t} has no method `{m}`")).note(have, None));
-        Self::err_expr()
+        match (m, ty) {
+            ("push", Ty::Array(elem)) => {
+                let v = self.expect(b, &args[0].value, &elem);
+                Expr { kind: ExprKind::Push { local, path, value: Box::new(v) }, ty: Ty::Void }
+            }
+            ("pop", Ty::Array(elem)) => {
+                // pop reads the array; push and assignment only write it.
+                b.meta[local].used = true;
+                let message = pop_message(&self.site(e.span));
+                Expr { kind: ExprKind::Pop { local, path, message }, ty: *elem }
+            }
+            ("set", Ty::Map(k, v)) => {
+                let params = vec![("key".to_string(), *k), ("value".to_string(), *v)];
+                if self.check_args("set", e.span, args, &params, None) != Some(true) {
+                    for a in args {
+                        self.expr(b, &a.value);
+                    }
+                    return Self::err_expr();
+                }
+                let key = self.expect(b, &args[0].value, &params[0].1);
+                let value = self.expect(b, &args[1].value, &params[1].1);
+                Expr {
+                    kind: ExprKind::MapSet { local, path, key: Box::new(key), value: Box::new(value) },
+                    ty: Ty::Void,
+                }
+            }
+            ("remove", Ty::Map(k, _)) => {
+                // remove reads the map: it fails when the key is not there.
+                b.meta[local].used = true;
+                let key = self.expect(b, &args[0].value, &k);
+                let missing = missing_key_message(&self.site(e.span));
+                Expr { kind: ExprKind::MapRemove { local, path, key: Box::new(key), missing }, ty: Ty::Void }
+            }
+            (_, Ty::Error) => {
+                for a in args {
+                    self.expr(b, &a.value);
+                }
+                Self::err_expr()
+            }
+            (_, other) => {
+                for a in args {
+                    self.expr(b, &a.value);
+                }
+                let t = self.show(&other);
+                self.err(Diagnostic::new("E0406", method.span, format!("`{m}` is {kind} method; {t} has no `{m}`")));
+                Self::err_expr()
+            }
+        }
     }
 }
 

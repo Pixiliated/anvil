@@ -1,0 +1,9 @@
+// expect: E0300
+fn main() -> i64 {
+    let m: Map[str, i64] = ["a": 1];
+    var total: i64 = 0;
+    for _k in m {
+        total = total + 1;
+    }
+    return total;
+}

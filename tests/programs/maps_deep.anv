@@ -1,0 +1,84 @@
+// Maps and == under load: a recursive type, maps inside maps, many inserts and removes.
+struct Tree {
+    label: str,
+    children: [Tree],
+}
+
+struct Cell {
+    count: i64,
+    tags: [str],
+}
+
+fn leaf(label: str) -> Tree {
+    return Tree { label: label, children: [] };
+}
+
+fn show_ints(xs: [i64]) -> str {
+    var out: str = "";
+    for x in xs {
+        out = out + " {x}";
+    }
+    return out;
+}
+
+fn main() uses io {
+    let t1: Tree = Tree {
+        label: "root",
+        children: [leaf("a"), Tree { label: "b", children: [leaf("c")] }],
+    };
+    let t2: Tree = Tree {
+        label: "root",
+        children: [leaf("a"), Tree { label: "b", children: [leaf("c")] }],
+    };
+    let t3: Tree = Tree {
+        label: "root",
+        children: [leaf("a"), Tree { label: "b", children: [leaf("d")] }],
+    };
+    print("{t1 == t2} {t1 == t3} {t1.children[1] == t3.children[1]} {t1.children[0..1] == t3.children[0..1]}");
+
+    // Keys inserted out of order come back sorted; removing from the middle keeps the rest.
+    var m: Map[i64, i64] = [:];
+    var k: i64 = 7;
+    for i in 0..40 {
+        k = (k * 37 + 11) % 101 - 50;
+        m.set(key: k, value: i);
+    }
+    print("{m.len()} keys:{show_ints(m.keys()[0..6])}");
+    let full: Map[i64, i64] = m;
+    for key in full.keys() {
+        if key % 3 == 0 {
+            m.remove(key);
+        }
+    }
+    print("{m.len()} left:{show_ints(m.keys()[0..6])} {full.len()} kept");
+    var sorted: bool = true;
+    let ks: [i64] = m.keys();
+    for j in 1..ks.len() {
+        if ks[j - 1] >= ks[j] {
+            sorted = false;
+        }
+    }
+    print("sorted {sorted}");
+
+    // Maps of maps and of structs: every level is a value of its own.
+    var nested: Map[str, Map[str, i64]] = ["x": ["one": 1], "y": [:]];
+    let snapshot: Map[str, Map[str, i64]] = nested;
+    var inner: Map[str, i64] = [:];
+    match nested.get("y") {
+        Some(value) => { inner = value; }
+        None => {}
+    }
+    inner.set(key: "two", value: 2);
+    nested.set(key: "y", value: inner);
+    print("{snapshot == nested} {nested.get("y") == Some(["two": 2])} {snapshot.get("y") == Some([:])}");
+    var cells: Map[str, Cell] = ["a": Cell { count: 1, tags: ["t"] }];
+    var c: Cell = Cell { count: 0, tags: [] };
+    match cells.get("a") {
+        Some(value: cell) => { c = cell; }
+        None => {}
+    }
+    c.tags.push("u");
+    c.count = c.count + 1;
+    cells.set(key: "b", value: c);
+    print("{cells.len()} {cells.values()[0].tags.len()} {cells.values()[1].tags.len()} {cells.values()[1].count}");
+}

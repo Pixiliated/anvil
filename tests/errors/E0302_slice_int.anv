@@ -1,0 +1,6 @@
+// expect: E0302
+fn main() -> i64 {
+    let n: i64 = 12345;
+    let _digits: i64 = n[0..2];
+    return 0;
+}

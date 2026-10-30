@@ -1,0 +1,7 @@
+// Splitting at an empty separator has no meaning, so it panics.
+fn main() uses io {
+    print("{"a b".split(" ").len()}");
+    let sep: str = "";
+    let parts: [str] = "abc".split(sep);
+    print("unreachable {parts.len()}");
+}

@@ -1,0 +1,7 @@
+// A map literal that names a key twice panics instead of keeping one of the values.
+fn main() uses io {
+    let first: str = "a";
+    print("building");
+    let m: Map[str, i64] = [first: 1, "b": 2, "a": 3];
+    print("unreachable {m.len()}");
+}

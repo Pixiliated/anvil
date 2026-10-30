@@ -1,7 +1,8 @@
 /* Anvil runtime: the only code a compiled Anvil program links besides the C runtime.
  * Text formatting here has twins in anvil_front (ir.rs); the parity tests keep them identical.
  *
- * Heap objects (str and arrays) are reference counted. The layout is shared with the code
+ * Heap objects (str, arrays and maps; a map is an array of key-value elements sorted by key)
+ * are reference counted. The layout is shared with the code
  * generator (anvil_codegen/src/lib.rs): rc at offset 0, kind at 8, length at 16; arrays keep
  * their capacity at 24, element layout at 32 and element storage at 40. Static strings have
  * rc -1 and are never freed. Functions taking objects borrow them; returned objects are owned. */
@@ -291,4 +292,132 @@ char *anvil_arr_push_slot(AnvArr *a) {
 char *anvil_arr_pop_slot(AnvArr *a) {
     if (a->rc != 1 || a->len == 0) runtime_error("pop from a shared or empty array");
     return a->data + --a->len * a->ti->elem_size;
+}
+
+static void retain_elements(AnvArr *a) {
+    for (int64_t i = 0; i < a->len; i++) {
+        char *elem = a->data + i * a->ti->elem_size;
+        for (int64_t k = 0; k < a->ti->nptrs; k++) anvil_retain(*(AnvObj **)(elem + a->ti->offsets[k]));
+    }
+}
+
+/* Inserts an uninitialised slot at `pos` of a uniquely owned array and returns its address. */
+char *anvil_arr_insert_slot(AnvArr *a, int64_t pos) {
+    if (pos < 0 || pos > a->len) runtime_error("insert outside an array");
+    anvil_arr_push_slot(a);
+    int64_t size = a->ti->elem_size;
+    char *at = a->data + pos * size;
+    memmove(at + size, at, (size_t)((a->len - 1 - pos) * size));
+    return at;
+}
+
+/* Removes element `pos` of a uniquely owned array; the caller has released its references. */
+void anvil_arr_remove_slot(AnvArr *a, int64_t pos) {
+    if (a->rc != 1 || pos < 0 || pos >= a->len) runtime_error("remove from a shared array or outside it");
+    int64_t size = a->ti->elem_size;
+    char *at = a->data + pos * size;
+    memmove(at, at + size, (size_t)((a->len - 1 - pos) * size));
+    a->len--;
+}
+
+/* ---- slices: same text as ir::slice_message and ir::slice_char_message ---- */
+
+static void panic_slice(const char *what, int64_t from, int64_t to, int64_t len, const AnvStr *site) {
+    char buf[512];
+    int n = len < 0 ? snprintf(buf, sizeof buf, "slice %lld..%lld %s at %.*s", (long long)from, (long long)to, what,
+                               (int)site->len, site->bytes)
+                    : snprintf(buf, sizeof buf, "slice %lld..%lld %s %lld at %.*s", (long long)from, (long long)to,
+                               what, (long long)len, (int)site->len, site->bytes);
+    if (n >= (int)sizeof buf) n = (int)sizeof buf - 1;
+    panic_bytes(buf, n);
+}
+
+AnvArr *anvil_arr_slice(const AnvArr *a, int64_t from, int64_t to, const AnvStr *site) {
+    if (from < 0 || to > a->len || from > to) panic_slice("out of bounds for length", from, to, a->len, site);
+    AnvArr *b = anvil_arr_new(a->ti, to - from);
+    b->len = to - from;
+    if (b->len) memcpy(b->data, a->data + from * a->ti->elem_size, (size_t)(b->len * a->ti->elem_size));
+    retain_elements(b);
+    return b;
+}
+
+/* A byte that continues a UTF-8 sequence: slicing there would split a character. */
+static int continues_char(const AnvStr *s, int64_t i) {
+    return i < s->len && ((unsigned char)s->bytes[i] & 0xC0) == 0x80;
+}
+
+AnvStr *anvil_str_slice(const AnvStr *s, int64_t from, int64_t to, const AnvStr *site) {
+    if (from < 0 || to > s->len || from > to) panic_slice("out of bounds for length", from, to, s->len, site);
+    if (continues_char(s, from) || continues_char(s, to)) panic_slice("splits a character", from, to, -1, site);
+    return str_from(s->bytes + from, to - from);
+}
+
+/* ---- str search and split ---- */
+
+/* Byte offset of the first occurrence of t in s, or -1; an empty t is found at 0. */
+int64_t anvil_str_find(const AnvStr *s, const AnvStr *t) {
+    for (int64_t i = 0; i + t->len <= s->len; i++) {
+        if (memcmp(s->bytes + i, t->bytes, (size_t)t->len) == 0) return i;
+    }
+    return -1;
+}
+
+int64_t anvil_str_starts(const AnvStr *s, const AnvStr *t) {
+    return t->len <= s->len && memcmp(s->bytes, t->bytes, (size_t)t->len) == 0;
+}
+
+int64_t anvil_str_ends(const AnvStr *s, const AnvStr *t) {
+    return t->len <= s->len && memcmp(s->bytes + s->len - t->len, t->bytes, (size_t)t->len) == 0;
+}
+
+/* The pieces between non-overlapping occurrences of sep, left to right (as Rust's str::split). */
+AnvArr *anvil_str_split(const AnvStr *s, const AnvStr *sep, const AnvTypeInfo *ti, const AnvStr *message) {
+    if (sep->len == 0) anvil_panic(message);
+    AnvArr *out = anvil_arr_new(ti, 4);
+    int64_t start = 0;
+    for (int64_t i = 0; i + sep->len <= s->len;) {
+        if (memcmp(s->bytes + i, sep->bytes, (size_t)sep->len) == 0) {
+            *(AnvStr **)anvil_arr_push_slot(out) = str_from(s->bytes + start, i - start);
+            i += sep->len;
+            start = i;
+        } else {
+            i++;
+        }
+    }
+    *(AnvStr **)anvil_arr_push_slot(out) = str_from(s->bytes + start, s->len - start);
+    return out;
+}
+
+/* Equality for ==; null (an unused field of an enum variant) equals only null. */
+int64_t anvil_str_eq(const AnvStr *a, const AnvStr *b) {
+    if (a == b) return 1;
+    if (!a || !b) return 0;
+    return a->len == b->len && memcmp(a->bytes, b->bytes, (size_t)a->len) == 0;
+}
+
+/* ---- maps: an array of (key, value) elements sorted by key, the key in the first slot ---- */
+
+/* Index of `key`, or -(insertion point) - 1. */
+int64_t anvil_map_find_i64(const AnvArr *m, int64_t key) {
+    int64_t lo = 0, hi = m->len;
+    while (lo < hi) {
+        int64_t mid = lo + (hi - lo) / 2;
+        int64_t k = *(const int64_t *)(m->data + mid * m->ti->elem_size);
+        if (k == key) return mid;
+        if (k < key) lo = mid + 1;
+        else hi = mid;
+    }
+    return -lo - 1;
+}
+
+int64_t anvil_map_find_str(const AnvArr *m, const AnvStr *key) {
+    int64_t lo = 0, hi = m->len;
+    while (lo < hi) {
+        int64_t mid = lo + (hi - lo) / 2;
+        int64_t c = anvil_str_cmp(*(const AnvStr **)(m->data + mid * m->ti->elem_size), key);
+        if (c == 0) return mid;
+        if (c < 0) lo = mid + 1;
+        else hi = mid;
+    }
+    return -lo - 1;
 }

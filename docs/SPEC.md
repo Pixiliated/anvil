@@ -1,4 +1,4 @@
-# Anvil language specification (v0.6)
+# Anvil language specification (v0.7)
 
 Anvil is a small, compiled, general-purpose language designed to be written mostly by AI agents
 and read by humans. Its rules aim at three things: one obvious way to write each thing, code
@@ -53,6 +53,7 @@ an expression or a signature, has no place in the layout and is an error (E0111)
 | `bool` | `true`, `false` |
 | `str` | immutable UTF-8 text: `"text"`, `"x = {x}"` |
 | `[T]` | growable array of `T`: `[1, 2, 3]`, `[]` |
+| `Map[K, V]` | keys of type `i64` or `str`, each with one value: `["a": 1]`, `[:]` |
 | structs | declared with `struct` |
 | enums | declared with `enum` |
 | `Option[T]` | `Some(x)` or `None` |
@@ -168,6 +169,7 @@ let last: i64 = xs.pop();    // remove and return the last element
 xs[0] = 10;
 let n: i64 = xs.len();
 let grid: [[i64]] = [[1, 2], [3, 4]];
+let mid: [i64] = xs[1..3];   // a copy of elements 1 and 2
 ```
 
 - Indexing is bounds-checked: `xs[i]` with `i < 0` or `i >= len` panics with the index, the
@@ -175,18 +177,62 @@ let grid: [[i64]] = [[1, 2], [3, 4]];
 - `push` and `pop` change the array in place, so they need a `var` (or a field or element of
   one).
 - `[]` needs an expected type from context (a typed `let`, a parameter, a field, a return).
-- Arrays have no `==`; compare element by element.
+- **Slices** `xs[from..to]` copy elements `from` up to, not including, `to`. Both bounds are
+  required; `from < 0`, `to > len` or `from > to` panics with the range, the length and the
+  location. A slice is not a place: it cannot be assigned.
 
 ## Text
 
 `str` values are immutable. `+` joins two strings; `==`, `!=`, `<`, `<=`, `>`, `>=` compare
-them byte by byte; `s.len()` is the length in bytes. Strings are not indexed.
+them byte by byte; `s.len()` is the length in bytes. Strings are not indexed by position, but
+they slice by byte offsets: `s[from..to]`, with the bounds rules of arrays, and a panic if
+either bound falls inside a character (`"héllo"[0..2]`).
+
+| Method | Gives |
+|---|---|
+| `s.contains(t)` | `bool` |
+| `s.starts_with(t)`, `s.ends_with(t)` | `bool` |
+| `s.find(t)` | `Option[i64]`: the byte offset of the first `t` (`Some(0)` for `""`) |
+| `s.split(sep)` | `[str]`: the pieces between occurrences of `sep`, left to right; `"a,,b"` gives `["a", "", "b"]`, `""` gives `[""]`; an empty `sep` panics |
 
 **Interpolation** is the one way to build text from values: `"{name} is {age} years old"`.
 Each `{...}` holds one expression of type `i64`, `f64`, `bool` or `str` and inserts its text
 (the same text `print` writes). The expression must close on the same line and contain no
 braces; it may contain other strings (`"{greet("Ada")}"`). Write `{{` and `}}` for literal
 braces. Escapes: `\n \t \" \\`.
+
+## Maps
+
+```
+var ages: Map[str, i64] = ["ada": 36, "alan": 41];
+ages.set(key: "grace", value: 85);   // insert, or replace the value
+ages.remove("alan");                  // panics if the key is not there
+let n: i64 = ages.len();
+match ages.get("ada") {
+    Some(value) => { print("ada is {value}"); }
+    None => {}
+}
+for name in ages.keys() {
+    print(name);
+}
+```
+
+- Keys are `i64` or `str` (E0408), and a map always visits them **in ascending order** (`str`
+  bytewise, so `"Z"` comes before `"a"`). The order never depends on history, so two maps with
+  the same entries are the same value.
+- `m.get(k)` is an `Option` of the value; `m.has(k)` a `bool`; `m.keys()` and `m.values()`
+  arrays in key order. There is no `for` over a map itself: loop over `keys()` or `values()`.
+- `set` and `remove` change the map in place, so they need a `var`; `set` names its arguments
+  like any call with two parameters.
+- A literal `[k: v, ...]` that repeats a key panics. `[:]` needs an expected type.
+- Maps are values like arrays: assigning or passing one gives an independent copy.
+
+## Equality
+
+`==` and `!=` work on any two values of the same type. Arrays, structs, enums and maps are equal
+when every part is: the same length, fields, variant and payload, keys and values. Floats
+compare as IEEE values everywhere, so `[nan] != [nan]` and `[0.0] == [-0.0]`. Only `i64`, `f64`
+and `str` are ordered.
 
 ## Enums and match
 
@@ -212,7 +258,7 @@ match s {
   so adding a variant makes every match that forgets it an error.
 - A pattern lists every field of its variant in declaration order. `field` binds it under its
   own name, `field: name` binds it under another name, `field: _` ignores it.
-- Enums have no `==`; use `match`.
+- Enums have `==` (see Equality); read their fields with `match`.
 
 ## Option, Result and `?`
 
@@ -248,12 +294,13 @@ Precedence, lowest first: `||`, `&&`, comparisons (`== != < <= > >=`, not chaina
 - `+ - * /` on `i64` (checked: overflow and division by zero panic) and `f64` (IEEE: division
   by zero gives inf or nan). `%` is `i64` only, with the sign of the dividend. `+` also joins
   two `str`.
-- `==` and `!=` on `i64`, `f64`, `bool`, `str`. Ordering on `i64`, `f64`, `str`.
+- `==` and `!=` on any two values of one type (see Equality). Ordering on `i64`, `f64`, `str`.
 - `&&` and `||` short-circuit.
 - Struct literal: `Body { mass: 1.0[kg], pos: 0.0[m] }`, every field once, in declaration
   order.
-- Methods exist only on built-in types: `len()` on `str` and arrays, `push(x)` and `pop()` on
-  arrays. Everything else is a function.
+- Methods exist only on built-in types: `len()` on `str`, arrays and maps; `push(x)` and
+  `pop()` on arrays; the search methods on `str` (see Text); `get`, `has`, `set`, `remove`,
+  `keys` and `values` on maps. Everything else is a function.
 - No operator overloading, no implicit conversions, no truthiness.
 
 **Evaluation order** is left to right. For an assignment or `push`, the value on the right is

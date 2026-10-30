@@ -58,6 +58,25 @@ fn write(out: &mut String, v: &Value, ty: &Ty, program: &Program) {
             }
             out.push(']');
         }
+        (Value::Map(entries), Ty::Map(kt, vt)) => {
+            if entries.is_empty() {
+                out.push_str("[:]");
+                return;
+            }
+            out.push('[');
+            for (i, (k, v)) in entries.iter().take(SHOWN_ITEMS).enumerate() {
+                if i > 0 {
+                    out.push_str(", ");
+                }
+                write(out, k, kt, program);
+                out.push_str(": ");
+                write(out, v, vt, program);
+            }
+            if entries.len() > SHOWN_ITEMS {
+                out.push_str(&format!(", ... {} more", entries.len() - SHOWN_ITEMS));
+            }
+            out.push(']');
+        }
         (Value::Enum(tag, fields), Ty::Enum(id)) => {
             let def = &program.enums[*id];
             let variant = &def.variants[*tag];

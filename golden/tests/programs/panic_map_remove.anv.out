@@ -1,0 +1,4 @@
+exit: 101
+panic: remove of a key the map does not have at tests/programs/panic_map_remove.anv:6:5
+---
+0 false

@@ -1,0 +1,6 @@
+// str slices are byte ranges; one that would split a character panics.
+fn main() uses io {
+    let word: str = "héllo";
+    print(word[0..1]);
+    print(word[0..2]);
+}

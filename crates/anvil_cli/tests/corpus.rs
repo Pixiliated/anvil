@@ -575,6 +575,26 @@ fn main() -> i64 {
     );
     let v = p.json(&["trace", "long.anv", "--only", "echo"]);
     assert_eq!(v["events"][0]["args"], format!("s: \"{}\" ... 220 more bytes", "x".repeat(80)), "{v}");
+
+    p.write(
+        "map.anv",
+        r#"fn total(m: Map[str, i64]) -> i64 {
+    var sum: i64 = 0;
+    for v in m.values() {
+        sum = sum + v;
+    }
+    return sum;
+}
+
+fn main() -> i64 {
+    let empty: Map[str, i64] = [:];
+    return total(["b": 2, "a": 1]) - 3 + total(empty);
+}
+"#,
+    );
+    let v = p.json(&["trace", "map.anv", "--only", "total"]);
+    assert_eq!(v["events"][0]["args"], r#"m: ["a": 1, "b": 2]"#, "{v}");
+    assert_eq!(v["events"][2]["args"], "m: [:]", "{v}");
 }
 
 #[test]

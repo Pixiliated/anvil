@@ -1,0 +1,4 @@
+exit: 101
+panic: split with an empty separator at tests/programs/panic_split_empty.anv:5:24
+---
+2

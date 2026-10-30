@@ -21,6 +21,8 @@ pub enum Ty {
     Struct(StructId),
     /// `[T]`: a growable array with value semantics (copied on write).
     Array(Box<Ty>),
+    /// `Map[K, V]`: keys (i64 or str) in ascending order, each with one value; a value like arrays.
+    Map(Box<Ty>, Box<Ty>),
     Enum(EnumId),
     /// Produced after an error so one mistake does not cascade; never reaches a backend.
     Error,
@@ -192,8 +194,23 @@ pub enum Builtin {
     ToI64 {
         message: String,
     },
-    /// Length of a str (bytes) or an array (elements).
+    /// Length of a str (bytes), an array (elements) or a map (keys).
     Len,
+    /// `m.get(k)`: Option of the value; args are the map and the key.
+    MapGet,
+    MapHas,
+    /// All keys in ascending order, or the values in the same order.
+    MapKeys,
+    MapValues,
+    /// str methods; args are the receiver and the other str. Find gives an Option of the byte offset.
+    StrContains,
+    StrFind,
+    StrStartsWith,
+    StrEndsWith,
+    /// Splits at every occurrence of a non-empty separator; panics with `message` if it is empty.
+    StrSplit {
+        message: String,
+    },
 }
 
 #[derive(Clone, Debug)]
@@ -223,6 +240,32 @@ pub enum ExprKind {
         base: Box<Expr>,
         index: Box<Expr>,
         site: String,
+    },
+    /// `xs[from..to]` of an array or a str (byte offsets on character boundaries): a new value.
+    Slice {
+        base: Box<Expr>,
+        from: Box<Expr>,
+        to: Box<Expr>,
+        site: String,
+    },
+    /// Entries evaluated in order, key then value; a repeated key panics with `duplicate`.
+    MapLit {
+        entries: Vec<(Expr, Expr)>,
+        duplicate: String,
+    },
+    /// `m.set(key: k, value: v)` on the map at a place: replaces or inserts.
+    MapSet {
+        local: LocalId,
+        path: Vec<Step>,
+        key: Box<Expr>,
+        value: Box<Expr>,
+    },
+    /// `m.remove(k)` on the map at a place; panics with `missing` if the key is absent.
+    MapRemove {
+        local: LocalId,
+        path: Vec<Step>,
+        key: Box<Expr>,
+        missing: String,
     },
     /// Concatenation of the text of each part (str, i64, f64 with its unit, bool).
     Interp(Vec<Expr>),
@@ -286,6 +329,23 @@ pub fn index_message(index: i64, len: i64, site: &str) -> String {
 }
 pub fn pop_message(site: &str) -> String {
     format!("pop from an empty array at {site}")
+}
+/// Mirrors the bounds check of anvil_arr_slice and anvil_str_slice in the C runtime.
+pub fn slice_message(from: i64, to: i64, len: i64, site: &str) -> String {
+    format!("slice {from}..{to} out of bounds for length {len} at {site}")
+}
+/// Mirrors the character check of anvil_str_slice.
+pub fn slice_char_message(from: i64, to: i64, site: &str) -> String {
+    format!("slice {from}..{to} splits a character at {site}")
+}
+pub fn split_message(site: &str) -> String {
+    format!("split with an empty separator at {site}")
+}
+pub fn duplicate_key_message(site: &str) -> String {
+    format!("duplicate key in the map literal at {site}")
+}
+pub fn missing_key_message(site: &str) -> String {
+    format!("remove of a key the map does not have at {site}")
 }
 
 /// i64 -> f64 range limits for to_i64: values must lie in [-2^63, 2^63).
@@ -371,6 +431,12 @@ impl fmt::Display for TyDisplay<'_> {
             Ty::Str => write!(f, "str"),
             Ty::Struct(id) => write!(f, "{}", self.structs[*id].name),
             Ty::Array(t) => write!(f, "[{}]", TyDisplay { ty: t, structs: self.structs, enums: self.enums }),
+            Ty::Map(k, v) => write!(
+                f,
+                "Map[{}, {}]",
+                TyDisplay { ty: k, structs: self.structs, enums: self.enums },
+                TyDisplay { ty: v, structs: self.structs, enums: self.enums }
+            ),
             Ty::Enum(id) => write!(f, "{}", self.enums[*id].name),
             Ty::Error => write!(f, "<error>"),
         }

@@ -1,0 +1,4 @@
+exit: 101
+panic: slice 0..2 splits a character at tests/programs/panic_slice_char.anv:5:11
+---
+h

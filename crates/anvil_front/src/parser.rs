@@ -583,6 +583,13 @@ impl Parser {
                 }
             } else if self.eat(&Tok::LBracket) {
                 let i = self.expr()?;
+                if self.eat(&Tok::DotDot) {
+                    let to = self.expr()?;
+                    let end = self.expect(Tok::RBracket)?;
+                    let span = e.span.to(end);
+                    e = Expr { kind: ExprKind::Slice(Box::new(e), Box::new(i), Box::new(to)), span };
+                    continue;
+                }
                 let end = self.expect(Tok::RBracket)?;
                 let span = e.span.to(end);
                 e = Expr { kind: ExprKind::Index(Box::new(e), Box::new(i)), span };
@@ -667,15 +674,32 @@ impl Parser {
             }
             Tok::LBracket => {
                 self.bump();
+                if self.peek() == &Tok::Colon && self.peek_at(1) == &Tok::RBracket {
+                    self.bump();
+                    self.bump();
+                    return Ok(Expr { kind: ExprKind::MapLit(Vec::new()), span: start.to(self.prev_span()) });
+                }
                 let mut elems = Vec::new();
+                let mut entries = Vec::new();
                 while self.peek() != &Tok::RBracket {
-                    elems.push(self.expr()?);
+                    let x = self.expr()?;
+                    // The first element decides: `[k: v, ...]` is a map, `[x, ...]` an array.
+                    if !entries.is_empty() || (elems.is_empty() && self.peek() == &Tok::Colon) {
+                        self.expect(Tok::Colon)?;
+                        entries.push((x, self.expr()?));
+                    } else {
+                        elems.push(x);
+                    }
                     if !self.eat(&Tok::Comma) {
                         break;
                     }
                 }
                 self.expect(Tok::RBracket)?;
-                ExprKind::Array(elems)
+                if entries.is_empty() {
+                    ExprKind::Array(elems)
+                } else {
+                    ExprKind::MapLit(entries)
+                }
             }
             Tok::Result => {
                 self.bump();

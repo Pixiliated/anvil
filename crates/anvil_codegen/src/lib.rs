@@ -1,8 +1,12 @@
 //! Native backend: typed IR to an x86_64 object file with Cranelift, then to an executable.
 //!
 //! Every value is flattened into scalars: i64 -> I64, f64 -> F64, bool -> I8, structs -> their
-//! fields in order, enums -> a tag then the fields of every variant (unused ones zero). str and
-//! arrays are one pointer to a reference-counted object in the C runtime (anvil_rt.c).
+//! fields in order, enums -> a tag then the fields of every variant (unused ones zero). str,
+//! arrays and maps are one pointer to a reference-counted object in the C runtime (anvil_rt.c);
+//! a map is an array of (key, value) elements sorted by key.
+//!
+//! `==` on arrays, structs, enums and maps is structural: structs and enums compare inline (the
+//! unused fields of an enum are zero on both sides), arrays and maps call a generated helper.
 //!
 //! Ownership rules for heap pointers:
 //! - `expr` returns owned values: each pointer carries one reference that the caller consumes
@@ -55,6 +59,17 @@ const RUNTIME: &[(&str, &[Type], &[Type])] = &[
     ("anvil_arr_unique", &[I], &[I]),
     ("anvil_arr_push_slot", &[I], &[I]),
     ("anvil_arr_pop_slot", &[I], &[I]),
+    ("anvil_arr_insert_slot", &[I, I], &[I]),
+    ("anvil_arr_remove_slot", &[I, I], &[]),
+    ("anvil_arr_slice", &[I, I, I, I], &[I]),
+    ("anvil_str_slice", &[I, I, I, I], &[I]),
+    ("anvil_str_find", &[I, I], &[I]),
+    ("anvil_str_starts", &[I, I], &[I]),
+    ("anvil_str_ends", &[I, I], &[I]),
+    ("anvil_str_split", &[I, I, I, I], &[I]),
+    ("anvil_str_eq", &[I, I], &[I]),
+    ("anvil_map_find_i64", &[I, I], &[I]),
+    ("anvil_map_find_str", &[I, I], &[I]),
     ("anvil_exit", &[I], &[]),
     ("anvil_check_exit", &[I], &[]),
 ];
@@ -70,6 +85,9 @@ struct Backend {
     runtime: HashMap<&'static str, ClFuncId>,
     strings: HashMap<String, DataId>,
     type_infos: HashMap<String, DataId>,
+    /// `==` helpers for arrays and maps by type name, and those declared but not yet generated.
+    eq_helpers: HashMap<String, ClFuncId>,
+    pending_eq: Vec<(ClFuncId, Ty)>,
 }
 
 pub fn compile_object(program: &Program, asm: bool) -> Result<(Vec<u8>, String), String> {
@@ -90,6 +108,8 @@ pub fn compile_object(program: &Program, asm: bool) -> Result<(Vec<u8>, String),
         runtime: HashMap::new(),
         strings: HashMap::new(),
         type_infos: HashMap::new(),
+        eq_helpers: HashMap::new(),
+        pending_eq: Vec::new(),
     };
 
     for (name, params, rets) in RUNTIME {
@@ -124,6 +144,19 @@ pub fn compile_object(program: &Program, asm: bool) -> Result<(Vec<u8>, String),
             listing.push_str(&format!("; fn {}\n{code}\n", f.name));
         }
     }
+    // Helpers can ask for more (an array of arrays), so generate until none is pending.
+    while let Some((id, ty)) = be.pending_eq.pop() {
+        let mut ctx = Context::new();
+        ctx.func.signature = be.eq_signature();
+        ctx.func.name = UserFuncName::user(2, id.as_u32());
+        {
+            let b = FunctionBuilder::new(&mut ctx.func, &mut fbc);
+            Gen::new(&mut be, program, b, &[]).eq_function(&ty);
+        }
+        be.module
+            .define_function(id, &mut ctx)
+            .map_err(|e| format!("codegen of == for {} failed: {e:?}", show(program, &ty)))?;
+    }
     if let Some(main) = program.main {
         be.c_main(program, main, &mut fbc)?;
     }
@@ -144,7 +177,7 @@ fn flat(program: &Program, ty: &Ty, out: &mut Vec<Scalar>) {
         Ty::I64 => out.push(Scalar { ty: I, heap: false }),
         Ty::F64(_) => out.push(Scalar { ty: types::F64, heap: false }),
         Ty::Bool => out.push(Scalar { ty: types::I8, heap: false }),
-        Ty::Str | Ty::Array(_) => out.push(Scalar { ty: I, heap: true }),
+        Ty::Str | Ty::Array(_) | Ty::Map(..) => out.push(Scalar { ty: I, heap: true }),
         Ty::Struct(id) => {
             for (_, t) in &program.structs[*id].fields {
                 flat(program, t, out);
@@ -224,13 +257,29 @@ impl Backend {
         id
     }
 
-    /// Element layout for the runtime: slot size in bytes, then the byte offsets of heap pointers.
+    fn eq_signature(&self) -> Signature {
+        let mut sig = self.module.make_signature();
+        sig.params.extend([AbiParam::new(I), AbiParam::new(I)]);
+        sig.returns.push(AbiParam::new(types::I8));
+        sig
+    }
+
     fn type_info(&mut self, program: &Program, elem: &Ty) -> DataId {
-        let key = show(program, elem);
+        self.layout_info(show(program, elem), layout(program, elem))
+    }
+
+    /// The element of a map: its key slot, then the value's.
+    fn pair_info(&mut self, program: &Program, k: &Ty, v: &Ty) -> DataId {
+        let mut lay = layout(program, k);
+        lay.extend(layout(program, v));
+        self.layout_info(format!("({}, {})", show(program, k), show(program, v)), lay)
+    }
+
+    /// Element layout for the runtime: slot size in bytes, then the byte offsets of heap pointers.
+    fn layout_info(&mut self, key: String, lay: Vec<Scalar>) -> DataId {
         if let Some(id) = self.type_infos.get(&key) {
             return *id;
         }
-        let lay = layout(program, elem);
         let ptrs: Vec<i64> = lay.iter().enumerate().filter(|(_, s)| s.heap).map(|(k, _)| k as i64 * SLOT).collect();
         let mut bytes = Vec::new();
         bytes.extend((lay.len() as i64 * SLOT).to_le_bytes());
@@ -313,7 +362,9 @@ fn args(vals: &[Value]) -> Vec<BlockArg> {
 fn mutates(e: &Expr) -> bool {
     let any = |es: &[Expr]| es.iter().any(mutates);
     match &e.kind {
-        ExprKind::Push { .. } | ExprKind::Pop { .. } => true,
+        ExprKind::Push { .. } | ExprKind::Pop { .. } | ExprKind::MapSet { .. } | ExprKind::MapRemove { .. } => true,
+        ExprKind::Slice { base, from, to, .. } => mutates(base) || mutates(from) || mutates(to),
+        ExprKind::MapLit { entries, .. } => entries.iter().any(|(k, v)| mutates(k) || mutates(v)),
         ExprKind::Int(_) | ExprKind::Float(_) | ExprKind::Bool(_) | ExprKind::Str(_) | ExprKind::Local(_) => false,
         ExprKind::Field(x, _) | ExprKind::Not(x) | ExprKind::FNeg(x) | ExprKind::INeg { e: x, .. } => mutates(x),
         ExprKind::Try { inner, .. } => mutates(inner),
@@ -908,6 +959,99 @@ impl<'a, 'b> Gen<'a, 'b> {
                 }
                 vals
             }
+            ExprKind::Slice { base, from, to, site } => {
+                let (vals, owned) =
+                    if mutates(from) || mutates(to) { (self.expr(base), true) } else { self.borrow(base) };
+                let f = self.expr(from)[0];
+                let t = self.expr(to)[0];
+                let s = self.str_obj(site);
+                let name = if base.ty == Ty::Str { "anvil_str_slice" } else { "anvil_arr_slice" };
+                let out = self.call_rt(name, &[vals[0], f, t, s]).unwrap();
+                if owned {
+                    self.call_rt("anvil_release", &[vals[0]]);
+                }
+                vec![out]
+            }
+            ExprKind::MapLit { entries, duplicate } => {
+                let Ty::Map(kt, vt) = &e.ty else { unreachable!() };
+                let info = self.be.pair_info(self.program, kt, vt);
+                let ti = self.data_ptr(info);
+                let cap = self.b.ins().iconst(I, entries.len() as i64);
+                let m = self.call_rt("anvil_arr_new", &[ti, cap]).unwrap();
+                for (k, v) in entries {
+                    let key = self.expr(k)[0];
+                    let vals = self.expr(v);
+                    let at = self.map_find(m, kt, key);
+                    let found = self.b.ins().icmp_imm_s(IntCC::SignedGreaterThanOrEqual, at, 0);
+                    self.panic_if(found, duplicate);
+                    let pos = self.b.ins().bnot(at);
+                    let slot = self.call_rt("anvil_arr_insert_slot", &[m, pos]).unwrap();
+                    self.store(slot, &[key]);
+                    let vslot = self.b.ins().iadd_imm_s(slot, SLOT);
+                    self.store(vslot, &vals);
+                }
+                vec![m]
+            }
+            ExprKind::MapSet { local, path, key, value } => {
+                let k = self.expr(key)[0];
+                let vals = self.expr(value);
+                let indices = self.indices(path);
+                let loc = self.locate(*local, path, &indices);
+                let m = self.unique_at(&loc);
+                let at = self.map_find(m, &key.ty, k);
+                let size = self.pair_size(&value.ty);
+                let found = self.b.ins().icmp_imm_s(IntCC::SignedGreaterThanOrEqual, at, 0);
+                let replace = self.b.create_block();
+                let insert = self.b.create_block();
+                let merge = self.b.create_block();
+                self.b.ins().brif(found, replace, &[], insert, &[]);
+                self.b.switch_to_block(replace);
+                self.b.seal_block(replace);
+                let addr = self.elem_at(m, at, size);
+                let vaddr = self.b.ins().iadd_imm_s(addr, SLOT);
+                let vlay = self.layout(&value.ty);
+                let old = self.load(vaddr, &vlay);
+                self.release(&vlay, &old);
+                self.store(vaddr, &vals);
+                // The map keeps its own key; the new one is dropped.
+                let klay = self.layout(&key.ty);
+                self.release(&klay, &[k]);
+                self.b.ins().jump(merge, &[]);
+                self.b.switch_to_block(insert);
+                self.b.seal_block(insert);
+                let pos = self.b.ins().bnot(at);
+                let slot = self.call_rt("anvil_arr_insert_slot", &[m, pos]).unwrap();
+                self.store(slot, &[k]);
+                let vslot = self.b.ins().iadd_imm_s(slot, SLOT);
+                self.store(vslot, &vals);
+                self.b.ins().jump(merge, &[]);
+                self.b.switch_to_block(merge);
+                self.b.seal_block(merge);
+                Vec::new()
+            }
+            ExprKind::MapRemove { local, path, key, missing } => {
+                let k = self.expr(key)[0];
+                let indices = self.indices(path);
+                let loc = self.locate(*local, path, &indices);
+                let (Loc::Vars(_, _, Ty::Map(_, vt)) | Loc::Mem(_, Ty::Map(_, vt))) = &loc else {
+                    unreachable!("remove on a non-map place")
+                };
+                let vt = (**vt).clone();
+                let m = self.unique_at(&loc);
+                let at = self.map_find(m, &key.ty, k);
+                let klay = self.layout(&key.ty);
+                self.release(&klay, &[k]);
+                let absent = self.b.ins().icmp_imm_s(IntCC::SignedLessThan, at, 0);
+                self.panic_if(absent, missing);
+                let size = self.pair_size(&vt);
+                let addr = self.elem_at(m, at, size);
+                let mut lay = klay;
+                lay.extend(self.layout(&vt));
+                let old = self.load(addr, &lay);
+                self.release(&lay, &old);
+                self.call_rt("anvil_arr_remove_slot", &[m, at]);
+                Vec::new()
+            }
             ExprKind::Interp(parts) => {
                 let mut acc = self.text(&parts[0]);
                 for p in &parts[1..] {
@@ -1017,6 +1161,15 @@ impl<'a, 'b> Gen<'a, 'b> {
                     FOp::Div => self.b.ins().fdiv(a, c),
                 }]
             }
+            ExprKind::Cmp(op, l, r) if matches!(l.ty, Ty::Array(_) | Ty::Struct(_) | Ty::Enum(_) | Ty::Map(..)) => {
+                let a = self.expr(l);
+                let c = self.expr(r);
+                let same = self.eq(&l.ty, &a, &c);
+                let lay = self.layout(&l.ty);
+                self.release(&lay, &a);
+                self.release(&lay, &c);
+                vec![if *op == CmpOp::Ne { self.b.ins().bxor_imm_u(same, 1) } else { same }]
+            }
             ExprKind::Cmp(op, l, r) => {
                 let a = self.expr(l)[0];
                 let c = self.expr(r)[0];
@@ -1083,8 +1236,189 @@ impl<'a, 'b> Gen<'a, 'b> {
                 let v = self.expr(x)[0];
                 vec![self.b.ins().fneg(v)]
             }
-            ExprKind::Builtin(bi, bargs) => self.builtin(bi, bargs),
+            ExprKind::Builtin(bi, bargs) => self.builtin(bi, bargs, &e.ty),
         }
+    }
+
+    /// Pointer to a type info (or any data object).
+    fn data_ptr(&mut self, data: DataId) -> Value {
+        let gv = self.be.module.declare_data_in_func(data, self.b.func);
+        self.b.ins().symbol_value(I, gv)
+    }
+
+    /// Bytes per element of a map whose values are `v`: the key slot, then the value's.
+    fn pair_size(&self, v: &Ty) -> i64 {
+        (1 + flat_len(self.program, v) as i64) * SLOT
+    }
+
+    /// Address of element `i` (in bounds) of an array or map with `size`-byte elements.
+    fn elem_at(&mut self, arr: Value, i: Value, size: i64) -> Value {
+        let data = self.b.ins().load(I, self.trusted, arr, ARR_DATA);
+        let offset = self.b.ins().imul_imm_s(i, size);
+        self.b.ins().iadd(data, offset)
+    }
+
+    /// Index of `key` in map `m`, or -(where it would go) - 1.
+    fn map_find(&mut self, m: Value, kt: &Ty, key: Value) -> Value {
+        let name = if *kt == Ty::Str { "anvil_map_find_str" } else { "anvil_map_find_i64" };
+        self.call_rt(name, &[m, key]).unwrap()
+    }
+
+    /// `Some(some())` when `found`, otherwise `None`, as values of Option enum `eid`.
+    fn option(&mut self, eid: EnumId, found: Value, some: impl FnOnce(&mut Self) -> Vec<Value>) -> Vec<Value> {
+        let lay = self.layout(&Ty::Enum(eid));
+        let yes = self.b.create_block();
+        let no = self.b.create_block();
+        let merge = self.b.create_block();
+        let out: Vec<Value> = lay.iter().map(|s| self.b.append_block_param(merge, s.ty)).collect();
+        self.b.ins().brif(found, yes, &[], no, &[]);
+        self.b.switch_to_block(yes);
+        self.b.seal_block(yes);
+        let vals = some(self);
+        let v = self.enum_value(eid, OPTION_SOME, &vals);
+        self.b.ins().jump(merge, &args(&v));
+        self.b.switch_to_block(no);
+        self.b.seal_block(no);
+        let v = self.enum_value(eid, OPTION_NONE, &[]);
+        self.b.ins().jump(merge, &args(&v));
+        self.b.switch_to_block(merge);
+        self.b.seal_block(merge);
+        out
+    }
+
+    /// `a == b` for two values of `ty` (I8 1 or 0). Floats compare as IEEE values.
+    fn eq(&mut self, ty: &Ty, a: &[Value], b: &[Value]) -> Value {
+        match ty {
+            Ty::I64 | Ty::Bool => self.b.ins().icmp(IntCC::Equal, a[0], b[0]),
+            Ty::F64(_) => self.b.ins().fcmp(FloatCC::Equal, a[0], b[0]),
+            Ty::Str => {
+                let r = self.call_rt("anvil_str_eq", &[a[0], b[0]]).unwrap();
+                self.b.ins().icmp_imm_s(IntCC::NotEqual, r, 0)
+            }
+            Ty::Array(_) | Ty::Map(..) => {
+                let f = self.eq_helper(ty);
+                let call = self.b.ins().call(f, &[a[0], b[0]]);
+                self.b.inst_results(call)[0]
+            }
+            Ty::Struct(sid) => {
+                let parts: Vec<Ty> = self.program.structs[*sid].fields.iter().map(|(_, t)| t.clone()).collect();
+                let mut acc = self.b.ins().iconst(types::I8, 1);
+                self.eq_parts(&parts, a, b, 0, &mut acc);
+                acc
+            }
+            Ty::Enum(eid) => {
+                let parts: Vec<Ty> = self.program.enums[*eid]
+                    .variants
+                    .iter()
+                    .flat_map(|v| v.fields.iter().map(|(_, t)| t.clone()))
+                    .collect();
+                let mut acc = self.b.ins().icmp(IntCC::Equal, a[0], b[0]);
+                self.eq_parts(&parts, a, b, 1, &mut acc);
+                acc
+            }
+            Ty::Void | Ty::Error => unreachable!("== on {ty:?}"),
+        }
+    }
+
+    /// ANDs into `acc` the equality of consecutive `parts` of two flattened values, from `start`.
+    fn eq_parts(&mut self, parts: &[Ty], a: &[Value], b: &[Value], start: usize, acc: &mut Value) {
+        let mut at = start;
+        for t in parts {
+            let n = flat_len(self.program, t);
+            let same = self.eq(t, &a[at..at + n], &b[at..at + n]);
+            *acc = self.b.ins().band(*acc, same);
+            at += n;
+        }
+    }
+
+    /// The generated `==` helper for an array or map type, declared on first use.
+    fn eq_helper(&mut self, ty: &Ty) -> FuncRef {
+        let key = show(self.program, ty);
+        let id = match self.be.eq_helpers.get(&key) {
+            Some(id) => *id,
+            None => {
+                let sig = self.be.eq_signature();
+                let name = format!("anvil_eq_{}", self.be.eq_helpers.len());
+                let id = self.be.module.declare_function(&name, Linkage::Local, &sig).expect("declare == helper");
+                self.be.eq_helpers.insert(key, id);
+                self.be.pending_eq.push((id, ty.clone()));
+                id
+            }
+        };
+        self.be.module.declare_func_in_func(id, self.b.func)
+    }
+
+    /// The body of an `==` helper: same object, else same length and every element equal.
+    fn eq_function(mut self, ty: &Ty) {
+        let parts: Vec<Ty> = match ty {
+            Ty::Array(elem) => vec![(**elem).clone()],
+            Ty::Map(k, v) => vec![(**k).clone(), (**v).clone()],
+            _ => unreachable!("== helper for {ty:?}"),
+        };
+        let size: i64 = parts.iter().map(|t| flat_len(self.program, t) as i64).sum::<i64>() * SLOT;
+        let lay: Vec<Scalar> = parts.iter().flat_map(|t| self.layout(t)).collect();
+        let entry = self.b.create_block();
+        self.b.append_block_params_for_function_params(entry);
+        self.b.switch_to_block(entry);
+        self.b.seal_block(entry);
+        let (a, c) = (self.b.block_params(entry)[0], self.b.block_params(entry)[1]);
+        let yes = self.b.create_block();
+        let no = self.b.create_block();
+        let not_same = self.b.create_block();
+        let both = self.b.create_block();
+        let same = self.b.ins().icmp(IntCC::Equal, a, c);
+        self.b.ins().brif(same, yes, &[], not_same, &[]);
+        // Different objects: a null one (an unused enum field) equals nothing else.
+        self.b.switch_to_block(not_same);
+        self.b.seal_block(not_same);
+        let an = self.b.ins().icmp_imm_s(IntCC::Equal, a, 0);
+        let cn = self.b.ins().icmp_imm_s(IntCC::Equal, c, 0);
+        let either = self.b.ins().bor(an, cn);
+        self.b.ins().brif(either, no, &[], both, &[]);
+        self.b.switch_to_block(both);
+        self.b.seal_block(both);
+        let la = self.b.ins().load(I, self.trusted, a, OBJ_LEN);
+        let lc = self.b.ins().load(I, self.trusted, c, OBJ_LEN);
+        let header = self.b.create_block();
+        let body = self.b.create_block();
+        let step = self.b.create_block();
+        let counter = self.b.declare_var(I);
+        let zero = self.b.ins().iconst(I, 0);
+        self.b.def_var(counter, zero);
+        let lens = self.b.ins().icmp(IntCC::NotEqual, la, lc);
+        self.b.ins().brif(lens, no, &[], header, &[]);
+        self.b.switch_to_block(header);
+        let i = self.b.use_var(counter);
+        let more = self.b.ins().icmp(IntCC::SignedLessThan, i, la);
+        self.b.ins().brif(more, body, &[], yes, &[]);
+        self.b.switch_to_block(body);
+        self.b.seal_block(body);
+        let i = self.b.use_var(counter);
+        let pa = self.elem_at(a, i, size);
+        let pc = self.elem_at(c, i, size);
+        let va = self.load(pa, &lay);
+        let vc = self.load(pc, &lay);
+        let mut acc = self.b.ins().iconst(types::I8, 1);
+        self.eq_parts(&parts, &va, &vc, 0, &mut acc);
+        self.b.ins().brif(acc, step, &[], no, &[]);
+        self.b.switch_to_block(step);
+        self.b.seal_block(step);
+        let i = self.b.use_var(counter);
+        let next = self.b.ins().iadd_imm_s(i, 1);
+        self.b.def_var(counter, next);
+        self.b.ins().jump(header, &[]);
+        self.b.seal_block(header);
+        self.b.switch_to_block(yes);
+        self.b.seal_block(yes);
+        let t = self.b.ins().iconst(types::I8, 1);
+        self.b.ins().return_(&[t]);
+        self.b.switch_to_block(no);
+        self.b.seal_block(no);
+        let f = self.b.ins().iconst(types::I8, 0);
+        self.b.ins().return_(&[f]);
+        self.b.seal_all_blocks();
+        let config = self.be.module.isa().frontend_config();
+        self.b.finalize(config);
     }
 
     /// Flattened enum value: the tag, `given` for the variant's fields, zero everywhere else.
@@ -1131,8 +1465,98 @@ impl<'a, 'b> Gen<'a, 'b> {
         }
     }
 
-    fn builtin(&mut self, bi: &Builtin, bargs: &[Expr]) -> Vec<Value> {
+    fn builtin(&mut self, bi: &Builtin, bargs: &[Expr], ty: &Ty) -> Vec<Value> {
         match bi {
+            Builtin::StrContains | Builtin::StrFind | Builtin::StrStartsWith | Builtin::StrEndsWith => {
+                let s = self.expr(&bargs[0])[0];
+                let t = self.expr(&bargs[1])[0];
+                let name = match bi {
+                    Builtin::StrStartsWith => "anvil_str_starts",
+                    Builtin::StrEndsWith => "anvil_str_ends",
+                    _ => "anvil_str_find",
+                };
+                let r = self.call_rt(name, &[s, t]).unwrap();
+                self.call_rt("anvil_release", &[s]);
+                self.call_rt("anvil_release", &[t]);
+                return match bi {
+                    Builtin::StrFind => {
+                        let Ty::Enum(eid) = ty else { unreachable!() };
+                        let found = self.b.ins().icmp_imm_s(IntCC::SignedGreaterThanOrEqual, r, 0);
+                        self.option(*eid, found, |_| vec![r])
+                    }
+                    Builtin::StrContains => vec![self.b.ins().icmp_imm_s(IntCC::SignedGreaterThanOrEqual, r, 0)],
+                    _ => vec![self.b.ins().icmp_imm_s(IntCC::NotEqual, r, 0)],
+                };
+            }
+            Builtin::StrSplit { message } => {
+                let s = self.expr(&bargs[0])[0];
+                let sep = self.expr(&bargs[1])[0];
+                let info = self.be.type_info(self.program, &Ty::Str);
+                let ti = self.data_ptr(info);
+                let m = self.str_obj(message);
+                let out = self.call_rt("anvil_str_split", &[s, sep, ti, m]).unwrap();
+                self.call_rt("anvil_release", &[s]);
+                self.call_rt("anvil_release", &[sep]);
+                return vec![out];
+            }
+            Builtin::MapHas | Builtin::MapGet => {
+                let (vals, owned) =
+                    if mutates(&bargs[1]) { (self.expr(&bargs[0]), true) } else { self.borrow(&bargs[0]) };
+                let m = vals[0];
+                let key = self.expr(&bargs[1])[0];
+                let Ty::Map(kt, vt) = &bargs[0].ty else { unreachable!() };
+                let (kt, vt) = ((**kt).clone(), (**vt).clone());
+                let at = self.map_find(m, &kt, key);
+                let klay = self.layout(&kt);
+                self.release(&klay, &[key]);
+                let found = self.b.ins().icmp_imm_s(IntCC::SignedGreaterThanOrEqual, at, 0);
+                let out = if let Builtin::MapHas = bi {
+                    vec![found]
+                } else {
+                    let Ty::Enum(eid) = ty else { unreachable!() };
+                    let size = self.pair_size(&vt);
+                    self.option(*eid, found, |g| {
+                        let addr = g.elem_at(m, at, size);
+                        let vaddr = g.b.ins().iadd_imm_s(addr, SLOT);
+                        let vlay = g.layout(&vt);
+                        let v = g.load(vaddr, &vlay);
+                        g.retain(&vlay, &v);
+                        v
+                    })
+                };
+                if owned {
+                    self.call_rt("anvil_release", &[m]);
+                }
+                return out;
+            }
+            Builtin::MapKeys | Builtin::MapValues => {
+                let (vals, owned) = self.borrow(&bargs[0]);
+                let m = vals[0];
+                let Ty::Map(kt, vt) = &bargs[0].ty else { unreachable!() };
+                let (part, offset) =
+                    if let Builtin::MapKeys = bi { ((**kt).clone(), 0) } else { ((**vt).clone(), SLOT) };
+                let size = self.pair_size(vt);
+                let info = self.be.type_info(self.program, &part);
+                let ti = self.data_ptr(info);
+                let len = self.b.ins().load(I, self.trusted, m, OBJ_LEN);
+                let out = self.call_rt("anvil_arr_new", &[ti, len]).unwrap();
+                let limit = self.b.declare_var(I);
+                self.b.def_var(limit, len);
+                let zero = self.b.ins().iconst(I, 0);
+                let lay = self.layout(&part);
+                self.counted_loop(zero, limit, &[], |g, i| {
+                    let addr = g.elem_at(m, i, size);
+                    let addr = g.b.ins().iadd_imm_s(addr, offset);
+                    let v = g.load(addr, &lay);
+                    g.retain(&lay, &v);
+                    let slot = g.call_rt("anvil_arr_push_slot", &[out]).unwrap();
+                    g.store(slot, &v);
+                });
+                if owned {
+                    self.call_rt("anvil_release", &[m]);
+                }
+                return vec![out];
+            }
             Builtin::Print => {
                 let t = self.text(&bargs[0]);
                 self.call_rt("anvil_print_line", &[t]);
@@ -1152,7 +1576,17 @@ impl<'a, 'b> Gen<'a, 'b> {
         }
         let x = self.expr(&bargs[0])[0];
         match bi {
-            Builtin::Print | Builtin::Len => unreachable!(),
+            Builtin::Print
+            | Builtin::Len
+            | Builtin::StrContains
+            | Builtin::StrFind
+            | Builtin::StrStartsWith
+            | Builtin::StrEndsWith
+            | Builtin::StrSplit { .. }
+            | Builtin::MapHas
+            | Builtin::MapGet
+            | Builtin::MapKeys
+            | Builtin::MapValues => unreachable!(),
             Builtin::Assert { message } => {
                 let fail = self.b.ins().icmp_imm_s(IntCC::Equal, x, 0);
                 self.panic_if(fail, message);

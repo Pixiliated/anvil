@@ -237,13 +237,27 @@ pub enum ExprKind {
     Name(Ident),
     Result,
     Field(Box<Expr>, Ident),
-    Call { callee: Ident, args: Vec<Arg> },
-    Method { receiver: Box<Expr>, method: Ident, args: Vec<Arg> },
+    Call {
+        callee: Ident,
+        args: Vec<Arg>,
+    },
+    Method {
+        receiver: Box<Expr>,
+        method: Ident,
+        args: Vec<Arg>,
+    },
     Index(Box<Expr>, Box<Expr>),
+    /// `xs[from..to]`
+    Slice(Box<Expr>, Box<Expr>, Box<Expr>),
     Array(Vec<Expr>),
+    /// `[key: value, ...]`; `[:]` is the empty map.
+    MapLit(Vec<(Expr, Expr)>),
     Interp(Vec<InterpPart>),
     Try(Box<Expr>),
-    StructLit { name: Ident, fields: Vec<(Ident, Expr)> },
+    StructLit {
+        name: Ident,
+        fields: Vec<(Ident, Expr)>,
+    },
     Unary(UnOp, Box<Expr>),
     Binary(BinOp, Box<Expr>, Box<Expr>),
     Paren(Box<Expr>),

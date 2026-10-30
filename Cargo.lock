@@ -19,7 +19,7 @@ dependencies = [
 
 [[package]]
 name = "anvil_cli"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "anvil_ops",
  "serde_json",
@@ -27,7 +27,7 @@ dependencies = [
 
 [[package]]
 name = "anvil_codegen"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "anvil_front",
  "cc",
@@ -39,7 +39,7 @@ dependencies = [
 
 [[package]]
 name = "anvil_front"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -47,14 +47,14 @@ dependencies = [
 
 [[package]]
 name = "anvil_interp"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "anvil_front",
 ]
 
 [[package]]
 name = "anvil_mcp"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "anvil_ops",
  "rmcp",
@@ -66,7 +66,7 @@ dependencies = [
 
 [[package]]
 name = "anvil_ops"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "anvil_codegen",
  "anvil_front",
@@ -79,7 +79,7 @@ dependencies = [
 
 [[package]]
 name = "anvil_record"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "rusqlite",
  "serde_json",

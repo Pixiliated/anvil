@@ -1,0 +1,8 @@
+exit: 0
+---
+true false false true
+29 keys: -150 -140 -139 -135 -132 -131
+19 left: -140 -139 -131 -127 -110 -107 29 kept
+sorted true
+false true true
+2 1 2 2

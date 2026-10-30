@@ -1,0 +1,121 @@
+// Slices, string search and split, maps and structural ==. Both backends must agree on every line.
+struct Point {
+    x: i64,
+    y: i64,
+}
+
+enum Shape {
+    Circle(radius: f64),
+    Poly(points: [Point]),
+    Empty,
+}
+
+struct Inventory {
+    owner: str,
+    stock: Map[str, i64],
+}
+
+fn word_counts(text: str) -> Map[str, i64] {
+    var counts: Map[str, i64] = [:];
+    for w in text.split(" ") {
+        if w == "" {
+            continue;
+        }
+        match counts.get(w) {
+            Some(value: n) => { counts.set(key: w, value: n + 1); }
+            None => { counts.set(key: w, value: 1); }
+        }
+    }
+    return counts;
+}
+
+fn join(parts: [str], sep: str) -> str {
+    var out: str = "";
+    for i in 0..parts.len() {
+        if i > 0 {
+            out = out + sep;
+        }
+        out = out + parts[i];
+    }
+    return out;
+}
+
+fn show_ints(xs: [i64]) -> str {
+    var parts: [str] = [];
+    for x in xs {
+        parts.push("{x}");
+    }
+    return "[" + join(parts: parts, sep: ", ") + "]";
+}
+
+fn show_find(r: Option[i64]) -> str {
+    var out: str = "";
+    match r {
+        Some(value) => { out = "at {value}"; }
+        None => { out = "absent"; }
+    }
+    return out;
+}
+
+fn main() uses io {
+    // Slices copy: changing the original afterwards leaves the slice alone.
+    var xs: [i64] = [10, 20, 30, 40, 50];
+    let mid: [i64] = xs[1..4];
+    xs[2] = 99;
+    print("{show_ints(mid)} {show_ints(xs[0..0])} {show_ints(xs[0..xs.len()])}");
+    let grid: [[i64]] = [[1, 2], [3, 4], [5, 6]];
+    let rows: [[i64]] = grid[1..3];
+    print("{rows.len()} rows, first {show_ints(rows[0])}");
+
+    // str slices are byte ranges that keep characters whole.
+    let word: str = "héllo";
+    print("{word.len()} bytes: {word[0..1]} {word[1..3]} {word[3..6]} [{word[3..3]}]");
+
+    // Search and split.
+    let line: str = "a,b,,c";
+    print("{line.contains(",,")} {line.contains("x")} {"".contains("")}");
+    print("{line.starts_with("a,")} {line.ends_with(",c")} {line.ends_with("a")}");
+    print("{show_find(line.find("b"))} {show_find(line.find("z"))} {show_find(line.find(""))}");
+    print(join(parts: line.split(","), sep: "|"));
+    print("{"".split(",").len()} {",x,".split(",").len()} {"abc".split("abc").len()}");
+
+    // Maps keep their keys in order: str bytewise (uppercase first), i64 by value.
+    let counts: Map[str, i64] = word_counts("the cat saw The cat  sit");
+    print(join(parts: counts.keys(), sep: " "));
+    print(show_ints(counts.values()));
+    print("{counts.len()} words, cat {show_find(counts.get("cat"))}, dog {show_find(counts.get("dog"))}");
+    var scores: Map[i64, str] = [3: "three", -1: "minus one", 10: "ten"];
+    scores.set(key: 0, value: "zero");
+    scores.set(key: 3, value: "THREE");
+    scores.remove(-1);
+    print("{show_ints(scores.keys())} {join(parts: scores.values(), sep: ",")} {scores.has(-1)} {scores.has(10)}");
+
+    // A map is a value: the copy is changed, the original is not.
+    let before: Map[i64, str] = scores;
+    scores.set(key: 99, value: "new");
+    print("{before.len()} {scores.len()} {before == scores}");
+    var inv: Inventory = Inventory { owner: "ada", stock: ["bolt": 4] };
+    inv.stock.set(key: "nut", value: 9);
+    inv.stock.remove("bolt");
+    print("{inv.owner} {join(parts: inv.stock.keys(), sep: ",")} {show_ints(inv.stock.values())}");
+    var lists: Map[str, [i64]] = ["evens": [2, 4]];
+    lists.set(key: "odds", value: [1, 3, 5]);
+    let copy: Map[str, [i64]] = lists;
+    lists.set(key: "evens", value: [2, 4, 6]);
+    print("{lists.len()} {copy == lists} {copy == ["evens": [2, 4], "odds": [1, 3, 5]]}");
+
+    // == compares every part; floats as IEEE values, so nan differs from itself and -0.0 equals 0.0.
+    let a: [Point] = [Point { x: 1, y: 2 }, Point { x: 3, y: 4 }];
+    let b: [Point] = [Point { x: 1, y: 2 }, Point { x: 3, y: 4 }];
+    let p: Point = Point { x: 1, y: 2 };
+    print("{a == b} {a != b} {a == b[0..1]} {a == []} {p == a[0]} {p == a[1]}");
+    let nan: f64 = 0.0 / 0.0;
+    print("{[nan] == [nan]} {[0.0] == [-0.0]} {[[1], [2, 3]] == [[1], [2, 3]]}");
+    let s1: Shape = Shape.Poly(a);
+    let s2: Shape = Shape.Poly(b);
+    let s3: Shape = Shape.Circle(1.0);
+    print("{s1 == s2} {s1 == s3} {s3 == Shape.Circle(1.0)} {Shape.Empty == Shape.Empty} {s3 != Shape.Empty}");
+    let found: Option[i64] = line.find("c");
+    let r: Result[i64, str] = Err("bad");
+    print("{found == Some(5)} {found == None} {r == Err("bad")} {r == Ok(1)}");
+}

@@ -1,0 +1,5 @@
+// expect: E0408
+fn main() -> i64 {
+    let m: Map[f64, i64] = [:];
+    return m.len();
+}

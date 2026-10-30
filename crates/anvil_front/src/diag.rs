@@ -283,13 +283,16 @@ pub fn explain(code: &str) -> Option<&'static str> {
                     let, var, an assignment or return: let n: i64 = parse(text)?;"
         }
         "E0406" => {
-            "Unknown method. Arrays have len(), push(x) and pop(); str has len(). push and pop change \
-                    the array in place, so they need a var. Other types have no methods: write a function."
+            "Unknown method. Arrays have len(), push(x) and pop(); str has len(), contains, find, \
+                    starts_with, ends_with and split; maps have len(), has, get, set, remove, keys and values. \
+                    push, pop, set and remove change the value in place, so they need a var. Other types \
+                    have no methods: write a function."
         }
         "E0407" => {
             "No text form. print and string interpolation take i64, f64, bool and str. Print structs \
                     field by field, arrays in a loop and enums with match."
         }
+        "E0408" => "Map key type. Map keys are i64 or str, which have one order every program agrees on, so iteration order is fixed.",
         "E0500" => {
             "Unknown lint in an allow. `allow LINT \"reason\"` names one of the lints that \
                     `anvil explain` lists after the error codes."
@@ -320,5 +323,6 @@ pub const ALL_CODES: &[&str] = &[
     "E0001", "E0002", "E0003", "E0004", "E0100", "E0110", "E0111", "E0200", "E0201", "E0202", "E0300", "E0301",
     "E0302", "E0303", "E0304", "E0305", "E0306", "E0307", "E0308", "E0310", "E0311", "E0320", "E0321", "E0322",
     "E0323", "E0330", "E0331", "E0332", "E0340", "E0341", "E0350", "E0360", "E0370", "E0380", "E0390", "E0391",
-    "E0392", "E0400", "E0401", "E0402", "E0403", "E0404", "E0405", "E0406", "E0407", "E0500", "E0501", "E0502",
+    "E0392", "E0400", "E0401", "E0402", "E0403", "E0404", "E0405", "E0406", "E0407", "E0408", "E0500", "E0501",
+    "E0502",
 ];

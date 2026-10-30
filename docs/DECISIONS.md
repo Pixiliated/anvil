@@ -110,3 +110,17 @@ Short records of choices that are not obvious from the code. Newest last.
   per line. Anything else stays on one line however long; a general line breaker can come later.
 - **Parser recovery restarts at item keywords only.** They never appear inside an item, so the
   restart point is never a guess; within an item only the first error is reported.
+
+## M6 (v0.7)
+
+- **Map keys are i64 or str, in ascending order.** Sorted order, not insertion order: it never
+  depends on history, so equal maps print, iterate and compare alike. Natively a map is the
+  array runtime holding sorted (key, value) elements, found by binary search.
+- **`[k: v]` literals and `[:]`**, after arrays' `[x]` and `[]`; no new keyword or braces.
+- **No silent cases:** a repeated literal key, `remove` of a missing key, a slice out of range
+  or through a character, and `split` at `""` all panic. `get` returns an Option instead.
+- **`==` on every type**, structural, floats as IEEE values. Every type's parts have `==`, so
+  the roadmap's "whose parts all have it" holds for all of them; there is no opt-out.
+- **Slices copy** (value semantics, like everything else); both bounds are required, so there
+  is one way to write a range.
+- **`set` names its arguments** (`key:`, `value:`), like any call with two parameters.
