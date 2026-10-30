@@ -74,6 +74,8 @@ pub struct Func {
     pub span: Span,
     /// `allow LINT "reason"` lines, as (lint, reason).
     pub allows: Vec<(String, String)>,
+    /// Index into `Program::modules` of the file that declares it (`span` is in that file).
+    pub module: usize,
     pub params: Vec<LocalId>,
     pub ret: Ty,
     pub uses_io: bool,
@@ -100,6 +102,9 @@ pub struct Program {
     pub funcs: Vec<Func>,
     pub tests: Vec<Test>,
     pub main: Option<FuncId>,
+    /// The program's files: the root first, then each imported module. Functions from a module
+    /// are named `module.name`.
+    pub modules: Vec<String>,
 }
 
 /// One step from a local to the place being assigned or mutated.

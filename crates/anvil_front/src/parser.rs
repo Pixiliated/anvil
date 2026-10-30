@@ -22,6 +22,9 @@ pub fn parse(toks: Vec<Token>) -> (File, Vec<Diagnostic>) {
     let mut errors = Vec::new();
     while p.peek() != &Tok::Eof {
         let start = p.pos;
+        if p.peek() == &Tok::Import && items.iter().any(|i| !matches!(i, Item::Import(_))) {
+            errors.push(Diagnostic::new("E0100", p.span(), "imports come before every other item"));
+        }
         match p.item() {
             Ok(item) => items.push(item),
             Err(d) => {
@@ -29,7 +32,15 @@ pub fn parse(toks: Vec<Token>) -> (File, Vec<Diagnostic>) {
                 p.pos = p.pos.max(start + 1);
                 while !matches!(
                     p.peek(),
-                    Tok::Eof | Tok::Fn | Tok::Struct | Tok::Enum | Tok::Unit | Tok::Test | Tok::Allow
+                    Tok::Eof
+                        | Tok::Fn
+                        | Tok::Struct
+                        | Tok::Enum
+                        | Tok::Unit
+                        | Tok::Test
+                        | Tok::Allow
+                        | Tok::Import
+                        | Tok::Pub
                 ) {
                     p.bump();
                 }
@@ -97,6 +108,25 @@ impl Parser {
 
     fn item(&mut self) -> PResult<Item> {
         match self.peek() {
+            Tok::Import => self.import_decl().map(Item::Import),
+            Tok::Pub => {
+                let start = self.bump().span;
+                let mut item = match self.peek() {
+                    Tok::Unit => self.unit_decl().map(Item::Unit)?,
+                    Tok::Struct => self.struct_decl().map(Item::Struct)?,
+                    Tok::Enum => self.enum_decl().map(Item::Enum)?,
+                    Tok::Fn => self.fn_decl(Vec::new()).map(|f| Item::Fn(Box::new(f)))?,
+                    _ => return Err(self.unexpected("`fn`, `struct`, `enum` or `unit` after `pub`")),
+                };
+                match &mut item {
+                    Item::Unit(d) => (d.public, d.span) = (true, start.to(d.span)),
+                    Item::Struct(d) => (d.public, d.span) = (true, start.to(d.span)),
+                    Item::Enum(d) => (d.public, d.span) = (true, start.to(d.span)),
+                    Item::Fn(d) => (d.public, d.span) = (true, start.to(d.span)),
+                    _ => unreachable!(),
+                }
+                Ok(item)
+            }
             Tok::Unit => self.unit_decl().map(Item::Unit),
             Tok::Struct => self.struct_decl().map(Item::Struct),
             Tok::Enum => self.enum_decl().map(Item::Enum),
@@ -106,14 +136,50 @@ impl Parser {
                 while self.peek() == &Tok::Allow {
                     allows.push(self.allow_decl()?);
                 }
+                let public = if self.peek() == &Tok::Pub { Some(self.bump().span) } else { None };
                 if self.peek() != &Tok::Fn {
                     return Err(self.unexpected("`fn` or another `allow` (an allow applies to the function after it)"));
                 }
-                self.fn_decl(allows).map(|f| Item::Fn(Box::new(f)))
+                let mut f = self.fn_decl(allows)?;
+                if let Some(p) = public {
+                    f.public = true;
+                    f.span = p.to(f.span);
+                }
+                Ok(Item::Fn(Box::new(f)))
             }
             Tok::Test => self.test_decl().map(Item::Test),
-            _ => Err(self.unexpected("`fn`, `struct`, `enum`, `unit`, `test` or `allow`")),
+            _ => Err(self.unexpected("`fn`, `struct`, `enum`, `unit`, `test`, `allow`, `import` or `pub`")),
         }
+    }
+
+    fn import_decl(&mut self) -> PResult<ImportDecl> {
+        let start = self.bump().span;
+        let mut path = vec![self.ident("a module name")?];
+        while self.eat(&Tok::Dot) {
+            if self.peek() == &Tok::LBrace {
+                break;
+            }
+            path.push(self.ident("a module name")?);
+        }
+        if self.peek() != &Tok::LBrace {
+            return Err(self
+                .unexpected("`.{` and the names to import")
+                .note("imports list their names: import geometry.{area, Shape};", None));
+        }
+        self.bump();
+        let mut names = Vec::new();
+        while self.peek() != &Tok::RBrace {
+            names.push(self.ident("a name to import")?);
+            if !self.eat(&Tok::Comma) {
+                break;
+            }
+        }
+        self.expect(Tok::RBrace)?;
+        if names.is_empty() {
+            return Err(Diagnostic::new("E0100", self.prev_span(), "an import names at least one item"));
+        }
+        let end = self.expect(Tok::Semi)?;
+        Ok(ImportDecl { path, names, span: start.to(end) })
     }
 
     fn unit_decl(&mut self) -> PResult<UnitDecl> {
@@ -121,7 +187,7 @@ impl Parser {
         let name = self.ident("unit name")?;
         let def = if self.eat(&Tok::Assign) { Some(self.unit_expr()?) } else { None };
         let end = self.expect(Tok::Semi)?;
-        Ok(UnitDecl { name, def, span: start.to(end) })
+        Ok(UnitDecl { public: false, name, def, span: start.to(end) })
     }
 
     fn unit_expr(&mut self) -> PResult<UnitExpr> {
@@ -203,7 +269,7 @@ impl Parser {
             }
         }
         let end = self.expect(Tok::RBrace)?;
-        Ok(StructDecl { name, fields, span: start.to(end) })
+        Ok(StructDecl { public: false, name, fields, span: start.to(end) })
     }
 
     fn enum_decl(&mut self) -> PResult<EnumDecl> {
@@ -239,7 +305,7 @@ impl Parser {
             return Err(self.unexpected("a variant name").note("an enum needs at least one variant", None));
         }
         let end = self.expect(Tok::RBrace)?;
-        Ok(EnumDecl { name, variants, span: start.to(end) })
+        Ok(EnumDecl { public: false, name, variants, span: start.to(end) })
     }
 
     fn uses_clause(&mut self) -> PResult<(Vec<Ident>, Option<Span>)> {
@@ -306,7 +372,20 @@ impl Parser {
         }
         let body = self.block()?;
         let span = start.to(body.span);
-        Ok(FnDecl { name, params, ret, uses, uses_span, uses_insert, requires, ensures, body, span, allows })
+        Ok(FnDecl {
+            public: false,
+            name,
+            params,
+            ret,
+            uses,
+            uses_span,
+            uses_insert,
+            requires,
+            ensures,
+            body,
+            span,
+            allows,
+        })
     }
 
     fn test_decl(&mut self) -> PResult<TestDecl> {

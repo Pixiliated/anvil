@@ -32,12 +32,14 @@ pub struct Diagnostic {
     pub span: Span,
     pub notes: Vec<(String, Option<Span>)>,
     pub fixes: Vec<Fix>,
+    /// Which file of the program the spans are in: 0 is the root, then each imported module.
+    pub file: usize,
 }
 
 impl Diagnostic {
     pub fn new(code: &'static str, span: Span, message: impl Into<String>) -> Diagnostic {
         assert!(explain(code).is_some(), "diagnostic code {code} has no explanation");
-        Diagnostic { code, message: message.into(), span, notes: Vec::new(), fixes: Vec::new() }
+        Diagnostic { code, message: message.into(), span, notes: Vec::new(), fixes: Vec::new(), file: 0 }
     }
     pub fn note(mut self, text: impl Into<String>, span: Option<Span>) -> Diagnostic {
         self.notes.push((text.into(), span));
@@ -293,6 +295,23 @@ pub fn explain(code: &str) -> Option<&'static str> {
                     field by field, arrays in a loop and enums with match."
         }
         "E0408" => "Map key type. Map keys are i64 or str, which have one order every program agrees on, so iteration order is fixed.",
+        "E0601" => {
+            "Module not found. `import shapes.circle.{area};` reads shapes/circle.anv, a path relative to                     the directory of the file that imports it."
+        }
+        "E0602" => "The module has no item of that name. Check the spelling, or that the item is declared there.",
+        "E0603" => {
+            "Private item. Only items declared pub can be imported: write `pub fn`, `pub struct`,                     `pub enum` or `pub unit` in the module. A pub struct shows all its fields, a pub enum its variants."
+        }
+        "E0604" => "Unused import. Every imported name is used in the file; remove the ones that are not (mechanical).",
+        "E0605" => {
+            "Import cycle. Modules form a tree: if a imports b, b cannot import a, directly or through                     others. Move what both need into a third module that imports neither."
+        }
+        "E0606" => {
+            "main in an imported module. Only the program's root file defines main; a module that is                     imported is a library. Run a module's tests with `anvil test module.anv`."
+        }
+        "E0607" => {
+            "Private type in a pub item. A pub function, struct or enum cannot use a type its module                     keeps private, since importers could not name it. Make the type pub, or the item private."
+        }
         "E0500" => {
             "Unknown lint in an allow. `allow LINT \"reason\"` names one of the lints that \
                     `anvil explain` lists after the error codes."
@@ -324,5 +343,5 @@ pub const ALL_CODES: &[&str] = &[
     "E0302", "E0303", "E0304", "E0305", "E0306", "E0307", "E0308", "E0310", "E0311", "E0320", "E0321", "E0322",
     "E0323", "E0330", "E0331", "E0332", "E0340", "E0341", "E0350", "E0360", "E0370", "E0380", "E0390", "E0391",
     "E0392", "E0400", "E0401", "E0402", "E0403", "E0404", "E0405", "E0406", "E0407", "E0408", "E0500", "E0501",
-    "E0502",
+    "E0502", "E0601", "E0602", "E0603", "E0604", "E0605", "E0606", "E0607",
 ];

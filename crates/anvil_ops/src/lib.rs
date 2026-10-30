@@ -231,23 +231,30 @@ fn pos(src: &SourceFile, offset: usize) -> Value {
     json!({ "line": line, "col": col })
 }
 
-/// Compile errors as a failed report.
-pub(crate) fn diagnostics(src: &SourceFile, diags: &[Diagnostic]) -> Report {
-    let ds: Vec<_> = diags.iter().map(|d| diag::to_json(src, d)).collect();
+/// Reads a program's modules from under `root`, where every file name is relative to it.
+pub(crate) fn loader(root: &Path) -> impl Fn(&str) -> Result<String, String> + '_ {
+    move |name: &str| std::fs::read_to_string(root.join(name)).map_err(|e| e.to_string())
+}
+
+/// Compile errors as a failed report; `sources` are the program's files, which each
+/// diagnostic's `file` indexes.
+pub(crate) fn diagnostics(sources: &[SourceFile], diags: &[Diagnostic]) -> Report {
+    let ds: Vec<_> = diags.iter().map(|d| diag::to_json(&sources[d.file], d)).collect();
     let mut text = String::new();
     for d in diags {
-        text.push_str(&diag::render(src, d));
+        text.push_str(&diag::render(&sources[d.file], d));
         text.push('\n');
     }
     text.push_str(&format!("{} error(s)\n", diags.len()));
     Report::failed(json!({ "ok": false, "diagnostics": ds }), text, EXIT_FAILED)
 }
 
+/// The program rooted at `file`, with the modules it imports read from under `root`.
 fn compile(root: &Path, file: &str) -> Result<(SourceFile, Program), Report> {
     let src = load(root, file)?;
-    match anvil_front::compile(&src) {
-        Ok(p) => Ok((src, p)),
-        Err(d) => Err(diagnostics(&src, &d)),
+    match anvil_front::compile_with(&src, &loader(root)) {
+        (_, Ok(p)) => Ok((src, p)),
+        (sources, Err(d)) => Err(diagnostics(&sources, &d)),
     }
 }
 
@@ -255,7 +262,7 @@ fn with_main(root: &Path, file: &str) -> Result<(SourceFile, Program), Report> {
     let (src, program) = compile(root, file)?;
     if program.main.is_none() {
         let d = Diagnostic::new("E0350", Span::new(0, 0), "this file has no main function");
-        return Err(diagnostics(&src, &[d]));
+        return Err(diagnostics(std::slice::from_ref(&src), &[d]));
     }
     Ok((src, program))
 }
@@ -376,8 +383,9 @@ pub fn test(root: &Path, file: &str, max_steps: Option<u64>) -> Report {
     }
 }
 
-/// Applies every mechanical fix, rechecks, and repeats until none is left (at most 20 rounds).
-/// Fixes that overlap one already applied in the same round wait for the next round.
+/// Applies every mechanical fix in `file`, rechecks, and repeats until none is left (at most 20
+/// rounds). Fixes that overlap one already applied in the same round wait for the next round.
+/// Errors in imported modules are reported, never fixed from here.
 pub fn fix(root: &Path, file: &str) -> Report {
     const MAX_ROUNDS: usize = 20;
     let path = root.join(file);
@@ -385,9 +393,9 @@ pub fn fix(root: &Path, file: &str) -> Report {
     let mut rounds = 0;
     loop {
         let src = try_report!(load(root, file));
-        let a = anvil_front::analyze(&src);
+        let (sources, a) = anvil_front::analyze_with(&src, &loader(root));
         let mut edits: Vec<(Span, String, String, &'static str)> = Vec::new();
-        for d in &a.diags {
+        for d in a.diags.iter().filter(|d| d.file == 0) {
             for f in d.fixes.iter().filter(|f| f.kind == FixKind::Mechanical) {
                 for e in &f.edits {
                     edits.push((e.span, e.text.clone(), f.description.clone(), d.code));
@@ -395,7 +403,7 @@ pub fn fix(root: &Path, file: &str) -> Report {
             }
         }
         if edits.is_empty() || rounds == MAX_ROUNDS {
-            let remaining: Vec<_> = a.diags.iter().map(|d| diag::to_json(&src, d)).collect();
+            let remaining: Vec<_> = a.diags.iter().map(|d| diag::to_json(&sources[d.file], d)).collect();
             let ok = a.diags.is_empty();
             let json = json!({ "ok": ok, "applied": applied, "rounds": rounds, "diagnostics": remaining });
             let mut text = format!("applied {} fix(es) in {rounds} round(s)\n", applied.len());
@@ -403,7 +411,7 @@ pub fn fix(root: &Path, file: &str) -> Report {
                 return Report::ok(json, text);
             }
             for d in &a.diags {
-                text.push_str(&diag::render(&src, d));
+                text.push_str(&diag::render(&sources[d.file], d));
                 text.push('\n');
             }
             text.push_str(&format!("{} error(s) left; they need a decision, not a mechanical fix\n", a.diags.len()));
@@ -438,7 +446,7 @@ pub fn outline(root: &Path, file: &str) -> Report {
     let src = try_report!(load(root, file));
     let ast = match anvil_front::parse(&src) {
         Ok(f) => f,
-        Err(d) => return diagnostics(&src, &d),
+        Err(d) => return diagnostics(std::slice::from_ref(&src), &d),
     };
     let text = |s: Span| src.slice(s).to_string();
     let line = |s: Span| src.line_col(s.start).0;
@@ -446,6 +454,12 @@ pub fn outline(root: &Path, file: &str) -> Report {
     let mut human = String::new();
     for item in &ast.items {
         let v = match item {
+            Item::Import(i) => {
+                human.push_str(&format!("{:>4}  {}\n", line(i.span), one_line(&text(i.span))));
+                let names: Vec<&str> = i.names.iter().map(|n| n.name.as_str()).collect();
+                let file = anvil_front::module_file(&src.name, &i.module());
+                json!({ "kind": "import", "module": i.module(), "file": file, "names": names, "line": line(i.span) })
+            }
             Item::Fn(f) => {
                 let sig = one_line(&text(Span::new(f.span.start, f.body.span.start)));
                 for a in &f.allows {
@@ -455,7 +469,7 @@ pub fn outline(root: &Path, file: &str) -> Report {
                 let allows: Vec<_> =
                     f.allows.iter().map(|a| json!({ "lint": a.lint.name, "reason": a.reason })).collect();
                 json!({
-                    "kind": "fn", "name": f.name.name, "line": line(f.span), "signature": sig,
+                    "kind": "fn", "name": f.name.name, "pub": f.public, "line": line(f.span), "signature": sig,
                     "uses_io": f.uses.iter().any(|u| u.name == "io"),
                     "requires": f.requires.iter().map(|e| text(e.span)).collect::<Vec<_>>(),
                     "ensures": f.ensures.iter().map(|e| text(e.span)).collect::<Vec<_>>(),
@@ -500,10 +514,10 @@ fn def_json(src: &SourceFile, d: &Def) -> Value {
 /// Checker facts, or the syntax error that prevented them.
 fn analyze(root: &Path, file: &str) -> Result<(SourceFile, Analysis), Report> {
     let src = load(root, file)?;
-    let a = anvil_front::analyze(&src);
+    let (sources, a) = anvil_front::analyze_with(&src, &loader(root));
     if a.facts.defs.is_empty() && !a.diags.is_empty() {
         // A syntax error stops before checking, so there is nothing to answer from.
-        return Err(diagnostics(&src, &a.diags));
+        return Err(diagnostics(&sources, &a.diags));
     }
     Ok((src, a))
 }

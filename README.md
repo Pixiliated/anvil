@@ -81,7 +81,7 @@ in full (`anvil spec` prints it).
 
 ## Status
 
-v0.7: single-file programs with i64, f64 with units, bool, strings with interpolation,
+v0.8: programs of one or more files (modules with explicit imports and `pub`) with i64, f64 with units, bool, strings with interpolation,
 search and split, growable arrays and slices, maps in key order, structs, enums with
 exhaustive `match`, structural `==`, `Option` and `Result` with `?`,
 contracts, effects and tests. There are two backends:
@@ -91,7 +91,7 @@ contracts, effects and tests. There are two backends:
   are reference counted with copy-on-write; the tests check that every object is freed.
 
 The test suite runs every program through both and requires identical stdout, panic messages
-and exit codes. Modules, generics and other platforms are on the
+and exit codes. Generics, verification tools and other platforms are on the
 [roadmap](docs/ROADMAP.md).
 
 ## Using it
@@ -178,7 +178,7 @@ An agent starts with `spec` (the whole language), writes a file, then loops on `
 | `crates/anvil_cli` | the `anvil` command and end-to-end tests |
 | `crates/anvil_mcp` | the `anvil-mcp` server, its stdio and parity tests |
 | `crates/anvil_record` | the project record (SQLite) |
-| `tests/programs` | programs whose approved output is in `golden/`, run on both backends |
+| `tests/programs` | programs whose approved output is in `golden/`, run on both backends; `lib/` holds the modules they import |
 | `tests/errors` | one file per error code, with expected codes and fix checks |
 
 ## License

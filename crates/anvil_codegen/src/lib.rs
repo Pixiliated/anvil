@@ -119,10 +119,11 @@ pub fn compile_object(program: &Program, asm: bool) -> Result<(Vec<u8>, String),
         let id = be.module.declare_function(name, Linkage::Import, &sig).map_err(|e| e.to_string())?;
         be.runtime.insert(name, id);
     }
-    for f in &program.funcs {
+    for (i, f) in program.funcs.iter().enumerate() {
         let sig = be.signature(program, f.params.iter().map(|p| &f.locals[*p].ty), &f.ret);
-        let id =
-            be.module.declare_function(&format!("anv_{}", f.name), Linkage::Local, &sig).map_err(|e| e.to_string())?;
+        // Two modules may each have a private `helper`, so the index makes the symbol unique.
+        let name = format!("anv{i}_{}", f.name.replace('.', "_"));
+        let id = be.module.declare_function(&name, Linkage::Local, &sig).map_err(|e| e.to_string())?;
         be.funcs.push(id);
     }
 
@@ -264,15 +265,16 @@ impl Backend {
         sig
     }
 
+    /// Keys use the type itself, not its name: two modules may each declare a `Shape`.
     fn type_info(&mut self, program: &Program, elem: &Ty) -> DataId {
-        self.layout_info(show(program, elem), layout(program, elem))
+        self.layout_info(format!("{elem:?}"), layout(program, elem))
     }
 
     /// The element of a map: its key slot, then the value's.
     fn pair_info(&mut self, program: &Program, k: &Ty, v: &Ty) -> DataId {
         let mut lay = layout(program, k);
         lay.extend(layout(program, v));
-        self.layout_info(format!("({}, {})", show(program, k), show(program, v)), lay)
+        self.layout_info(format!("({k:?}, {v:?})"), lay)
     }
 
     /// Element layout for the runtime: slot size in bytes, then the byte offsets of heap pointers.
@@ -1333,7 +1335,7 @@ impl<'a, 'b> Gen<'a, 'b> {
 
     /// The generated `==` helper for an array or map type, declared on first use.
     fn eq_helper(&mut self, ty: &Ty) -> FuncRef {
-        let key = show(self.program, ty);
+        let key = format!("{ty:?}");
         let id = match self.be.eq_helpers.get(&key) {
             Some(id) => *id,
             None => {

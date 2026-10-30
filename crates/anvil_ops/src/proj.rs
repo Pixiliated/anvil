@@ -3,10 +3,11 @@
 
 use crate::golden::{self, Checked, Counts};
 use crate::project::Project;
-use crate::{diagnostics, load, Report, EXIT_FAILED, EXIT_OK};
+use crate::{diagnostics, load, loader, Report, EXIT_FAILED, EXIT_OK};
 use anvil_interp::Recorder;
 use anvil_record::{Record, Seen};
 use serde_json::{json, Value};
+use std::collections::HashSet;
 use std::path::Path;
 
 macro_rules! try_or_usage {
@@ -106,7 +107,7 @@ fn check_one(project: &Project, file: &str, native: bool, max_steps: Option<u64>
             }
         }
     };
-    match anvil_front::compile(&src) {
+    match anvil_front::compile_with(&src, &loader(&project.root)).1 {
         Ok(program) => golden::check_file(project, &src, program, native, max_steps),
         Err(d) => Checked {
             file: file.into(),
@@ -147,9 +148,9 @@ pub fn golden_approve(root: &Path, file: &str, max_steps: Option<u64>) -> Report
         Ok(s) => s,
         Err(r) => return r,
     };
-    let program = match anvil_front::compile(&src) {
-        Ok(p) => p,
-        Err(d) => return diagnostics(&src, &d),
+    let program = match anvil_front::compile_with(&src, &loader(&project.root)) {
+        (_, Ok(p)) => p,
+        (sources, Err(d)) => return diagnostics(&sources, &d),
     };
     if program.main.is_none() {
         return Report::usage(format!("{rel} has no main, so it has no output to approve"));
@@ -172,9 +173,24 @@ pub fn golden_approve(root: &Path, file: &str, max_steps: Option<u64>) -> Report
     ok(json, format!("approved {rel} ({change}):\n{}", out.to_text()))
 }
 
-/// One verify pass over a file: compile errors, then failing tests, then the golden, then the
-/// `untested` lint over what the tests and the golden-checked main ran.
-fn verify_file(project: &Project, file: &str, native: bool, max_steps: Option<u64>, seen: &mut Vec<Seen>) -> Value {
+/// What one file's runs covered, for the project-wide `untested` lint.
+struct Coverage {
+    file: String,
+    /// The file's own functions as (name, key, line:col, allowed); main is left to its golden.
+    own: Vec<(String, (String, usize), String, bool)>,
+    /// The key (declaring file, offset of the name) of every function that ran, imported ones too.
+    ran: HashSet<(String, usize)>,
+}
+
+/// One verify pass over a file: compile errors (in it or in a module it imports), then failing
+/// tests, then the golden. What ran is returned for the `untested` lint, which needs every file.
+fn verify_file(
+    project: &Project,
+    file: &str,
+    native: bool,
+    max_steps: Option<u64>,
+    seen: &mut Vec<Seen>,
+) -> (Value, Option<Coverage>) {
     let mut add = |check: &str, message: String, at: String| {
         seen.push(Seen { file: file.into(), check: check.into(), message, at });
     };
@@ -183,21 +199,24 @@ fn verify_file(project: &Project, file: &str, native: bool, max_steps: Option<u6
         Err(r) => {
             let e = r.json["error"].as_str().unwrap_or("").to_string();
             add("read", e.clone(), String::new());
-            return json!({ "file": file, "error": e });
+            return (json!({ "file": file, "error": e }), None);
         }
     };
-    let program = match anvil_front::compile(&src) {
-        Ok(p) => p,
-        Err(diags) => {
+    let program = match anvil_front::compile_with(&src, &loader(&project.root)) {
+        (_, Ok(p)) => p,
+        (sources, Err(diags)) => {
             for d in &diags {
-                let (l, c) = src.line_col(d.span.start);
-                add(d.code, d.message.clone(), format!("{l}:{c}"));
+                let at = &sources[d.file];
+                let (l, c) = at.line_col(d.span.start);
+                let place = if d.file == 0 { format!("{l}:{c}") } else { format!("{}:{l}:{c}", at.name) };
+                add(d.code, d.message.clone(), place);
             }
-            return json!({ "file": file, "errors": diags.len() });
+            return (json!({ "file": file, "errors": diags.len() }), None);
         }
     };
     let tests = program.tests.clone();
     let funcs = program.funcs.clone();
+    let modules = program.modules.clone();
     let program_main = program.main;
     let p2 = program.clone();
     let (results, mut ran) = anvil_interp::run_on_big_stack(move || {
@@ -224,38 +243,55 @@ fn verify_file(project: &Project, file: &str, native: bool, max_steps: Option<u6
     if let Some(c) = &g.counts {
         mark_ran(&mut ran, c);
     }
-    let mut untested = Vec::new();
     // main runs only under its golden, and a missing golden is already a finding.
     let main = g.status != "no_main";
-    for (i, (f, ran)) in funcs.iter().zip(&ran).enumerate() {
-        if main && program_main == Some(i) {
+    let key = |f: &anvil_front::ir::Func| (modules[f.module].clone(), f.span.start);
+    let mut own = Vec::new();
+    for (i, f) in funcs.iter().enumerate() {
+        if f.module != 0 || (main && program_main == Some(i)) {
             continue;
         }
         let (l, c) = src.line_col(f.span.start);
         let allowed = f.allows.iter().any(|(lint, _)| lint == "untested");
-        if !ran && !allowed {
-            untested.push(f.name.clone());
-            add(
-                "untested",
-                format!("`{}` never runs in a test or a golden-checked main; test it, or write `allow untested \"why\"` before it", f.name),
-                format!("{l}:{c}"),
-            );
-        } else if *ran && allowed {
-            add(
-                "allow",
-                format!(
-                    "`{}` runs in a test or a golden-checked main, so its `allow untested` is stale: remove it",
-                    f.name
+        own.push((f.name.clone(), key(f), format!("{l}:{c}"), allowed));
+    }
+    let ran = funcs.iter().zip(&ran).filter(|(_, r)| **r).map(|(f, _)| key(f)).collect();
+    let steps = g.counts.as_ref().map(|c| c.steps);
+    let json = json!({
+        "file": file, "errors": 0, "tests": tests.len(), "tests_failed": test_failures, "golden": g.status,
+        "steps": steps, "untested": [],
+    });
+    (json, Some(Coverage { file: file.to_string(), own, ran }))
+}
+
+/// The `untested` lint over the whole project: a function counts as tested when a test or a
+/// golden-checked main of any project file runs it, so a module is covered by its importers.
+fn untested(coverage: &[Coverage], files: &mut [Value], seen: &mut Vec<Seen>) {
+    let ran: HashSet<&(String, usize)> = coverage.iter().flat_map(|c| &c.ran).collect();
+    for c in coverage {
+        let mut names = Vec::new();
+        for (name, key, at, allowed) in &c.own {
+            let mut add = |check: &str, message: String| {
+                seen.push(Seen { file: c.file.clone(), check: check.into(), message, at: at.clone() });
+            };
+            match (ran.contains(key), allowed) {
+                (false, false) => {
+                    names.push(name.clone());
+                    add("untested", format!("`{name}` never runs in a test or a golden-checked main; test it, or write `allow untested \"why\"` before it"));
+                }
+                (true, true) => add(
+                    "allow",
+                    format!(
+                        "`{name}` runs in a test or a golden-checked main, so its `allow untested` is stale: remove it"
+                    ),
                 ),
-                format!("{l}:{c}"),
-            );
+                _ => {}
+            }
+        }
+        if let Some(v) = files.iter_mut().find(|v| v["file"] == c.file.as_str()) {
+            v["untested"] = json!(names);
         }
     }
-    let steps = g.counts.as_ref().map(|c| c.steps);
-    json!({
-        "file": file, "errors": 0, "tests": tests.len(), "tests_failed": test_failures, "golden": g.status,
-        "steps": steps, "untested": untested,
-    })
 }
 
 fn mark_ran(ran: &mut [bool], counts: &Counts) {
@@ -275,8 +311,14 @@ struct Verified {
 fn run_verify(root: &Path, native: bool, max_steps: Option<u64>) -> Result<Verified, String> {
     let project = Project::discover(root)?;
     let mut seen = Vec::new();
-    let files: Vec<Value> =
-        project.files.iter().map(|f| verify_file(&project, f, native, max_steps, &mut seen)).collect();
+    let mut coverage = Vec::new();
+    let mut files: Vec<Value> = Vec::new();
+    for f in &project.files {
+        let (v, c) = verify_file(&project, f, native, max_steps, &mut seen);
+        files.push(v);
+        coverage.extend(c);
+    }
+    untested(&coverage, &mut files, &mut seen);
     let mut record = Record::open(&project.root)?;
     let now = anvil_record::now_utc();
     let sync = record.sync(&seen, &now)?;

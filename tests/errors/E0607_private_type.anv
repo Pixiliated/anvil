@@ -1,0 +1,6 @@
+// expect: E0607
+import lib.leaky.{make};
+
+fn main() -> i64 {
+    return make().code;
+}

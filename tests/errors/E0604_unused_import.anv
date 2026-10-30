@@ -1,0 +1,7 @@
+// expect: E0604
+// resolve: mechanical
+import lib.vis.{loud, shout};
+
+fn main() uses io {
+    print(loud("hey"));
+}

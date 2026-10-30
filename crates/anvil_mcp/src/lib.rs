@@ -21,7 +21,9 @@ pub const DEFAULT_MAX_STEPS: u64 = 100_000_000;
 const INSTRUCTIONS: &str = "Anvil: a compiled language designed for agents. `spec` returns the whole \
 language; read it once before writing Anvil. Write a .anv file, then `check` it: every error has a \
 stable code, an exact range and fixes marked mechanical (safe) or changes_meaning (decide first). \
-`fix` applies every mechanical fix and rechecks until none is left. A file must be in canonical \
+`fix` applies every mechanical fix and rechecks until none is left. A program may span files: \
+`import lib.shapes.{area, Shape};` reads lib/shapes.anv next to the importing file, and only pub \
+items can be imported; errors in a module carry that module's file. A file must be in canonical \
 layout (E0110 otherwise; its fix is the formatted file); `fmt` formats a file or the whole project, \
 and keeps comments. `outline` lists a file's items \
 and signatures without reading it all; `type_at` gives the type and declaration at a line and \

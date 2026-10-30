@@ -1,0 +1,6 @@
+// expect: E0602
+import lib.vis.{shoot};
+
+fn main() uses io {
+    print(shoot("hey"));
+}

@@ -1,4 +1,4 @@
-# Anvil language specification (v0.7)
+# Anvil language specification (v0.8)
 
 Anvil is a small, compiled, general-purpose language designed to be written mostly by AI agents
 and read by humans. Its rules aim at three things: one obvious way to write each thing, code
@@ -10,9 +10,11 @@ all of it in context.
 
 ## Files and items
 
-A program is one `.anv` file. Top-level items, in any order:
+A program is one `.anv` file, its root, and the modules it imports (see Modules). Imports
+come first; the other top-level items follow in any order:
 
 ```
+import shapes.{area, Shape};  // names from shapes.anv next to this file
 unit m;                       // base unit
 unit N = kg*m/s^2;            // unit alias
 struct Body { mass: f64[kg], pos: f64[m], }
@@ -23,9 +25,49 @@ allow untested "reason"       // before a fn: switches one lint off for it (see 
 ```
 
 Comments start with `//` and run to the end of the line. Identifiers are ASCII letters, digits
-and `_`, not starting with a digit. Keywords: `allow fn let var if else while for in match
-return break continue struct enum unit test requires ensures uses true false result`. The names
+and `_`, not starting with a digit. Keywords: `allow fn import let pub var if else while for in
+match return break continue struct enum unit test requires ensures uses true false result`. The names
 `Some`, `None`, `Ok` and `Err` are reserved for the built-in enums.
+
+## Modules
+
+Every file is a module, and a file uses another's items only by importing them by name:
+
+```
+// main.anv
+import lib.geometry.{Shape, area};
+
+fn main() uses io {
+    print("{area(Shape.Square(2.0))}");
+}
+
+// lib/geometry.anv
+pub enum Shape {
+    Square(side: f64),
+}
+
+pub fn area(s: Shape) -> f64 {
+    var out: f64 = 0.0;
+    match s {
+        Square(side) => { out = side * side; }
+    }
+    return out;
+}
+```
+
+- `import a.b.{x, y};` reads `a/b.anv` **relative to the importing file's directory**, so every
+  file can also be checked, tested or run on its own. Names are listed; there are no wildcard
+  imports. A module is read once however many files import it.
+- Only items marked `pub` (`pub fn`, `pub struct`, `pub enum`, `pub unit`) can be imported. A
+  pub struct shows all its fields, a pub enum all its variants. A pub item cannot use a type its
+  module keeps private (E0607).
+- Every imported name must be used (E0604, with a mechanical fix that removes it), and it cannot
+  also be declared in the importing file. Imports form a tree: cycles are an error (E0605).
+- Only the root file may define `main` (E0606). A module's tests run when it is the root:
+  `anvil test lib/geometry.anv`.
+- Private items of different modules may share a name. Errors and panics inside a module name
+  its file. Functions from a module show as `lib.geometry.area` in traces and profiles.
+- A base unit is the same unit in every module that declares or imports its name.
 
 ## Layout
 
@@ -370,7 +412,8 @@ anvil spec                             print this document
 Every command takes `--json`. Every error has a stable code (`E0301`), an exact range and,
 where one exists, fixes. A fix is `mechanical` (safe to apply without thought) or
 `changes_meaning` (compiles, but may hide the real bug: understand the intent first);
-`anvil fix` applies only mechanical ones (including the layout, last). A syntax error stops
+`anvil fix` applies only mechanical ones (including the layout, last), and only in the file it
+was given; errors in imported modules are reported with their own file. A syntax error stops
 checking, but the parser goes on at the next item (`fn`, `struct`, `enum`, `unit`, `test`,
 `allow`), so one run reports the first syntax error of every item. `type-at` and `refs` answer even for a file with
 type errors. `--max-steps` stops a run after that many statements and loop iterations.

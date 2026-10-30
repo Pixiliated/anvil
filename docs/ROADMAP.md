@@ -54,9 +54,9 @@ green and the interpreter and native backend agreeing on every program in `tests
 - [x] Maps with deterministic iteration order
 - [x] `==` for arrays, structs and enums whose parts all have it
 
-## M7: Modules
-- [ ] Multiple files, explicit imports by name, no wildcard imports
-- [ ] Visibility (`pub`), one module per file
+## M7: Modules (v0.8)
+- [x] Multiple files, explicit imports by name, no wildcard imports
+- [x] Visibility (`pub`), one module per file
 
 ## M8: Generics
 - [ ] Generic functions and structs with explicit, use-site-visible constraints

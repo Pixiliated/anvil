@@ -1,0 +1,6 @@
+// expect: E0606
+import lib.with_main.{helper};
+
+fn main() -> i64 {
+    return helper();
+}

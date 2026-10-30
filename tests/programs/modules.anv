@@ -1,0 +1,23 @@
+// A program of three files. Names come in by import only, and same-named private items stay apart.
+import lib.geometry.{Shape, area, far_corner, perimeter, side};
+import lib.units.{m, s, speed};
+
+struct Point {
+    x: i64,
+    y: i64,
+}
+
+fn twice(x: i64) -> i64 {
+    return x * 2;
+}
+
+fn main() uses io {
+    let shapes: [Shape] = [Shape.Circle(1.0[m]), Shape.Rect(width: 2.0[m], height: 3.0[m])];
+    for sh in shapes {
+        print("area {area(sh)}, perimeter {perimeter(sh)}, corner {far_corner(sh)}, side {side(s: sh, i: 0)}");
+    }
+    print("{shapes[0] == Shape.Circle(1.0[m])} {speed(d: 100.0[m], t: 9.58[s])}");
+    let here: Option[Point] = Some(Point { x: twice(2), y: 1 });
+    let want: Option[Point] = Some(Point { x: 4, y: 1 });
+    print("{here == want} {twice(5)}");
+}

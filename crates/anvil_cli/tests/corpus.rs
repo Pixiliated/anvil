@@ -43,7 +43,13 @@ fn header<'a>(text: &'a str, key: &str) -> Option<&'a str> {
 fn every_program_matches_its_golden_on_both_backends() {
     let out = anvil(&["golden", "check", "--native", "--json"]);
     let v = json_of(&out);
-    let bad: Vec<_> = v["results"].as_array().unwrap().iter().filter(|r| r["status"] != "ok").collect();
+    // Modules in tests/programs/lib have no main; every other file is a program with a golden.
+    let bad: Vec<_> = v["results"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|r| r["status"] != "ok" && !(r["status"] == "no_main" && r["file"].as_str().unwrap().contains("/lib/")))
+        .collect();
     assert!(bad.is_empty() && out.status.success(), "{bad:#?}");
     // Every program of the corpus is in the project and has a main.
     assert_eq!(v["checked"].as_u64().unwrap() as usize, files("tests/programs").len() + files("examples").len());
@@ -120,7 +126,12 @@ fn apply_mechanical(text: &str, json: &serde_json::Value) -> String {
 #[test]
 fn errors_have_expected_codes_and_fixes_resolve() {
     let tmp = std::env::temp_dir().join(format!("anvil_fix_{}", std::process::id()));
-    std::fs::create_dir_all(&tmp).unwrap();
+    std::fs::create_dir_all(tmp.join("lib")).unwrap();
+    // The modules the error files import, so fixed copies still find them.
+    for e in std::fs::read_dir(root().join("tests/errors/lib")).unwrap() {
+        let e = e.unwrap();
+        std::fs::copy(e.path(), tmp.join("lib").join(e.file_name())).unwrap();
+    }
     let mut problems = Vec::new();
     for rel in files("tests/errors") {
         let text = std::fs::read_to_string(root().join(&rel)).unwrap();
@@ -769,4 +780,49 @@ fn syntax_errors_are_reported_one_per_item() {
         .map(|d| (d["code"].as_str().unwrap(), d["range"]["start"]["line"].as_u64().unwrap()))
         .collect();
     assert_eq!(found, [("E0100", 2), ("E0100", 7), ("E0100", 10)], "{v}");
+}
+
+#[test]
+fn modules_import_by_name_and_share_coverage() {
+    let p = Scratch::new("modules");
+    std::fs::create_dir_all(p.0.join("src/text")).unwrap();
+    p.write("anvil.toml", "[project]\nname = \"m\"\nfiles = [\"src/*.anv\", \"src/text/*.anv\"]\n");
+    p.write(
+        "src/text/words.anv",
+        "pub fn shout(s: str) -> str {\n    return s + \"!\";\n}\n\npub fn whisper(s: str) -> str {\n    return s;\n}\n\n\
+         test \"shout\" {\n    assert(shout(\"a\") == \"a!\");\n}\n",
+    );
+    p.write("src/main.anv", "import text.words.{shout};\n\nfn main() uses io {\n    print(shout(\"hey\"));\n}\n");
+    let run = p.anvil(&["run", "src/main.anv"]);
+    assert_eq!(String::from_utf8_lossy(&run.stdout), "hey!\n");
+    // A module is also a file of its own: its tests run when it is the root.
+    assert!(p.anvil(&["test", "src/text/words.anv"]).status.success());
+    let outline = p.json(&["outline", "src/main.anv"]);
+    assert_eq!(outline["items"][0]["file"], "src/text/words.anv", "{outline}");
+    let trace = p.json(&["trace", "src/main.anv", "--only", "text.words.shout"]);
+    assert_eq!(trace["events"][0]["call"], "text.words.shout", "{trace}");
+
+    // Coverage counts every project file's runs: shout runs under main's golden, whisper nowhere.
+    assert!(p.anvil(&["golden", "approve", "src/main.anv"]).status.success());
+    let v = p.json(&["verify"]);
+    let open: Vec<(&str, &str)> = v["open"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|f| (f["check"].as_str().unwrap(), f["file"].as_str().unwrap()))
+        .collect();
+    assert_eq!(open, [("untested", "src/text/words.anv")], "{v}");
+    assert!(v["open"][0]["message"].as_str().unwrap().contains("`whisper`"), "{v}");
+
+    // An error inside a module names the module's file, and fix leaves other files alone.
+    p.write("src/text/words.anv", "pub fn shout(s: str) -> str {\n    return s + 1;\n}\n");
+    let v = p.json(&["check", "src/main.anv"]);
+    assert_eq!(
+        (v["diagnostics"][0]["code"].as_str(), v["diagnostics"][0]["file"].as_str()),
+        (Some("E0302"), Some("src/text/words.anv")),
+        "{v}"
+    );
+    let before = std::fs::read_to_string(p.0.join("src/text/words.anv")).unwrap();
+    assert_eq!(p.anvil(&["fix", "src/main.anv"]).status.code(), Some(1));
+    assert_eq!(std::fs::read_to_string(p.0.join("src/text/words.anv")).unwrap(), before);
 }

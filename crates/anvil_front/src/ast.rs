@@ -15,6 +15,7 @@ pub struct File {
 
 #[derive(Clone, Debug)]
 pub enum Item {
+    Import(ImportDecl),
     Unit(UnitDecl),
     Struct(StructDecl),
     Enum(EnumDecl),
@@ -22,9 +23,29 @@ pub enum Item {
     Test(TestDecl),
 }
 
+/// `import shapes.circle.{area, Circle};`: names from the module in `shapes/circle.anv`, a path
+/// relative to the directory of the importing file.
+#[derive(Clone, Debug)]
+pub struct ImportDecl {
+    pub path: Vec<Ident>,
+    pub names: Vec<Ident>,
+    pub span: Span,
+}
+
+impl ImportDecl {
+    /// `shapes.circle`
+    pub fn module(&self) -> String {
+        self.path.iter().map(|p| p.name.as_str()).collect::<Vec<_>>().join(".")
+    }
+    pub fn path_span(&self) -> Span {
+        self.path[0].span.to(self.path.last().unwrap().span)
+    }
+}
+
 /// `unit m` declares a base unit; `unit N = kg*m/s^2` an alias.
 #[derive(Clone, Debug)]
 pub struct UnitDecl {
+    pub public: bool,
     pub name: Ident,
     pub def: Option<UnitExpr>,
     pub span: Span,
@@ -53,6 +74,7 @@ pub enum TypeKind {
 
 #[derive(Clone, Debug)]
 pub struct StructDecl {
+    pub public: bool,
     pub name: Ident,
     pub fields: Vec<(Ident, TypeExpr)>,
     pub span: Span,
@@ -61,6 +83,7 @@ pub struct StructDecl {
 /// `enum Shape { Circle(radius: f64[m]), Empty }`
 #[derive(Clone, Debug)]
 pub struct EnumDecl {
+    pub public: bool,
     pub name: Ident,
     pub variants: Vec<VariantDecl>,
     pub span: Span,
@@ -81,6 +104,7 @@ pub struct Param {
 
 #[derive(Clone, Debug)]
 pub struct FnDecl {
+    pub public: bool,
     pub name: Ident,
     pub params: Vec<Param>,
     pub ret: Option<TypeExpr>,

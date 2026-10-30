@@ -1,0 +1,6 @@
+// expect: E0601
+import lib.nowhere.{thing};
+
+fn main() -> i64 {
+    return thing();
+}

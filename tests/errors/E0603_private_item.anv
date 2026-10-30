@@ -1,0 +1,6 @@
+// expect: E0603
+import lib.vis.{secret};
+
+fn main() -> i64 {
+    return secret();
+}

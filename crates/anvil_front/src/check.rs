@@ -6,6 +6,7 @@ use crate::diag::{self, Diagnostic, Edit, FixKind};
 use crate::ir::*;
 use crate::span::{SourceFile, Span};
 use crate::units::Unit;
+use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 
 const BUILTINS: &[&str] = &["print", "assert", "sqrt", "abs", "to_f64", "to_i64"];
@@ -23,6 +24,28 @@ struct FuncSig {
     ret: Ty,
     uses_io: bool,
     span: Span,
+    /// The module that declares it; `span` is in that module's file.
+    module: usize,
+}
+
+/// One file of a program: its source, its syntax tree and, for each of its imports in order,
+/// the index of the module it names. Module 0 is the program's root file.
+pub struct Module<'a> {
+    pub src: &'a SourceFile,
+    pub file: &'a ast::File,
+    /// `geometry` or `shapes.circle`; empty for the root.
+    pub name: String,
+    pub imports: Vec<usize>,
+}
+
+/// What a checked module declares itself (never what it imports), and which of it is pub.
+#[derive(Clone, Default)]
+struct Exports {
+    funcs: HashMap<String, FuncId>,
+    structs: HashMap<String, StructId>,
+    enums: HashMap<String, EnumId>,
+    units: HashMap<String, Unit>,
+    public: HashSet<String>,
 }
 
 /// A declared name: functions, types, fields, variants, units, parameters and locals.
@@ -59,6 +82,19 @@ pub struct Analysis {
 
 pub struct Checker<'a> {
     src: &'a SourceFile,
+    /// The module being checked; only the root's (0) facts are kept.
+    module: usize,
+    /// Filled in as each module is checked, dependencies first.
+    exports: Vec<Option<Exports>>,
+    /// Names the current module imports: (where the import names it, which import item).
+    imported: HashMap<String, (Span, usize)>,
+    /// Imported names the current module has used.
+    touched: RefCell<HashSet<String>>,
+    /// Names whose import failed; their uses are not reported again.
+    failed_imports: HashSet<String>,
+    /// (module, pub) of each struct; of each enum, None for Option/Result instantiations.
+    struct_owner: Vec<(usize, bool)>,
+    enum_owner: Vec<Option<(usize, bool)>>,
     diags: Vec<Diagnostic>,
     facts: Facts,
     /// Declaration spans of types, struct fields, enum variants and their fields, and units.
@@ -72,7 +108,8 @@ pub struct Checker<'a> {
     struct_index: HashMap<String, StructId>,
     enums: Vec<EnumDef>,
     enum_index: HashMap<String, EnumId>,
-    /// Instantiations of Option/Result, by display name.
+    /// Instantiations of Option/Result, by their type arguments (names alone could clash
+    /// between modules).
     builtin_enums: HashMap<String, EnumId>,
     sigs: Vec<FuncSig>,
     func_index: HashMap<String, FuncId>,
@@ -115,9 +152,24 @@ pub fn check(src: &SourceFile, file: &ast::File) -> Result<Program, Vec<Diagnost
     }
 }
 
+/// A program of one file. Its imports find no module (E0601); `analyze_modules` is the way to
+/// check a file with imports.
 pub fn analyze(src: &SourceFile, file: &ast::File) -> Analysis {
+    analyze_modules(&[Module { src, file, name: String::new(), imports: Vec::new() }], &[0])
+}
+
+/// Checks the modules of a program in `order` (each after the modules it imports, the root
+/// last) and joins them into one program; diagnostics carry the index of their module's file.
+pub fn analyze_modules(modules: &[Module], order: &[usize]) -> Analysis {
     let mut c = Checker {
-        src,
+        src: modules[0].src,
+        module: 0,
+        exports: vec![None; modules.len()],
+        imported: HashMap::new(),
+        touched: RefCell::new(HashSet::new()),
+        failed_imports: HashSet::new(),
+        struct_owner: Vec::new(),
+        enum_owner: Vec::new(),
         diags: Vec::new(),
         facts: Facts::default(),
         type_spans: HashMap::new(),
@@ -134,14 +186,36 @@ pub fn analyze(src: &SourceFile, file: &ast::File) -> Analysis {
         sigs: Vec::new(),
         func_index: HashMap::new(),
     };
-    let program = c.program(file);
-    // Layout last, and only for an otherwise clean file: a broken file is fixed first.
-    if c.diags.is_empty() {
-        if let Some(d) = crate::fmt::check_layout(src, file) {
-            c.diags.push(d);
+    let mut funcs = Vec::new();
+    let mut tests = Vec::new();
+    let mut main = None;
+    for &m in order {
+        c.begin_module(m, modules[m].src);
+        let (fs, ts, mn) = c.module(&modules[m]);
+        funcs.extend(fs);
+        if m == 0 {
+            tests = ts;
+            main = mn;
         }
     }
-    c.diags.sort_by_key(|d| (d.span.start, d.code));
+    // Layout last, and only for an otherwise clean program: a broken file is fixed first.
+    if c.diags.is_empty() {
+        for (m, module) in modules.iter().enumerate() {
+            if let Some(mut d) = crate::fmt::check_layout(module.src, module.file) {
+                d.file = m;
+                c.diags.push(d);
+            }
+        }
+    }
+    c.diags.sort_by_key(|d| (d.file, d.span.start, d.code));
+    let program = Program {
+        structs: c.structs.clone(),
+        enums: c.enums.clone(),
+        funcs,
+        tests,
+        main,
+        modules: modules.iter().map(|m| m.src.name.clone()).collect(),
+    };
     let program = c.diags.is_empty().then_some(program);
     Analysis { program, diags: c.diags, facts: c.facts }
 }
@@ -183,17 +257,27 @@ pub fn closest<'b>(name: &str, candidates: impl Iterator<Item = &'b String>) -> 
 }
 
 impl<'a> Checker<'a> {
-    fn err(&mut self, d: Diagnostic) {
+    fn err(&mut self, mut d: Diagnostic) {
+        d.file = self.module;
         self.diags.push(d);
     }
 
     fn def(&mut self, span: Span, name: impl Into<String>, kind: &'static str, detail: impl Into<String>) {
-        self.facts.defs.push(Def { span, name: name.into(), kind, detail: detail.into() });
+        if self.module == 0 {
+            self.facts.defs.push(Def { span, name: name.into(), kind, detail: detail.into() });
+        }
     }
 
     fn note_use(&mut self, span: Span, def: Option<Span>) {
-        if let Some(def) = def {
+        if let (Some(def), 0) = (def, self.module) {
             self.facts.uses.push((span, def));
+        }
+    }
+
+    /// Records that the current module used `name`, for the unused-import check.
+    fn touch(&self, name: &str) {
+        if self.imported.contains_key(name) {
+            self.touched.borrow_mut().insert(name.to_string());
         }
     }
 
@@ -211,14 +295,33 @@ impl<'a> Checker<'a> {
 
     // ---------------- declarations ----------------
 
-    fn program(&mut self, file: &ast::File) -> Program {
+    /// Starts checking module `m`: its own names, nothing imported yet.
+    fn begin_module(&mut self, m: usize, src: &'a SourceFile) {
+        self.module = m;
+        self.src = src;
+        self.func_index.clear();
+        self.struct_index.clear();
+        self.enum_index.clear();
+        self.units.clear();
+        self.type_spans.clear();
+        self.unit_spans.clear();
+        self.imported.clear();
+        self.touched.borrow_mut().clear();
+        self.failed_imports.clear();
+    }
+
+    /// Checks one module: its imports, declarations and function bodies (and, for the root,
+    /// its tests and main). Returns its functions in FuncId order.
+    fn module(&mut self, me: &Module) -> (Vec<Func>, Vec<Test>, Option<FuncId>) {
+        let mut import_decls = Vec::new();
         let mut unit_decls = Vec::new();
         let mut struct_decls = Vec::new();
         let mut enum_decls = Vec::new();
         let mut fn_decls = Vec::new();
         let mut test_decls = Vec::new();
-        for item in &file.items {
+        for item in &me.file.items {
             match item {
+                ast::Item::Import(i) => import_decls.push(i),
                 ast::Item::Unit(u) => unit_decls.push(u),
                 ast::Item::Struct(s) => struct_decls.push(s),
                 ast::Item::Enum(e) => enum_decls.push(e),
@@ -226,38 +329,228 @@ impl<'a> Checker<'a> {
                 ast::Item::Test(t) => test_decls.push(t),
             }
         }
+        for (k, imp) in import_decls.iter().enumerate() {
+            self.import(imp, k, me.imports.get(k).copied());
+        }
         self.declare_units(&unit_decls);
         self.declare_types(&struct_decls, &enum_decls);
+        let sig_base = self.sigs.len();
         self.declare_fns(&fn_decls);
+        self.check_public(&struct_decls, &enum_decls, &fn_decls, sig_base);
 
         let mut funcs = Vec::new();
         for f in &fn_decls {
-            funcs.push(self.func(f));
+            let mut func = self.func(f);
+            if !me.name.is_empty() {
+                func.name = format!("{}.{}", me.name, func.name);
+            }
+            funcs.push(func);
         }
-        let mut seen_tests: HashMap<String, Span> = HashMap::new();
         let mut tests = Vec::new();
-        for t in &test_decls {
-            if let Some(prev) = seen_tests.insert(t.name.clone(), t.name_span) {
+        let mut main = None;
+        if self.module == 0 {
+            let mut seen_tests: HashMap<String, Span> = HashMap::new();
+            for t in &test_decls {
+                if let Some(prev) = seen_tests.insert(t.name.clone(), t.name_span) {
+                    self.err(
+                        Diagnostic::new("E0201", t.name_span, format!("test \"{}\" is declared twice", t.name))
+                            .note("first declared here", Some(prev)),
+                    );
+                }
+                tests.push(self.test(t));
+            }
+            main = self.func_index.get("main").copied().filter(|id| self.sigs[*id].module == 0);
+            if let Some(id) = main {
+                let sig = &self.sigs[id];
+                let ok = sig.params.is_empty() && matches!(sig.ret, Ty::Void | Ty::I64 | Ty::Error);
+                if !ok {
+                    let span = sig.span;
+                    self.err(Diagnostic::new("E0350", span, "main takes no parameters and returns nothing or i64"));
+                }
+            }
+        } else if let Some(f) = fn_decls.iter().find(|f| f.name.name == "main") {
+            self.err(
+                Diagnostic::new("E0606", f.name.span, format!("module `{}` defines main", me.name))
+                    .note("only the program's root file defines main; this file is imported", None),
+            );
+        }
+        self.unused_imports(&import_decls);
+
+        let mut ex = Exports::default();
+        let own = |name: &String| !self.imported.contains_key(name);
+        ex.funcs = self.func_index.iter().filter(|(n, _)| own(n)).map(|(n, v)| (n.clone(), *v)).collect();
+        ex.structs = self.struct_index.iter().filter(|(n, _)| own(n)).map(|(n, v)| (n.clone(), *v)).collect();
+        ex.enums = self.enum_index.iter().filter(|(n, _)| own(n)).map(|(n, v)| (n.clone(), *v)).collect();
+        ex.units = self.units.iter().filter(|(n, _)| own(n)).map(|(n, v)| (n.clone(), v.clone())).collect();
+        for item in &me.file.items {
+            let name = match item {
+                ast::Item::Unit(d) if d.public => &d.name.name,
+                ast::Item::Struct(d) if d.public => &d.name.name,
+                ast::Item::Enum(d) if d.public => &d.name.name,
+                ast::Item::Fn(d) if d.public => &d.name.name,
+                _ => continue,
+            };
+            ex.public.insert(name.clone());
+        }
+        self.exports[self.module] = Some(ex);
+        (funcs, tests, main)
+    }
+
+    /// Brings the names of one import into the current module.
+    fn import(&mut self, imp: &ast::ImportDecl, k: usize, target: Option<usize>) {
+        let module = imp.module();
+        let Some(ex) = target.and_then(|t| self.exports[t].clone()) else {
+            self.failed_imports.extend(imp.names.iter().map(|n| n.name.clone()));
+            if target.is_none() {
+                self.err(Diagnostic::new("E0601", imp.path_span(), format!("cannot find module `{module}`")));
+            }
+            return;
+        };
+        for n in &imp.names {
+            let name = &n.name;
+            if let Some((prev, _)) = self.imported.get(name) {
+                let prev = *prev;
                 self.err(
-                    Diagnostic::new("E0201", t.name_span, format!("test \"{}\" is declared twice", t.name))
-                        .note("first declared here", Some(prev)),
+                    Diagnostic::new("E0201", n.span, format!("`{name}` is imported twice"))
+                        .note("first imported here", Some(prev)),
+                );
+                continue;
+            }
+            let mut found = false;
+            if let Some(id) = ex.funcs.get(name) {
+                self.func_index.insert(name.clone(), *id);
+                found = true;
+            }
+            if let Some(id) = ex.structs.get(name) {
+                self.struct_index.insert(name.clone(), *id);
+                found = true;
+            }
+            if let Some(id) = ex.enums.get(name) {
+                self.enum_index.insert(name.clone(), *id);
+                found = true;
+            }
+            if let Some(u) = ex.units.get(name) {
+                self.units.insert(name.clone(), u.clone());
+                found = true;
+            }
+            if !found {
+                self.failed_imports.insert(name.clone());
+                let names: Vec<String> = ex.public.iter().cloned().collect();
+                let mut d = Diagnostic::new("E0602", n.span, format!("module `{module}` has no item `{name}`"));
+                if let Some(s) = closest(name, names.iter()) {
+                    d = d.fix1(FixKind::ChangesMeaning, format!("did you mean `{s}`?"), n.span, s);
+                }
+                self.err(d);
+                continue;
+            }
+            if !ex.public.contains(name) {
+                self.err(
+                    Diagnostic::new("E0603", n.span, format!("`{name}` is private to module `{module}`"))
+                        .note(format!("mark it pub in module `{module}` to import it"), None),
                 );
             }
-            tests.push(self.test(t));
+            self.imported.insert(name.clone(), (n.span, k));
         }
-        let main = self.func_index.get("main").copied();
-        if let Some(id) = main {
-            let sig = &self.sigs[id];
-            let ok = sig.params.is_empty() && matches!(sig.ret, Ty::Void | Ty::I64 | Ty::Error);
-            if !ok {
-                let span = sig.span;
-                self.err(Diagnostic::new("E0350", span, "main takes no parameters and returns nothing or i64"));
+    }
+
+    /// E0604 for each imported name the module never used, with its removal as the fix.
+    fn unused_imports(&mut self, imports: &[&ast::ImportDecl]) {
+        let touched = self.touched.borrow().clone();
+        for (k, imp) in imports.iter().enumerate() {
+            for (i, n) in imp.names.iter().enumerate() {
+                if self.imported.get(&n.name).map(|(_, item)| *item) != Some(k) || touched.contains(&n.name) {
+                    continue;
+                }
+                let cut = if imp.names.len() == 1 {
+                    // The whole import, with its line.
+                    let after = &self.src.text[imp.span.end..];
+                    let skip = after.len() - after.trim_start_matches([' ', '\t']).len();
+                    let end = imp.span.end + skip + usize::from(after[skip..].starts_with('\n'));
+                    Span::new(imp.span.start, end)
+                } else if i + 1 < imp.names.len() {
+                    Span::new(n.span.start, imp.names[i + 1].span.start)
+                } else {
+                    Span::new(imp.names[i - 1].span.end, n.span.end)
+                };
+                self.err(Diagnostic::new("E0604", n.span, format!("`{}` is imported but never used", n.name)).fix1(
+                    FixKind::Mechanical,
+                    "remove it from the import",
+                    cut,
+                    "",
+                ));
             }
         }
-        Program { structs: self.structs.clone(), enums: self.enums.clone(), funcs, tests, main }
+    }
+
+    /// E0607: a pub item may not show a private type of its module, or importers could hold
+    /// values of a type they cannot name.
+    fn check_public(
+        &mut self,
+        structs: &[&ast::StructDecl],
+        enums: &[&ast::EnumDecl],
+        fns: &[&ast::FnDecl],
+        sig_base: usize,
+    ) {
+        let mut problems = Vec::new();
+        for d in structs.iter().filter(|d| d.public) {
+            if let Some(&id) = self.struct_index.get(&d.name.name) {
+                for (_, t) in &self.structs[id].fields {
+                    problems.extend(self.private_type(t).map(|p| (d.name.span, d.name.name.clone(), p)));
+                }
+            }
+        }
+        for d in enums.iter().filter(|d| d.public) {
+            if let Some(&id) = self.enum_index.get(&d.name.name) {
+                for v in &self.enums[id].variants {
+                    for (_, t) in &v.fields {
+                        problems.extend(self.private_type(t).map(|p| (d.name.span, d.name.name.clone(), p)));
+                    }
+                }
+            }
+        }
+        for (i, d) in fns.iter().enumerate().filter(|(_, d)| d.public) {
+            let sig = &self.sigs[sig_base + i];
+            for t in sig.params.iter().map(|(_, t)| t).chain([&sig.ret]) {
+                problems.extend(self.private_type(t).map(|p| (d.name.span, d.name.name.clone(), p)));
+            }
+        }
+        let mut seen = HashSet::new();
+        for (span, item, ty) in problems {
+            if seen.insert((item.clone(), ty.clone())) {
+                self.err(
+                    Diagnostic::new("E0607", span, format!("pub `{item}` uses the private type `{ty}`"))
+                        .note(format!("mark `{ty}` pub too"), None),
+                );
+            }
+        }
+    }
+
+    /// The first type in `t` that this module declares without pub.
+    fn private_type(&self, t: &Ty) -> Option<String> {
+        match t {
+            Ty::Struct(id) if self.struct_owner[*id] == (self.module, false) => Some(self.structs[*id].name.clone()),
+            Ty::Enum(id) => match self.enum_owner[*id] {
+                Some((m, false)) if m == self.module => Some(self.enums[*id].name.clone()),
+                Some(_) => None,
+                None => self.enums[*id].variants.iter().flat_map(|v| &v.fields).find_map(|(_, t)| self.private_type(t)),
+            },
+            Ty::Array(e) => self.private_type(e),
+            Ty::Map(_, v) => self.private_type(v),
+            _ => None,
+        }
     }
 
     fn check_new_name(&mut self, name: &ast::Ident, what: &str, seen: &mut HashMap<String, Span>) -> bool {
+        if matches!(what, "unit" | "type" | "function") {
+            if let Some((prev, _)) = self.imported.get(&name.name) {
+                let prev = *prev;
+                self.err(
+                    Diagnostic::new("E0201", name.span, format!("{what} `{}` is also imported", name.name))
+                        .note("imported here", Some(prev)),
+                );
+                return false;
+            }
+        }
         if let Some(prev) = seen.get(&name.name) {
             let prev = *prev;
             self.err(
@@ -328,11 +621,15 @@ impl<'a> Checker<'a> {
     }
 
     fn lookup_unit(&mut self, name: &ast::Ident) -> Option<Unit> {
+        self.touch(&name.name);
         if let Some(u) = self.units.get(&name.name) {
             let u = u.clone();
             let def = self.unit_spans.get(&name.name).copied();
             self.note_use(name.span, def);
             return Some(u);
+        }
+        if self.failed_imports.contains(&name.name) {
+            return None;
         }
         let mut d = Diagnostic::new("E0200", name.span, format!("unknown unit `{}`", name.name));
         if let Some(s) = closest(&name.name, self.units.keys()) {
@@ -411,6 +708,7 @@ impl<'a> Checker<'a> {
                 Some(u) => self.unit_expr(u).map(Ty::F64).unwrap_or(Ty::Error),
             },
             _ => {
+                self.touch(n);
                 if let Some(id) = self.struct_index.get(n).copied() {
                     let def = self.type_spans.get(n).copied();
                     self.note_use(name.span, def);
@@ -424,6 +722,9 @@ impl<'a> Checker<'a> {
                 let mut cands: Vec<String> = TYPE_NAMES.iter().map(|s| s.to_string()).collect();
                 cands.extend(self.struct_index.keys().cloned());
                 cands.extend(self.enum_index.keys().cloned());
+                if self.failed_imports.contains(n) {
+                    return Ty::Error;
+                }
                 let mut d = Diagnostic::new("E0307", name.span, format!("unknown type `{n}`"));
                 if let Some(s) = closest(n, cands.iter()) {
                     d = d.fix1(FixKind::ChangesMeaning, format!("did you mean `{s}`?"), name.span, s);
@@ -447,38 +748,41 @@ impl<'a> Checker<'a> {
         false
     }
 
-    fn builtin_enum(&mut self, name: String, variants: Vec<VariantDef>) -> Ty {
-        if let Some(id) = self.builtin_enums.get(&name) {
+    fn builtin_enum(&mut self, key: String, name: String, variants: Vec<VariantDef>) -> Ty {
+        if let Some(id) = self.builtin_enums.get(&key) {
             return Ty::Enum(*id);
         }
         let id = self.enums.len();
-        self.enums.push(EnumDef { name: name.clone(), variants });
-        self.builtin_enums.insert(name, id);
+        self.enums.push(EnumDef { name, variants });
+        self.enum_owner.push(None);
+        self.builtin_enums.insert(key, id);
         Ty::Enum(id)
     }
 
     fn option_of(&mut self, t: Ty) -> Ty {
+        let key = format!("Option[{t:?}]");
         let name = format!("Option[{}]", self.show(&t));
         let variants = vec![
             VariantDef { name: "Some".into(), fields: vec![("value".into(), t)] },
             VariantDef { name: "None".into(), fields: Vec::new() },
         ];
-        self.builtin_enum(name, variants)
+        self.builtin_enum(key, name, variants)
     }
 
     fn result_of(&mut self, t: Ty, e: Ty) -> Ty {
+        let key = format!("Result[{t:?}, {e:?}]");
         let name = format!("Result[{}, {}]", self.show(&t), self.show(&e));
         let variants = vec![
             VariantDef { name: "Ok".into(), fields: vec![("value".into(), t)] },
             VariantDef { name: "Err".into(), fields: vec![("error".into(), e)] },
         ];
-        self.builtin_enum(name, variants)
+        self.builtin_enum(key, name, variants)
     }
 
     /// "Option" or "Result" for instantiations of the built-in enums.
     fn builtin_kind(&self, id: EnumId) -> Option<&'static str> {
         let name = &self.enums[id].name;
-        if !self.builtin_enums.contains_key(name) {
+        if self.enum_owner[id].is_some() {
             None
         } else if name.starts_with("Option[") {
             Some("Option")
@@ -498,9 +802,10 @@ impl<'a> Checker<'a> {
             if self.check_new_name(&d.name, "type", &mut seen) {
                 self.type_spans.insert(d.name.name.clone(), d.name.span);
                 self.def(d.name.span, d.name.name.clone(), "struct", format!("struct {}", d.name.name));
+                kept.push((self.structs.len(), *d));
                 self.struct_index.insert(d.name.name.clone(), self.structs.len());
                 self.structs.push(StructDef { name: d.name.name.clone(), fields: Vec::new() });
-                kept.push(*d);
+                self.struct_owner.push((self.module, d.public));
             }
         }
         let mut kept_enums = Vec::new();
@@ -515,9 +820,10 @@ impl<'a> Checker<'a> {
                 self.enum_index.insert(d.name.name.clone(), self.enums.len());
                 kept_enums.push((self.enums.len(), *d));
                 self.enums.push(EnumDef { name: d.name.name.clone(), variants: Vec::new() });
+                self.enum_owner.push(Some((self.module, d.public)));
             }
         }
-        for (id, d) in kept.iter().enumerate() {
+        for &(id, d) in &kept {
             let mut fseen = HashMap::new();
             let mut fields = Vec::new();
             for (i, (f, t)) in d.fields.iter().enumerate() {
@@ -554,7 +860,7 @@ impl<'a> Checker<'a> {
             self.enums[*id].variants = variants;
         }
         // A type containing itself by value has no size; arrays are the way to nest.
-        for (id, d) in kept.iter().enumerate() {
+        for &(id, d) in &kept {
             let me = Ty::Struct(id);
             if self.contains_by_value(&me, &me, &mut Vec::new()) {
                 self.err(
@@ -635,7 +941,7 @@ impl<'a> Checker<'a> {
             let header = self.text(Span::new(d.span.start, d.body.span.start)).trim_end().to_string();
             self.def(d.name.span, d.name.name.clone(), "fn", header);
             // Duplicates still get a slot so FuncIds line up with fn_decls order.
-            self.sigs.push(FuncSig { params, ret, uses_io, span: d.name.span });
+            self.sigs.push(FuncSig { params, ret, uses_io, span: d.name.span, module: self.module });
         }
     }
 
@@ -784,7 +1090,7 @@ impl<'a> Checker<'a> {
     }
 
     fn func(&mut self, d: &ast::FnDecl) -> Func {
-        let id = self.sigs.iter().position(|s| s.span == d.name.span).unwrap();
+        let id = self.sigs.iter().position(|s| s.module == self.module && s.span == d.name.span).unwrap();
         let ret = self.sigs[id].ret.clone();
         let uses_io = self.sigs[id].uses_io;
         let mut b = self.new_body(ret.clone(), uses_io, d.uses_insert);
@@ -854,6 +1160,7 @@ impl<'a> Checker<'a> {
             name: d.name.name.clone(),
             span: d.name.span,
             allows,
+            module: self.module,
             params,
             ret,
             uses_io,
@@ -1475,6 +1782,9 @@ impl<'a> Checker<'a> {
     }
 
     fn unknown_name(&mut self, b: &mut Body, id: &ast::Ident) {
+        if self.failed_imports.contains(&id.name) {
+            return;
+        }
         let mut d = Diagnostic::new("E0200", id.span, format!("unknown name `{}`", id.name));
         if self.func_index.contains_key(&id.name) || BUILTINS.contains(&id.name.as_str()) {
             d = d.note(format!("`{}` is a function; call it with ( )", id.name), None);
@@ -1570,7 +1880,7 @@ impl<'a> Checker<'a> {
     /// `hint` is the expected type where one is known; it types `None`, `Ok`, `Err` and `[]`.
     fn expr_hint(&mut self, b: &mut Body, e: &ast::Expr, hint: Option<&Ty>) -> Expr {
         let x = self.expr_kind(b, e, hint);
-        if x.ty != Ty::Error {
+        if x.ty != Ty::Error && self.module == 0 {
             let shown = self.show(&x.ty);
             self.facts.exprs.push((e.span, shown));
         }
@@ -1998,7 +2308,14 @@ impl<'a> Checker<'a> {
         name: &ast::Ident,
         fields: &[(ast::Ident, ast::Expr)],
     ) -> Expr {
+        self.touch(&name.name);
         let Some(&sid) = self.struct_index.get(&name.name) else {
+            if self.failed_imports.contains(&name.name) {
+                for (_, v) in fields {
+                    self.expr(b, v);
+                }
+                return Self::err_expr();
+            }
             let mut d = Diagnostic::new("E0200", name.span, format!("unknown struct `{}`", name.name));
             if let Some(s) = closest(&name.name, self.struct_index.keys()) {
                 d = d.fix1(FixKind::ChangesMeaning, format!("did you mean `{s}`?"), name.span, s);
@@ -2104,7 +2421,14 @@ impl<'a> Checker<'a> {
         if BUILTINS.contains(&name) {
             return self.builtin(b, e, callee, args);
         }
+        self.touch(name);
         let Some(&fid) = self.func_index.get(name) else {
+            if self.failed_imports.contains(name) {
+                for a in args {
+                    self.expr(b, &a.value);
+                }
+                return Self::err_expr();
+            }
             let mut cands: Vec<String> = self.func_index.keys().cloned().collect();
             cands.extend(BUILTINS.iter().map(|s| s.to_string()));
             let mut d = Diagnostic::new("E0200", callee.span, format!("unknown function `{name}`"));
@@ -2119,12 +2443,13 @@ impl<'a> Checker<'a> {
         };
         let params: Vec<(String, Ty)> = self.sigs[fid].params.clone();
         let ret = self.sigs[fid].ret.clone();
-        self.note_use(callee.span, Some(self.sigs[fid].span));
+        let local = self.sigs[fid].module == self.module;
+        self.note_use(callee.span, local.then_some(self.sigs[fid].span));
         if self.sigs[fid].uses_io {
             self.note_io(b, callee.span, &format!("calling `{name}`"));
         }
-        let sig_span = self.sigs[fid].span;
-        let Some(ok) = self.check_args(name, e.span, args, &params, Some(sig_span)) else {
+        let sig_span = local.then_some(self.sigs[fid].span);
+        let Some(ok) = self.check_args(name, e.span, args, &params, sig_span) else {
             for a in args {
                 self.expr(b, &a.value);
             }
@@ -2410,6 +2735,7 @@ impl<'a> Checker<'a> {
         if self.lookup_local(b, n).is_some() {
             return None;
         }
+        self.touch(&n.name);
         self.enum_index.get(&n.name).copied()
     }
 

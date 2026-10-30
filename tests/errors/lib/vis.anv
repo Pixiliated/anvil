@@ -1,0 +1,12 @@
+// Imported by the error tests: two pub functions and a private one.
+pub fn loud(s: str) -> str {
+    return s + "!";
+}
+
+pub fn shout(s: str) -> str {
+    return loud(s) + "!";
+}
+
+fn secret() -> i64 {
+    return 42;
+}

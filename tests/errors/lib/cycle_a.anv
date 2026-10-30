@@ -1,0 +1,5 @@
+import cycle_b.{b};
+
+pub fn a() -> i64 {
+    return b();
+}

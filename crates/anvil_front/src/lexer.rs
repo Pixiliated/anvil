@@ -11,6 +11,8 @@ pub enum Tok {
     Interp(Vec<LexPart>),
     // keywords
     Allow,
+    Import,
+    Pub,
     Fn,
     Enum,
     Match,
@@ -98,6 +100,8 @@ impl Tok {
             Tok::Unit => "unit",
             Tok::Test => "test",
             Tok::Allow => "allow",
+            Tok::Import => "import",
+            Tok::Pub => "pub",
             Tok::Requires => "requires",
             Tok::Ensures => "ensures",
             Tok::Uses => "uses",
@@ -154,6 +158,8 @@ pub struct Token {
 fn keyword(s: &str) -> Option<Tok> {
     Some(match s {
         "allow" => Tok::Allow,
+        "import" => Tok::Import,
+        "pub" => Tok::Pub,
         "fn" => Tok::Fn,
         "enum" => Tok::Enum,
         "match" => Tok::Match,

@@ -21,6 +21,7 @@ impl Span {
     }
 }
 
+#[derive(Clone, Debug)]
 pub struct SourceFile {
     pub name: String,
     pub text: String,

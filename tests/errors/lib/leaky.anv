@@ -1,0 +1,7 @@
+struct Secret {
+    code: i64,
+}
+
+pub fn make() -> Secret {
+    return Secret { code: 7 };
+}

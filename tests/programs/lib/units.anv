@@ -1,0 +1,11 @@
+// Units declared once and imported wherever they are needed.
+pub unit m;
+pub unit s;
+
+pub fn speed(d: f64[m], t: f64[s]) -> f64[m/s] {
+    return d / t;
+}
+
+test "speed" {
+    assert(speed(d: 10.0[m], t: 2.0[s]) == 5.0[m/s]);
+}

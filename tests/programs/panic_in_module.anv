@@ -1,0 +1,9 @@
+// A panic inside an imported module names the module's file and line.
+import lib.geometry.{Shape, side};
+import lib.units.{m};
+
+fn main() uses io {
+    let r: Shape = Shape.Rect(width: 2.0[m], height: 3.0[m]);
+    print("{side(s: r, i: 1)}");
+    print("{side(s: r, i: 5)}");
+}

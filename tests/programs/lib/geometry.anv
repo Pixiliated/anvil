@@ -1,0 +1,63 @@
+// Shapes in metres. `Point` and `twice` are private here; the root file has its own of each.
+import units.{m};
+
+pub enum Shape {
+    Circle(radius: f64[m]),
+    Rect(width: f64[m], height: f64[m]),
+}
+
+struct Point {
+    x: f64[m],
+    y: f64[m],
+}
+
+pub fn area(s: Shape) -> f64[m^2] {
+    var out: f64[m^2] = 0.0[m^2];
+    match s {
+        Circle(radius) => { out = 3.0 * radius * radius; }
+        Rect(width, height) => { out = width * height; }
+    }
+    return out;
+}
+
+pub fn perimeter(s: Shape) -> f64[m] {
+    var out: f64[m] = 0.0[m];
+    match s {
+        Circle(radius) => { out = twice(3.0 * radius); }
+        Rect(width, height) => { out = twice(width + height); }
+    }
+    return out;
+}
+
+pub fn far_corner(s: Shape) -> f64[m] {
+    var corner: Option[Point] = None;
+    match s {
+        Circle(radius: _) => {}
+        Rect(width, height) => { corner = Some(Point { x: width, y: height }); }
+    }
+    var out: f64[m] = 0.0[m];
+    match corner {
+        Some(value) => { out = value.x + value.y; }
+        None => {}
+    }
+    return out;
+}
+
+pub fn side(s: Shape, i: i64) -> f64[m] {
+    var sides: [f64[m]] = [];
+    match s {
+        Circle(radius) => { sides = [radius]; }
+        Rect(width, height) => { sides = [width, height]; }
+    }
+    return sides[i];
+}
+
+fn twice(x: f64[m]) -> f64[m] {
+    return x + x;
+}
+
+test "a square" {
+    let sq: Shape = Shape.Rect(width: 2.0[m], height: 2.0[m]);
+    assert(area(sq) == 4.0[m^2]);
+    assert(perimeter(sq) == 8.0[m]);
+}

@@ -1,0 +1,10 @@
+// expect: E0201
+import lib.vis.{loud};
+
+fn loud(s: str) -> str {
+    return s;
+}
+
+fn main() uses io {
+    print(loud("hey"));
+}

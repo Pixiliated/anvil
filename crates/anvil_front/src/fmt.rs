@@ -188,29 +188,36 @@ impl Printer<'_> {
     // ---- items ----
 
     fn items(&mut self, items: &[Item]) {
-        let both_units = |a: &Item, b: &Item| matches!((a, b), (Item::Unit(_), Item::Unit(_)));
-        self.entries(items, 0, self.text.len(), |a, b| !both_units(a, b), |p, item| p.item(item));
+        let together =
+            |a: &Item, b: &Item| matches!((a, b), (Item::Unit(_), Item::Unit(_)) | (Item::Import(_), Item::Import(_)));
+        self.entries(items, 0, self.text.len(), |a, b| !together(a, b), |p, item| p.item(item));
     }
 
     fn item(&mut self, item: &Item) {
         match item {
+            Item::Import(i) => {
+                // Names in a canonical order, so two imports of the same names read alike.
+                let mut names: Vec<&str> = i.names.iter().map(|n| n.name.as_str()).collect();
+                names.sort();
+                self.line(&format!("import {}.{{{}}};", i.module(), names.join(", ")));
+            }
             Item::Unit(u) => {
                 let line = match &u.def {
-                    Some(d) => format!("unit {} = {};", u.name.name, self.squash(d.span)),
-                    None => format!("unit {};", u.name.name),
+                    Some(d) => format!("{}unit {} = {};", vis(u.public), u.name.name, self.squash(d.span)),
+                    None => format!("{}unit {};", vis(u.public), u.name.name),
                 };
                 self.line(&line);
             }
             Item::Struct(s) => {
-                self.fields_block(&format!("struct {}", s.name.name), &s.fields, s.span);
+                self.fields_block(&format!("{}struct {}", vis(s.public), s.name.name), &s.fields, s.span);
             }
             Item::Enum(e) => {
                 let open = self.after_brace(e.name.span.end);
                 if e.variants.is_empty() && !self.has_comments(open, e.span.end) {
-                    self.line(&format!("enum {} {{}}", e.name.name));
+                    self.line(&format!("{}enum {} {{}}", vis(e.public), e.name.name));
                     return;
                 }
-                self.line(&format!("enum {} {{", e.name.name));
+                self.line(&format!("{}enum {} {{", vis(e.public), e.name.name));
                 self.depth += 1;
                 let close = e.span.end - 1;
                 self.entries(
@@ -269,7 +276,7 @@ impl Printer<'_> {
             self.line(&line);
         }
         let params: Vec<String> = f.params.iter().map(|p| format!("{}: {}", p.name.name, self.ty(&p.ty))).collect();
-        let mut head = format!("fn {}({})", f.name.name, params.join(", "));
+        let mut head = format!("{}fn {}({})", vis(f.public), f.name.name, params.join(", "));
         if let Some(r) = &f.ret {
             head.push_str(&format!(" -> {}", self.ty(r)));
         }
@@ -562,6 +569,14 @@ impl Printer<'_> {
     }
 }
 
+fn vis(public: bool) -> &'static str {
+    if public {
+        "pub "
+    } else {
+        ""
+    }
+}
+
 /// ` uses io`, or nothing.
 fn uses(names: &[Ident]) -> String {
     if names.is_empty() {
@@ -582,6 +597,7 @@ impl Entry for Field {
 impl Entry for Item {
     fn span(&self) -> Span {
         match self {
+            Item::Import(i) => i.span,
             Item::Unit(u) => u.span,
             Item::Struct(s) => s.span,
             Item::Enum(e) => e.span,

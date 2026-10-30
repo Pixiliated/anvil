@@ -1,0 +1,6 @@
+exit: 0
+---
+area 3.0 m^2, perimeter 6.0 m, corner 0.0 m, side 1.0 m
+area 6.0 m^2, perimeter 10.0 m, corner 5.0 m, side 2.0 m
+true 10.438413361169102 m/s
+true 10

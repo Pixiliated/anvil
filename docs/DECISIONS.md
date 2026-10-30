@@ -124,3 +124,18 @@ Short records of choices that are not obvious from the code. Newest last.
 - **Slices copy** (value semantics, like everything else); both bounds are required, so there
   is one way to write a range.
 - **`set` names its arguments** (`key:`, `value:`), like any call with two parameters.
+
+## M7 (v0.8)
+
+- **Imports are relative to the importing file**, not to the program's root, so every file can
+  be checked, tested and run alone, and a module means the same thing from every importer. There
+  is no `..`: modules form a tree below the files that use them.
+- **`import path.{names};`, names only.** No wildcards and no module-qualified use sites
+  (`geometry.area`): an agent reading a file sees every outside name it uses at the top.
+- **Unused imports are errors with a mechanical fix**, like unused variables.
+- **One program, many files:** the checker runs once per module, dependencies first, each with
+  its own name tables; structs, enums and functions share one id space, so the backends are
+  unchanged apart from unique native symbols. Option/Result instantiations and native type
+  layouts are keyed by type, not by name, since two modules may each have a `Shape`.
+- **Coverage is project-wide:** a module's function counts as tested when any project file's
+  tests or golden-checked main run it.
