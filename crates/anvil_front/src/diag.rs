@@ -179,6 +179,16 @@ pub fn explain(code: &str) -> Option<&'static str> {
             "Bad interpolation in a string. \"x = {x}\" inserts the text of x; the part in braces is one \
                     expression on the same line, with no braces inside. Write {{ and }} for literal braces."
         }
+        "E0110" => {
+            "Not in canonical layout. Anvil has one layout for every program, so a file that \
+                    differs from what `anvil fmt` prints is an error. The fix (mechanical) is the formatted \
+                    file; `anvil fmt` or `anvil fix` applies it."
+        }
+        "E0111" => {
+            "A comment the formatter cannot place. Comments go on their own line before an item, \
+                    statement, field, variant or match arm, or at the end of the line one ends on; a comment \
+                    inside an expression or a signature has no place in the canonical layout."
+        }
         "E0100" => "Syntax error: the parser expected something else here. The message names what it expected.",
         "E0200" => {
             "Unknown name. Variables, functions, types, units and fields must be declared before use \
@@ -307,8 +317,8 @@ pub fn lint(name: &str) -> Option<&'static str> {
 }
 
 pub const ALL_CODES: &[&str] = &[
-    "E0001", "E0002", "E0003", "E0004", "E0100", "E0200", "E0201", "E0202", "E0300", "E0301", "E0302", "E0303",
-    "E0304", "E0305", "E0306", "E0307", "E0308", "E0310", "E0311", "E0320", "E0321", "E0322", "E0323", "E0330",
-    "E0331", "E0332", "E0340", "E0341", "E0350", "E0360", "E0370", "E0380", "E0390", "E0391", "E0392", "E0400",
-    "E0401", "E0402", "E0403", "E0404", "E0405", "E0406", "E0407", "E0500", "E0501", "E0502",
+    "E0001", "E0002", "E0003", "E0004", "E0100", "E0110", "E0111", "E0200", "E0201", "E0202", "E0300", "E0301",
+    "E0302", "E0303", "E0304", "E0305", "E0306", "E0307", "E0308", "E0310", "E0311", "E0320", "E0321", "E0322",
+    "E0323", "E0330", "E0331", "E0332", "E0340", "E0341", "E0350", "E0360", "E0370", "E0380", "E0390", "E0391",
+    "E0392", "E0400", "E0401", "E0402", "E0403", "E0404", "E0405", "E0406", "E0407", "E0500", "E0501", "E0502",
 ];

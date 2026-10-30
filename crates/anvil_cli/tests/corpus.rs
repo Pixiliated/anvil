@@ -140,11 +140,21 @@ fn errors_have_expected_codes_and_fixes_resolve() {
             assert!(explain.status.success());
         }
         if header(&text, "resolve") == Some("mechanical") {
-            let fixed = apply_mechanical(&text, &json);
+            // Round by round, as `anvil fix` does: the layout fix (E0110) comes once the rest is fixed.
             let path = tmp.join(Path::new(&rel).file_name().unwrap());
-            std::fs::write(&path, &fixed).unwrap();
-            let (ok, after) = check_json(path.to_str().unwrap());
-            if !ok {
+            let (mut fixed, mut after) = (text.clone(), json.clone());
+            let mut resolved = false;
+            for _ in 0..3 {
+                fixed = apply_mechanical(&fixed, &after);
+                std::fs::write(&path, &fixed).unwrap();
+                let (ok, next) = check_json(path.to_str().unwrap());
+                after = next;
+                if ok {
+                    resolved = true;
+                    break;
+                }
+            }
+            if !resolved {
                 problems.push(format!("{rel}: mechanical fixes did not resolve it:\n{fixed}\n{after}"));
             }
         }
@@ -236,13 +246,13 @@ fn type_at_names_types_and_declarations() {
     assert_eq!(field["declaration"]["kind"], "field", "{field}");
     assert_eq!(field["declaration"]["defined_at"]["line"], 7, "{field}");
 
-    let binding = json_of(&anvil(&["type-at", f, "55", &col_of(f, 55, "max_weight"), "--json"]));
+    let binding = json_of(&anvil(&["type-at", f, "53", &col_of(f, 53, "max_weight"), "--json"]));
     assert_eq!(binding["type"], "f64[kg]", "{binding}");
     assert_eq!(binding["declaration"]["kind"], "local", "{binding}");
-    assert_eq!(binding["declaration"]["defined_at"]["line"], 54, "{binding}");
+    assert_eq!(binding["declaration"]["defined_at"]["line"], 52, "{binding}");
 
     // Inside an interpolation: the innermost expression is the call, the name is the function.
-    let call = json_of(&anvil(&["type-at", f, "89", &col_of(f, 89, "money"), "--json"]));
+    let call = json_of(&anvil(&["type-at", f, "84", &col_of(f, 84, "money"), "--json"]));
     assert_eq!(call["text"], "money(value)", "{call}");
     assert_eq!(call["type"], "str", "{call}");
     assert_eq!(call["declaration"]["kind"], "fn", "{call}");
@@ -269,11 +279,11 @@ fn refs_list_every_use() {
     let weight = json_of(&anvil(&["refs", f, "Product.weight", "--json"]));
     let lines: Vec<i64> =
         weight["declarations"][0]["uses"].as_array().unwrap().iter().map(|u| u["line"].as_i64().unwrap()).collect();
-    assert_eq!(lines, vec![44, 100, 101, 102], "{weight}");
+    assert_eq!(lines, vec![44, 92, 93, 94], "{weight}");
     let courier = json_of(&anvil(&["refs", f, "Shipping.Courier", "--json"]));
     let lines: Vec<i64> =
         courier["declarations"][0]["uses"].as_array().unwrap().iter().map(|u| u["line"].as_i64().unwrap()).collect();
-    assert_eq!(lines, vec![54, 109, 111], "{courier}");
+    assert_eq!(lines, vec![52, 104, 106], "{courier}");
     let unit = json_of(&anvil(&["refs", f, "kg", "--json"]));
     assert_eq!(unit["declarations"][0]["kind"], "unit", "{unit}");
 
@@ -506,7 +516,11 @@ fn trace_writes_values_as_anvil_source_and_cuts_long_ones() {
     Empty,
 }
 
-struct Box { label: str, sizes: [i64], shape: Shape, }
+struct Box {
+    label: str,
+    sizes: [i64],
+    shape: Shape,
+}
 
 fn keep(b: Box, maybe: Option[i64], shapes: [Shape]) -> Result[i64, str] {
     match maybe {
@@ -515,7 +529,7 @@ fn keep(b: Box, maybe: Option[i64], shapes: [Shape]) -> Result[i64, str] {
                 return Ok(value);
             }
         }
-        None => { }
+        None => {}
     }
     return Err(b.label);
 }
@@ -529,8 +543,8 @@ fn main() {
     let shapes: [Shape] = [Shape.Rect(width: 1.0, height: 2.0), Shape.Empty];
     let r: Result[i64, str] = keep(b: b, maybe: Some(3), shapes: shapes);
     match r {
-        Ok(value: _) => { }
-        Err(error: _) => { }
+        Ok(value: _) => {}
+        Err(error: _) => {}
     }
 }
 "#,
@@ -673,4 +687,66 @@ fn watch_verifies_again_after_a_change() {
     );
     assert_eq!(next(), serde_json::json!({ "ok": false, "runs": 2 }));
     assert_eq!(child.wait().unwrap().code(), Some(1));
+}
+
+#[test]
+fn fmt_and_check_agree_on_the_layout() {
+    let p = hello_project("fmt");
+    let messy = "fn main() uses io {\n  print(\"hello\");   // greet\n}\n";
+    p.write("src/hello.anv", messy);
+    // An unformatted file is an error everywhere a file is checked, with the layout as its fix.
+    let v = p.json(&["check", "src/hello.anv"]);
+    assert_eq!(v["diagnostics"][0]["code"], "E0110", "{v}");
+    assert_eq!(v["diagnostics"][0]["fixes"][0]["kind"], "mechanical");
+    assert_eq!(p.anvil(&["run", "src/hello.anv"]).status.code(), Some(1));
+
+    let checked = p.anvil(&["fmt", "--check", "--json"]);
+    assert_eq!(checked.status.code(), Some(1));
+    let v = json_of(&checked);
+    assert_eq!(
+        v["files"],
+        serde_json::json!([{ "file": "src/hello.anv", "changed": true }, { "file": "src/maths.anv", "changed": false }])
+    );
+    assert_eq!(std::fs::read_to_string(p.0.join("src/hello.anv")).unwrap(), messy, "--check writes nothing");
+
+    assert!(p.anvil(&["fmt"]).status.success());
+    let formatted = "fn main() uses io {\n    print(\"hello\"); // greet\n}\n";
+    assert_eq!(std::fs::read_to_string(p.0.join("src/hello.anv")).unwrap(), formatted);
+    assert!(p.anvil(&["check", "src/hello.anv"]).status.success());
+    assert!(p.anvil(&["fmt", "--check"]).status.success());
+
+    // `fix` applies the layout too, once the other errors are fixed.
+    p.write("src/hello.anv", "fn main() -> i64 {\n  var x: i64 = 1;\n  return x;\n}\n");
+    let v = p.json(&["fix", "src/hello.anv"]);
+    assert_eq!(v["ok"], true, "{v}");
+    let codes: Vec<&str> = v["applied"].as_array().unwrap().iter().map(|a| a["code"].as_str().unwrap()).collect();
+    assert_eq!(codes, ["E0341", "E0110"], "{v}");
+    assert_eq!(
+        std::fs::read_to_string(p.0.join("src/hello.anv")).unwrap(),
+        "fn main() -> i64 {\n    let x: i64 = 1;\n    return x;\n}\n"
+    );
+
+    // A comment with no place in the layout is an error, never dropped.
+    p.write("src/hello.anv", "fn main() -> i64 {\n    return 1 + // one\n        2;\n}\n");
+    let out = p.anvil(&["fmt", "src/hello.anv"]);
+    assert_eq!(out.status.code(), Some(1));
+    assert!(String::from_utf8_lossy(&out.stdout).contains("E0111"));
+}
+
+#[test]
+fn syntax_errors_are_reported_one_per_item() {
+    let p = Scratch::new("syntax");
+    p.write(
+        "bad.anv",
+        "fn a() -> i64 {\n    let x: i64 = ;\n    return x;\n}\n\nfn b() -> i64 {\n    return 1 +;\n}\n\n\
+         struct S { x i64 }\n\nfn main() -> i64 {\n    return 0;\n}\n",
+    );
+    let v = p.json(&["check", "bad.anv"]);
+    let found: Vec<(&str, u64)> = v["diagnostics"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|d| (d["code"].as_str().unwrap(), d["range"]["start"]["line"].as_u64().unwrap()))
+        .collect();
+    assert_eq!(found, [("E0100", 2), ("E0100", 7), ("E0100", 10)], "{v}");
 }

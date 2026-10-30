@@ -123,6 +123,7 @@ fn dispatch(p: &Parsed) -> Result<Report, String> {
             anvil_ops::build(root, file, out, p.options.contains_key("asm"))
         }
         "test" => anvil_ops::test(root, file, steps),
+        "fmt" => anvil_ops::fmt(root, pos(0), p.options.contains_key("check")),
         "fix" => anvil_ops::fix(root, file),
         "outline" => anvil_ops::outline(root, file),
         "type-at" => anvil_ops::type_at(root, file, number("line", pos(1).unwrap())?, number("col", pos(2).unwrap())?),

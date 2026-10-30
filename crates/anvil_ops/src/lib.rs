@@ -10,7 +10,7 @@ pub mod project;
 
 pub use inspect::{profile, trace, TRACE_LIMIT};
 pub use proj::{
-    golden_approve, golden_check, list, record_decide, record_export, record_import_roadmap, record_query,
+    fmt, golden_approve, golden_check, list, record_decide, record_export, record_import_roadmap, record_query,
     record_status, review, verify, watch,
 };
 
@@ -61,6 +61,12 @@ pub const COMMANDS: &[Command] = &[
         positionals: &["file"],
         options: &[("max-steps", "N", "stop each test after N steps")],
         summary: "run every test block",
+    },
+    Command {
+        name: "fmt",
+        positionals: &["file?"],
+        options: &[("check", "", "change nothing; fail if a file is not in canonical layout")],
+        summary: "put the file (or every project file) in canonical layout",
     },
     Command {
         name: "fix",
@@ -432,7 +438,7 @@ pub fn outline(root: &Path, file: &str) -> Report {
     let src = try_report!(load(root, file));
     let ast = match anvil_front::parse(&src) {
         Ok(f) => f,
-        Err(d) => return diagnostics(&src, &[d]),
+        Err(d) => return diagnostics(&src, &d),
     };
     let text = |s: Span| src.slice(s).to_string();
     let line = |s: Span| src.line_col(s.start).0;

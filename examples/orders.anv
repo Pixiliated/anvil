@@ -48,18 +48,14 @@ fn order_weight(catalog: [Product], lines: [Line]) -> Result[f64[kg], str] {
 
 fn shipping_cost(how: Shipping, weight: f64[kg]) -> Result[i64, str] {
     match how {
-        Pickup => {
-            return Ok(0);
-        }
+        Pickup => { return Ok(0); }
         Courier(max_weight) => {
             if weight > max_weight {
                 return Err("{weight} is over the courier limit of {max_weight}");
             }
             return Ok(799);
         }
-        Freight(cents_per_kg) => {
-            return Ok(cents_per_kg * to_i64(weight / 1.0[kg] + 0.999));
-        }
+        Freight(cents_per_kg) => { return Ok(cents_per_kg * to_i64(weight / 1.0[kg] + 0.999)); }
     }
 }
 
@@ -85,12 +81,8 @@ fn money(cents: i64) -> str {
 fn report(r: Result[i64, str]) -> str {
     var out: str = "";
     match r {
-        Ok(value) => {
-            out = "total {money(value)}";
-        }
-        Err(error) => {
-            out = "cannot order: {error}";
-        }
+        Ok(value) => { out = "total {money(value)}"; }
+        Err(error) => { out = "cannot order: {error}"; }
     }
     return out;
 }
@@ -105,7 +97,10 @@ fn sample_catalog() -> [Product] {
 
 fn main() uses io {
     let catalog: [Product] = sample_catalog();
-    let tea: [Line] = [Line { product: "kettle", quantity: 1 }, Line { product: "teapot", quantity: 2 }];
+    let tea: [Line] = [
+        Line { product: "kettle", quantity: 1 },
+        Line { product: "teapot", quantity: 2 },
+    ];
     print(report(order_total(catalog: catalog, lines: tea, how: Shipping.Courier(10.0[kg]))));
     let heavy: [Line] = [Line { product: "anvil", quantity: 1 }];
     print(report(order_total(catalog: catalog, lines: heavy, how: Shipping.Courier(10.0[kg]))));
@@ -123,6 +118,10 @@ test "money keeps two digits" {
 
 test "pickup is free" {
     let lines: [Line] = [Line { product: "kettle", quantity: 2 }];
-    let total: Result[i64, str] = order_total(catalog: sample_catalog(), lines: lines, how: Shipping.Pickup);
+    let total: Result[i64, str] = order_total(
+        catalog: sample_catalog(),
+        lines: lines,
+        how: Shipping.Pickup,
+    );
     assert(report(total) == "total $49.98");
 }

@@ -1,0 +1,7 @@
+// expect: E0110
+// resolve: mechanical
+fn twice(n: i64) -> i64 { return n * 2; }
+fn main() -> i64 {
+    if twice(2) == 4 { return 0; }
+    return 1;
+}

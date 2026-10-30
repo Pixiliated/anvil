@@ -12,6 +12,7 @@ Anvil is a compiled language designed to be written by AI agents. The compiler i
 - `cargo test --workspace` must pass before any milestone is called done.
 - `cargo run -p anvil_cli -- <command> <file.anv>` drives the compiler; `anvil-mcp` serves the
   same commands as MCP tools.
+- Every `.anv` file must be in canonical layout: run `anvil fmt` (or `anvil fix`) after editing.
 
 ## Rules
 1. **Both backends agree.** Every language change adds programs to `tests/programs` and must

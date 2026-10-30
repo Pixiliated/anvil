@@ -21,7 +21,9 @@ pub const DEFAULT_MAX_STEPS: u64 = 100_000_000;
 const INSTRUCTIONS: &str = "Anvil: a compiled language designed for agents. `spec` returns the whole \
 language; read it once before writing Anvil. Write a .anv file, then `check` it: every error has a \
 stable code, an exact range and fixes marked mechanical (safe) or changes_meaning (decide first). \
-`fix` applies every mechanical fix and rechecks until none is left. `outline` lists a file's items \
+`fix` applies every mechanical fix and rechecks until none is left. A file must be in canonical \
+layout (E0110 otherwise; its fix is the formatted file); `fmt` formats a file or the whole project, \
+and keeps comments. `outline` lists a file's items \
 and signatures without reading it all; `type_at` gives the type and declaration at a line and \
 column; `refs` finds where a function, type, Type.field, Enum.Variant or unit is declared and used. \
 `run` interprets main and returns its stdout; `test` runs the test blocks; `build` makes a native \
@@ -103,6 +105,16 @@ pub struct VerifyArgs {
     pub max_steps: Option<u64>,
     /// Also build and run each program natively (slower; checks the native backend and leaks).
     pub native: Option<bool>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct FmtArgs {
+    /// Path of the .anv file, relative to the server's root or absolute; leave it out to format
+    /// every project file.
+    pub file: Option<String>,
+    /// Change nothing; report the files that are not in canonical layout as a tool error.
+    pub check: Option<bool>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -253,6 +265,12 @@ impl AnvilServer {
         the panic message and the test's output.")]
     async fn test(&self, Parameters(a): Parameters<RunArgs>) -> Result<CallToolResult, ErrorData> {
         self.op(move |root| anvil_ops::test(root, &a.file, Some(steps(a.max_steps)))).await
+    }
+
+    #[tool(description = "Put a file (or, without file, every project file) in canonical layout, \
+        keeping its comments. With check, change nothing and make any unformatted file a tool error.")]
+    async fn fmt(&self, Parameters(a): Parameters<FmtArgs>) -> Result<CallToolResult, ErrorData> {
+        self.op(move |root| anvil_ops::fmt(root, a.file.as_deref(), a.check.unwrap_or(false))).await
     }
 
     #[tool(description = "Apply every mechanical fix to the file in place, recheck, and repeat until \

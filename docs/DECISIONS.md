@@ -93,3 +93,20 @@ Short records of choices that are not obvious from the code. Newest last.
 - **`watch` is the one command with no tool.** It runs until stopped; an MCP client calls
   `verify` after its own edits. The parity test reads the exception and its reason from
   `CLI_ONLY_COMMANDS`, as the engine's `parity.rs` does.
+
+## M5 (v0.6)
+
+- **The layout is part of the language.** A file that is not in canonical layout fails `check`
+  (E0110), and so `run`, `test` and `verify`, with the formatted file as its mechanical fix.
+  There are no warnings, so it could only be an error or nothing; agents call `fix` anyway.
+  It is reported only for a file with no other error, so real errors come first.
+- **Printed from the syntax tree, with literals copied from the source**, so `1_000` and
+  `2.5e-3` keep their spelling and parentheses stay as written. The test checks every program
+  in the repository keeps its tokens and comments and that formatting twice changes nothing.
+- **A comment the layout cannot place is an error (E0111), never dropped.** Comments live
+  between entries (items, statements, fields, variants, arms) or at the end of a line.
+- **One width rule (100 columns), applied narrowly:** a one-statement match arm stays on one
+  line if it fits, and a long statement splits its array, call or struct literal one element
+  per line. Anything else stays on one line however long; a general line breaker can come later.
+- **Parser recovery restarts at item keywords only.** They never appear inside an item, so the
+  restart point is never a guess; within an item only the first error is reported.

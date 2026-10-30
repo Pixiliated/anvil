@@ -1,4 +1,7 @@
-//! Recursive-descent parser. Stops at the first syntax error: one precise error beats a cascade.
+//! Recursive-descent parser. After a syntax error it skips to the next item keyword (`fn`,
+//! `struct`, `enum`, `unit`, `test`, `allow`) and goes on, so one run reports the first error of
+//! every item. Those keywords never appear inside an item, so the restart point is never a guess;
+//! within an item the first error is the only one reported, since what follows it is.
 
 use crate::ast::*;
 use crate::diag::{Diagnostic, FixKind};
@@ -12,13 +15,28 @@ pub struct Parser {
     pos: usize,
 }
 
-pub fn parse(toks: Vec<Token>) -> PResult<File> {
+/// The items that parsed, and the first syntax error of each item that did not.
+pub fn parse(toks: Vec<Token>) -> (File, Vec<Diagnostic>) {
     let mut p = Parser { toks, pos: 0 };
     let mut items = Vec::new();
+    let mut errors = Vec::new();
     while p.peek() != &Tok::Eof {
-        items.push(p.item()?);
+        let start = p.pos;
+        match p.item() {
+            Ok(item) => items.push(item),
+            Err(d) => {
+                errors.push(d);
+                p.pos = p.pos.max(start + 1);
+                while !matches!(
+                    p.peek(),
+                    Tok::Eof | Tok::Fn | Tok::Struct | Tok::Enum | Tok::Unit | Tok::Test | Tok::Allow
+                ) {
+                    p.bump();
+                }
+            }
+        }
     }
-    Ok(File { items })
+    (File { items }, errors)
 }
 
 impl Parser {

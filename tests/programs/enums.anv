@@ -26,66 +26,38 @@ struct Drawing {
 
 fn area(s: Shape) -> f64[m^2] {
     match s {
-        Circle(radius) => {
-            return 3.0 * radius * radius;
-        }
-        Rect(width: w, height: h) => {
-            return w * h;
-        }
-        Label(text: _) => {
-            return 0.0[m^2];
-        }
-        Empty => {
-            return 0.0[m^2];
-        }
+        Circle(radius) => { return 3.0 * radius * radius; }
+        Rect(width: w, height: h) => { return w * h; }
+        Label(text: _) => { return 0.0[m^2]; }
+        Empty => { return 0.0[m^2]; }
     }
 }
 
 fn describe(s: Shape) -> str {
     var out: str = "?";
     match s {
-        Circle(radius) => {
-            out = "circle r={radius}";
-        }
-        Rect(width, height) => {
-            out = "rect {width} x {height}";
-        }
-        Label(text) => {
-            out = "label \"{text}\"";
-        }
-        Empty => {
-            out = "empty";
-        }
+        Circle(radius) => { out = "circle r={radius}"; }
+        Rect(width, height) => { out = "rect {width} x {height}"; }
+        Label(text) => { out = "label \"{text}\""; }
+        Empty => { out = "empty"; }
     }
     return out;
 }
 
 fn next(l: Light) -> Light {
     match l {
-        Red => {
-            return Light.Green;
-        }
-        Yellow => {
-            return Light.Red;
-        }
-        Green => {
-            return Light.Yellow;
-        }
+        Red => { return Light.Green; }
+        Yellow => { return Light.Red; }
+        Green => { return Light.Yellow; }
     }
 }
 
 fn light_name(l: Light) -> str {
     var name: str = "";
     match l {
-        Red => {
-            name = "red";
-        }
-        Yellow => {
-            name = "yellow";
-        }
-        Green => {
-            name = "green";
-        }
+        Red => { name = "red"; }
+        Yellow => { name = "yellow"; }
+        Green => { name = "green"; }
     }
     return name;
 }
@@ -93,9 +65,7 @@ fn light_name(l: Light) -> str {
 fn total(t: Tree) -> i64 {
     var sum: i64 = 0;
     match t {
-        Leaf(value) => {
-            sum = value;
-        }
+        Leaf(value) => { sum = value; }
         Node(name: _, children) => {
             for c in children {
                 sum = sum + total(c);
@@ -108,9 +78,7 @@ fn total(t: Tree) -> i64 {
 fn names(t: Tree) -> str {
     var out: str = "";
     match t {
-        Leaf(value) => {
-            out = "{value}";
-        }
+        Leaf(value) => { out = "{value}"; }
         Node(name, children) => {
             out = "{name}(";
             var first: bool = true;
@@ -144,12 +112,10 @@ fn main() uses io {
         l = next(l);
     }
 
-    let tree: Tree = Tree.Node(name: "root", children: [
-        Tree.Leaf(1),
-        Tree.Node(name: "kids", children: [Tree.Leaf(2), Tree.Leaf(3)]),
-        Tree.Node(name: "none", children: []),
-        Tree.Leaf(4),
-    ]);
+    let tree: Tree = Tree.Node(
+        name: "root",
+        children: [Tree.Leaf(1), Tree.Node(name: "kids", children: [Tree.Leaf(2), Tree.Leaf(3)]), Tree.Node(name: "none", children: []), Tree.Leaf(4)],
+    );
     print("{names(tree)} sums to {total(tree)}");
 
     var d: Drawing = Drawing { title: "sketch", shapes: [] };

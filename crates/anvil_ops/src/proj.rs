@@ -36,7 +36,7 @@ struct Summary {
 fn summarize(project: &Project, file: &str) -> Result<Summary, String> {
     use anvil_front::ast::Item;
     let src = load(&project.root, file).map_err(|r| r.json["error"].as_str().unwrap_or("").to_string())?;
-    let ast = anvil_front::parse(&src).map_err(|d| format!("{}: {}", src.site(d.span), d.message))?;
+    let ast = anvil_front::parse(&src).map_err(|d| format!("{}: {}", src.site(d[0].span), d[0].message))?;
     let mut s = Summary { main: false, functions: Vec::new(), tests: 0 };
     for item in &ast.items {
         match item {
@@ -516,5 +516,55 @@ pub fn watch(
         while snapshot(root) == before {
             std::thread::sleep(std::time::Duration::from_millis(200));
         }
+    }
+}
+
+/// Puts files in canonical layout: `file` (no project needed), or every file of the project.
+/// With `check`, writes nothing and fails if any file is not formatted.
+pub fn fmt(root: &Path, file: Option<&str>, check: bool) -> Report {
+    let (base, files) = match file {
+        Some(f) => (root.to_path_buf(), vec![f.to_string()]),
+        None => {
+            let project = try_or_usage!(Project::discover(root));
+            (project.root.clone(), project.files.clone())
+        }
+    };
+    let mut results = Vec::new();
+    let mut errors = Vec::new();
+    let mut text = String::new();
+    for f in &files {
+        let src = match load(&base, f) {
+            Ok(s) => s,
+            Err(r) => return r,
+        };
+        match anvil_front::fmt::format(&src) {
+            Ok(formatted) => {
+                let changed = formatted != src.text;
+                if changed && !check {
+                    if let Err(e) = std::fs::write(base.join(f), &formatted) {
+                        return Report::usage(format!("cannot write {f}: {e}"));
+                    }
+                }
+                if changed {
+                    text.push_str(&format!("{} {f}\n", if check { "not formatted:" } else { "formatted" }));
+                }
+                results.push(json!({ "file": f, "changed": changed }));
+            }
+            Err(d) => {
+                text.push_str(&anvil_front::diag::render(&src, &d));
+                text.push('\n');
+                errors.push(anvil_front::diag::to_json(&src, &d));
+            }
+        }
+    }
+    let changed = results.iter().filter(|r| r["changed"] == true).count();
+    let verb = if check { "not formatted" } else { "changed" };
+    text.push_str(&format!("{} file(s), {changed} {verb}, {} could not be formatted\n", files.len(), errors.len()));
+    let passed = errors.is_empty() && !(check && changed > 0);
+    let json = json!({ "ok": passed, "check": check, "files": results, "diagnostics": errors });
+    if passed {
+        ok(json, text)
+    } else {
+        failed(json, text)
     }
 }

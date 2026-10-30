@@ -34,12 +34,8 @@ fn number(digits: [i64]) -> Result[i64, str]
 fn match_ok(r: Result[i64, str]) -> bool {
     var ok: bool = false;
     match r {
-        Ok(value: _) => {
-            ok = true;
-        }
-        Err(error) => {
-            ok = error.len() > 0;
-        }
+        Ok(value: _) => { ok = true; }
+        Err(error) => { ok = error.len() > 0; }
     }
     return ok;
 }
@@ -66,12 +62,8 @@ fn pay_twice(acct: Account, amount: i64) -> Result[Account, str] {
 fn show_opt(o: Option[i64]) -> str {
     var out: str = "";
     match o {
-        Some(value) => {
-            out = "Some({value})";
-        }
-        None => {
-            out = "None";
-        }
+        Some(value) => { out = "Some({value})"; }
+        None => { out = "None"; }
     }
     return out;
 }
@@ -79,12 +71,8 @@ fn show_opt(o: Option[i64]) -> str {
 fn show_res(r: Result[i64, str]) -> str {
     var out: str = "";
     match r {
-        Ok(value) => {
-            out = "Ok({value})";
-        }
-        Err(error) => {
-            out = "Err({error})";
-        }
+        Ok(value) => { out = "Ok({value})"; }
+        Err(error) => { out = "Err({error})"; }
     }
     return out;
 }
@@ -92,12 +80,8 @@ fn show_res(r: Result[i64, str]) -> str {
 fn show_acct(r: Result[Account, str]) -> str {
     var out: str = "";
     match r {
-        Ok(value) => {
-            out = "{value.owner} keeps {value.balance}";
-        }
-        Err(error) => {
-            out = "refused: {error}";
-        }
+        Ok(value) => { out = "{value.owner} keeps {value.balance}"; }
+        Err(error) => { out = "refused: {error}"; }
     }
     return out;
 }
@@ -117,23 +101,15 @@ fn main() uses io {
     var seen: str = "";
     for m in maybe_names {
         match m {
-            Some(value) => {
-                seen = seen + value;
-            }
-            None => {
-                seen = seen + "_";
-            }
+            Some(value) => { seen = seen + value; }
+            None => { seen = seen + "_"; }
         }
     }
     print(seen);
     var nums: Option[[i64]] = None;
     nums = Some([1, 2]);
     match nums {
-        Some(value: list) => {
-            print("got {list.len()} numbers");
-        }
-        None => {
-            print("no numbers");
-        }
+        Some(value: list) => { print("got {list.len()} numbers"); }
+        None => { print("no numbers"); }
     }
 }

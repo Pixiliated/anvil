@@ -1,4 +1,4 @@
-# Anvil language specification (v0.5)
+# Anvil language specification (v0.6)
 
 Anvil is a small, compiled, general-purpose language designed to be written mostly by AI agents
 and read by humans. Its rules aim at three things: one obvious way to write each thing, code
@@ -26,6 +26,23 @@ Comments start with `//` and run to the end of the line. Identifiers are ASCII l
 and `_`, not starting with a digit. Keywords: `allow fn let var if else while for in match
 return break continue struct enum unit test requires ensures uses true false result`. The names
 `Some`, `None`, `Ok` and `Err` are reserved for the built-in enums.
+
+## Layout
+
+Every program has one layout, the one `anvil fmt` prints, and a file in any other layout is an
+error (E0110) whose mechanical fix is the formatted file. Four-space indents; one statement
+per line; `{` ends the line that opens a block, and an empty block is `{}`; struct fields and
+enum variants one per line, each ending in `,`; one blank line between items (consecutive
+`unit` lines may stay together) and at most one between statements. A function with contracts
+puts each `requires` and `ensures` on its own indented line and `{` on the next. A match arm
+whose body is one simple statement stays on one line (`Empty => { return 0; }`) if it fits in
+100 columns. A statement longer than 100 columns whose value is an array, a call or a struct
+literal with two or more elements puts one element per line, each ending in `,`. Literals keep
+their spelling (`1_000`, `2.5e-3`); units lose their spaces (`f64[m/s]`).
+
+Comments stay where they are: on their own line before an item, statement, field, variant or
+arm, or at the end of the line one ends on (after one space). A comment anywhere else, inside
+an expression or a signature, has no place in the layout and is an error (E0111).
 
 ## Types
 
@@ -289,6 +306,8 @@ anvil run     file.anv [--max-steps N] interpret (the reference semantics)
 anvil build   file.anv [-o out.exe] [--asm]
                                        native executable via Cranelift
 anvil test    file.anv [--max-steps N] run test blocks
+anvil fmt     [file.anv] [--check]     put the file (or every project file) in canonical
+                                       layout; --check changes nothing
 anvil fix     file.anv                 apply every mechanical fix until none is left
 anvil trace   file.anv [--test NAME] [--only F,G] [--limit N]
                                        a run as a timeline: calls, returns, prints
@@ -304,7 +323,9 @@ anvil spec                             print this document
 Every command takes `--json`. Every error has a stable code (`E0301`), an exact range and,
 where one exists, fixes. A fix is `mechanical` (safe to apply without thought) or
 `changes_meaning` (compiles, but may hide the real bug: understand the intent first);
-`anvil fix` applies only mechanical ones. `type-at` and `refs` answer even for a file with
+`anvil fix` applies only mechanical ones (including the layout, last). A syntax error stops
+checking, but the parser goes on at the next item (`fn`, `struct`, `enum`, `unit`, `test`,
+`allow`), so one run reports the first syntax error of every item. `type-at` and `refs` answer even for a file with
 type errors. `--max-steps` stops a run after that many statements and loop iterations.
 
 `trace` and `profile` run `main`, or one test with `--test`, in the interpreter. A trace lists

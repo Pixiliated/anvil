@@ -20,7 +20,7 @@ fn parse(text: str) -> Result[i64, str] {
 fn total(texts: [str]) -> Result[i64, str] {
     var sum: i64 = 0;
     for t in texts {
-        let n: i64 = parse(t)?;     // on Err, total returns that Err at once
+        let n: i64 = parse(t)?; // on Err, total returns that Err at once
         sum = sum + n;
     }
     return Ok(sum);
@@ -35,11 +35,11 @@ fn main() uses io {
     match s {
         Circle(radius) => { print("circle {radius}"); }
         Rect(width, height: h) => { print("{width} by {h}"); }
-        Empty => { }
+        Empty => {}
     }
     var xs: [i64] = [3, 1, 4];
-    xs.push(1);                  // append
-    let last: i64 = xs.pop();    // remove and return the last element
+    xs.push(1); // append
+    let last: i64 = xs.pop(); // remove and return the last element
     xs[0] = 10;
     let n: i64 = xs.len();
     let grid: [[i64]] = [[1, 2], [3, 4]];

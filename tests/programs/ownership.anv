@@ -32,12 +32,8 @@ fn find_long(words: [str], min: i64) -> Option[str] {
 fn first_used(slots: [Slot]) -> str {
     for s in slots {
         match s {
-            Free => {
-                continue;
-            }
-            Used(owner, items: _) => {
-                return owner;
-            }
+            Free => { continue; }
+            Used(owner, items: _) => { return owner; }
         }
     }
     return "nobody";
@@ -68,9 +64,7 @@ fn countdown(n: i64) -> str {
 fn show(o: Option[str]) -> str {
     var out: str = "none";
     match o {
-        Some(value) => {
-            out = value;
-        }
+        Some(value) => { out = value; }
         None => {}
     }
     return out;
@@ -125,15 +119,11 @@ fn main() uses io {
 
     var maybe: Option[[str]] = Some(["one"]);
     match maybe {
-        Some(value) => {
-            maybe = Some([value[0], "two"]);
-        }
+        Some(value) => { maybe = Some([value[0], "two"]); }
         None => {}
     }
     match maybe {
-        Some(value: list) => {
-            print("list {list[0]} {list[1]}");
-        }
+        Some(value: list) => { print("list {list[0]} {list[1]}"); }
         None => {}
     }
 }

@@ -14,15 +14,19 @@ fn area(s: Shape) -> f64[m^2] {
 }
 
 fn parse_digit(c: str) -> Result[i64, str] {
-    if c == "0" { return Ok(0); }
-    if c == "1" { return Ok(1); }
+    if c == "0" {
+        return Ok(0);
+    }
+    if c == "1" {
+        return Ok(1);
+    }
     return Err("not a binary digit: {c}");
 }
 
 fn binary(digits: [str]) -> Result[i64, str] {
     var n: i64 = 0;
     for d in digits {
-        let bit: i64 = parse_digit(d)?;    // returns the Err early
+        let bit: i64 = parse_digit(d)?; // returns the Err early
         n = n * 2 + bit;
     }
     return Ok(n);
@@ -31,7 +35,7 @@ fn binary(digits: [str]) -> Result[i64, str] {
 fn main() uses io {
     let shapes: [Shape] = [Shape.Circle(1.0[m]), Shape.Rect(width: 2.0[m], height: 3.0[m])];
     for s in shapes {
-        print("area {area(s)}");               // area 3.14159 m^2, then area 6.0 m^2
+        print("area {area(s)}"); // area 3.14159 m^2, then area 6.0 m^2
     }
     match binary(["1", "0", "1"]) {
         Ok(value) => { print("binary 101 is {value}"); }

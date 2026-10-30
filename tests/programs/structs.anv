@@ -1,5 +1,15 @@
-struct Vec2 { x: f64, y: f64, }
-struct Particle { name: str, pos: Vec2, vel: Vec2, alive: bool, id: i64, }
+struct Vec2 {
+    x: f64,
+    y: f64,
+}
+
+struct Particle {
+    name: str,
+    pos: Vec2,
+    vel: Vec2,
+    alive: bool,
+    id: i64,
+}
 
 fn add(a: Vec2, b: Vec2) -> Vec2 {
     return Vec2 { x: a.x + b.x, y: a.y + b.y };

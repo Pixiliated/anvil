@@ -187,6 +187,9 @@ fn project_tools_answer_over_stdio() {
     let (err, v) = c.call("record_export", json!({}));
     assert!(!err && v["markdown"].as_str().unwrap().contains("Use goldens"), "{v}");
 
+    let (err, v) = c.call("fmt", json!({ "check": true }));
+    assert!(!err && v["files"][0]["changed"] == false, "{v}");
+
     // Watching a run: the same JSON as the CLI.
     let (err, v) = c.call("trace", json!({ "file": "src/main.anv" }));
     assert!(!err && v["events"][1]["print"] == "hi" && v["end"]["exit"] == 0, "{v}");

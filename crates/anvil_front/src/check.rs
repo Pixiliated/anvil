@@ -135,6 +135,12 @@ pub fn analyze(src: &SourceFile, file: &ast::File) -> Analysis {
         func_index: HashMap::new(),
     };
     let program = c.program(file);
+    // Layout last, and only for an otherwise clean file: a broken file is fixed first.
+    if c.diags.is_empty() {
+        if let Some(d) = crate::fmt::check_layout(src, file) {
+            c.diags.push(d);
+        }
+    }
     c.diags.sort_by_key(|d| (d.span.start, d.code));
     let program = c.diags.is_empty().then_some(program);
     Analysis { program, diags: c.diags, facts: c.facts }

@@ -44,10 +44,10 @@ green and the interpreter and native backend agreeing on every program in `tests
 - [x] `golden check` leaves the actual output and a diff in `out/golden/`
 - [x] `anvil watch` (CLI only, listed as a parity exception with its reason)
 
-## M5: Formatter
-- [ ] `anvil fmt` with one canonical layout, comments preserved
-- [ ] `anvil check` reports unformatted files as an error with a mechanical fix
-- [ ] Parser reports several syntax errors per run where recovery is reliable
+## M5: Formatter (v0.6)
+- [x] `anvil fmt` with one canonical layout, comments preserved
+- [x] `anvil check` reports unformatted files as an error with a mechanical fix
+- [x] Parser reports several syntax errors per run where recovery is reliable
 
 ## M6: Text and collections
 - [ ] Slicing arrays and strings by range, string search and split

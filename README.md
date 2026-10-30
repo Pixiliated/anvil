@@ -19,15 +19,19 @@ fn area(s: Shape) -> f64[m^2] {
 }
 
 fn parse_digit(c: str) -> Result[i64, str] {
-    if c == "0" { return Ok(0); }
-    if c == "1" { return Ok(1); }
+    if c == "0" {
+        return Ok(0);
+    }
+    if c == "1" {
+        return Ok(1);
+    }
     return Err("not a binary digit: {c}");
 }
 
 fn binary(digits: [str]) -> Result[i64, str] {
     var n: i64 = 0;
     for d in digits {
-        let bit: i64 = parse_digit(d)?;    // returns the Err early
+        let bit: i64 = parse_digit(d)?; // returns the Err early
         n = n * 2 + bit;
     }
     return Ok(n);
@@ -36,7 +40,7 @@ fn binary(digits: [str]) -> Result[i64, str] {
 fn main() uses io {
     let shapes: [Shape] = [Shape.Circle(1.0[m]), Shape.Rect(width: 2.0[m], height: 3.0[m])];
     for s in shapes {
-        print("area {area(s)}");               // area 3.14159 m^2, then area 6.0 m^2
+        print("area {area(s)}"); // area 3.14159 m^2, then area 6.0 m^2
     }
     match binary(["1", "0", "1"]) {
         Ok(value) => { print("binary 101 is {value}"); }
@@ -54,8 +58,9 @@ test "rectangles" {
 Agents write code quickly. They are worse at knowing when that code is right. Anvil moves as
 much of that judgement as possible into the compiler:
 
-- **One obvious way.** One loop per job, one way to bind, one way to call. Variation between
-  runs and between agents shrinks, and so does the room for plausible-but-wrong code.
+- **One obvious way.** One loop per job, one way to bind, one way to call, one layout (`anvil
+  fmt`; any other layout is an error whose fix is the formatted file). Variation between runs
+  and between agents shrinks, and so does the room for plausible-but-wrong code.
 - **Errors that carry their fix.** Every error has a stable code, an exact range, and fixes
   labelled `mechanical` (safe to apply) or `changes_meaning` (compiles, but may hide the real
   bug). `--json` gives the same thing to tools.
@@ -76,7 +81,7 @@ in full (`anvil spec` prints it).
 
 ## Status
 
-v0.5: single-file programs with i64, f64 with units, bool, strings with interpolation,
+v0.6: single-file programs with i64, f64 with units, bool, strings with interpolation,
 growable arrays, structs, enums with exhaustive `match`, `Option` and `Result` with `?`,
 contracts, effects and tests. There are two backends:
 
@@ -85,7 +90,7 @@ contracts, effects and tests. There are two backends:
   are reference counted with copy-on-write; the tests check that every object is freed.
 
 The test suite runs every program through both and requires identical stdout, panic messages
-and exit codes. A formatter, modules, generics and other platforms are on the
+and exit codes. Collections, modules, generics and other platforms are on the
 [roadmap](docs/ROADMAP.md).
 
 ## Using it
@@ -111,6 +116,7 @@ target/release/anvil build examples/orders.anv -o orders.exe
 | `anvil run f.anv [--max-steps N]` | interpret `main` |
 | `anvil build f.anv [-o out.exe] [--asm]` | compile to a native executable |
 | `anvil test f.anv [--max-steps N]` | run `test` blocks |
+| `anvil fmt [f.anv] [--check]` | put a file, or every project file, in the canonical layout |
 | `anvil fix f.anv` | apply every mechanical fix until none is left |
 | `anvil outline f.anv` | list items and signatures |
 | `anvil type-at f.anv LINE COL` | type and declaration at a position |

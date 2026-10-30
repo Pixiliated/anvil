@@ -277,6 +277,31 @@ fn lex_range(text: &str, start: usize, end: usize) -> Result<Vec<Token>, Diagnos
     Ok(out)
 }
 
+/// The `//` comments of `text`, each from `//` to the end of its line (not including the line
+/// break). Strings are skipped, so `"a // b"` is not a comment. The formatter puts them back.
+pub fn comments(text: &str) -> Vec<Span> {
+    let bytes = text.as_bytes();
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'"' => {
+                i = string_end(bytes, i).unwrap_or_else(|| text[i..].find('\n').map_or(bytes.len(), |n| i + n));
+            }
+            b'/' if bytes.get(i + 1) == Some(&b'/') => {
+                let mut end = text[i..].find('\n').map_or(bytes.len(), |n| i + n);
+                if end > i && bytes[end - 1] == b'\r' {
+                    end -= 1;
+                }
+                out.push(Span::new(i, end));
+                i = end;
+            }
+            _ => i += 1,
+        }
+    }
+    out
+}
+
 /// Index just past the string literal starting at `start` (a `"`), or None if it does not close
 /// on its line. Only finds the end; lex_string reports what is wrong inside.
 fn string_end(bytes: &[u8], start: usize) -> Option<usize> {
