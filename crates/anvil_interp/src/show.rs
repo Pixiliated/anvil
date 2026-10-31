@@ -33,7 +33,7 @@ fn write(out: &mut String, v: &Value, ty: &Ty, program: &Program) {
         (Value::Str(s), _) => quote(out, s),
         (Value::Struct(fields), Ty::Struct(id)) => {
             let def = &program.structs[*id];
-            out.push_str(&def.name);
+            out.push_str(source_name(&def.name));
             out.push_str(" { ");
             for (i, (value, (name, fty))) in fields.iter().zip(&def.fields).enumerate() {
                 if i > 0 {
@@ -82,7 +82,7 @@ fn write(out: &mut String, v: &Value, ty: &Ty, program: &Program) {
             let variant = &def.variants[*tag];
             // Option and Result constructors are written without a prefix.
             if !(def.name.starts_with("Option[") || def.name.starts_with("Result[")) {
-                out.push_str(&def.name);
+                out.push_str(source_name(&def.name));
                 out.push('.');
             }
             out.push_str(&variant.name);
@@ -105,6 +105,11 @@ fn write(out: &mut String, v: &Value, ty: &Ty, program: &Program) {
         }
         (v, ty) => unreachable!("show {v:?} as {ty:?}"),
     }
+}
+
+/// A type's name as source writes it in a literal: `Pair` for the instance `Pair[i64, str]`.
+fn source_name(name: &str) -> &str {
+    name.split('[').next().unwrap_or(name)
 }
 
 fn quote(out: &mut String, s: &str) {

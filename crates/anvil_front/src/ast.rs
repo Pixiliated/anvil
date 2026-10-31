@@ -145,6 +145,8 @@ pub struct AllowDecl {
 pub struct TestDecl {
     pub name: String,
     pub name_span: Span,
+    /// `for all xs: [i64], n: i64`: a property test over generated inputs; empty otherwise.
+    pub inputs: Vec<Param>,
     pub uses: Vec<Ident>,
     pub uses_span: Option<Span>,
     pub uses_insert: Span,

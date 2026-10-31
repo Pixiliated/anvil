@@ -202,7 +202,8 @@ fn examples_check_and_pass_their_tests() {
     for rel in files("examples") {
         let check = anvil(&["check", &rel]);
         assert!(check.status.success(), "{rel}: {}", String::from_utf8_lossy(&check.stderr));
-        let test = anvil(&["test", &rel, "--json"]);
+        // Natively too: the tests compiled into one executable must agree with the interpreter.
+        let test = anvil(&["test", &rel, "--native", "--json"]);
         assert!(test.status.success(), "{rel}: {}", String::from_utf8_lossy(&test.stdout));
     }
 }
@@ -868,4 +869,67 @@ fn main() uses io {
     assert_eq!(v["diagnostics"][0]["code"], "E0703", "{v}");
     assert_eq!(v["diagnostics"][0]["fixes"][0]["kind"], "changes_meaning");
     assert_eq!(v["diagnostics"][0]["fixes"][0]["edits"][0]["text"], ": ordered");
+}
+
+#[test]
+fn property_tests_find_small_counterexamples_and_native_tests_agree() {
+    let p = Scratch::new("properties");
+    p.write(
+        "p.anv",
+        r#"fn largest(xs: [i64]) -> i64 {
+    var best: i64 = 0;
+    for x in xs {
+        if x > best {
+            best = x;
+        }
+    }
+    return best;
+}
+
+test "the largest is in the array" for all xs: [i64] {
+    if xs.len() > 0 {
+        var found: bool = false;
+        for x in xs {
+            if x == largest(xs) {
+                found = true;
+            }
+        }
+        assert(found);
+    }
+}
+
+test "plain and passing" {
+    assert(largest([1, 5, 2]) == 5);
+}
+
+test "plain and failing" {
+    assert(largest([-3]) == -3);
+}
+"#,
+    );
+    let v = p.json(&["test", "p.anv"]);
+    let t = &v["tests"][0];
+    // Seeded and shrunk: the same small counterexample every run.
+    assert_eq!((t["ok"].as_bool(), t["inputs"].as_str()), (Some(false), Some("xs: [-1]")), "{v}");
+    assert_eq!(p.json(&["test", "p.anv"])["tests"][0], *t, "runs repeat");
+    assert_eq!(v["cases"], 100);
+    let other_seed = p.json(&["test", "p.anv", "--seed", "7", "--cases", "300"]);
+    assert_eq!(other_seed["cases"], 300);
+    assert_eq!(other_seed["tests"][0]["ok"], false, "{other_seed}");
+
+    // Natively the plain tests run again and must agree, panics included.
+    let v = p.json(&["test", "p.anv", "--native"]);
+    assert_eq!(v["tests"][1]["native"], "ok", "{v}");
+    let failing = &v["tests"][2];
+    assert_eq!(failing["native"].as_str().unwrap(), format!("panic: {}", failing["panic"].as_str().unwrap()));
+    assert!(v["tests"][0].get("native").is_none(), "property tests run in the interpreter only");
+}
+
+#[test]
+fn fuzzed_programs_agree_on_both_backends() {
+    let p = Scratch::new("fuzz");
+    let v = p.json(&["fuzz", "--seed", "1", "--count", "3"]);
+    assert_eq!((v["ok"].as_bool(), v["failed"].as_u64()), (Some(true), Some(0)), "{v}");
+    let statuses: Vec<&str> = v["programs"].as_array().unwrap().iter().map(|r| r["status"].as_str().unwrap()).collect();
+    assert_eq!(statuses, ["same", "same", "same"]);
 }

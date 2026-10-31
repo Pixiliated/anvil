@@ -222,19 +222,17 @@ fn verify_file(
     let p2 = program.clone();
     let (results, mut ran) = anvil_interp::run_on_big_stack(move || {
         let mut ran = vec![false; p2.funcs.len()];
-        let mut results = Vec::new();
-        for i in 0..p2.tests.len() {
-            let mut rec = Recorder::new(&p2);
-            results.push(anvil_interp::run_test_recorded(&p2, i, &mut Vec::new(), max_steps, Some(&mut rec)));
-            mark_ran(&mut ran, &Counts::of(&rec));
-        }
+        let mut rec = Recorder::new(&p2);
+        let results = crate::testing::run_all(&p2, crate::PROPERTY_CASES, 0, max_steps, Some(&mut rec));
+        mark_ran(&mut ran, &Counts::of(&rec));
         (results, ran)
     });
     let mut test_failures = 0;
-    for (t, r) in tests.iter().zip(&results) {
-        if let Err(m) = r {
+    for r in &results {
+        if let Some(m) = &r.failure {
             test_failures += 1;
-            add("test", format!("test \"{}\" fails: {m}", t.name), String::new());
+            let inputs = r.inputs.as_ref().map(|i| format!(" for {i}")).unwrap_or_default();
+            add("test", format!("test \"{}\" fails{inputs}: {m}", r.name), String::new());
         }
     }
     let g = golden::check_file(project, &src, program, native, max_steps);

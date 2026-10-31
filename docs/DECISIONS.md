@@ -158,3 +158,19 @@ Short records of choices that are not obvious from the code. Newest last.
   is untested.
 - **Endless instances are an error** (E0704), found by counting how many instances deep a chain
   of instances goes.
+
+## M9 (v0.10)
+
+- **Property tests are `test ... for all inputs`**, a kind of test rather than a new item, so
+  they run, count for coverage and appear in `verify` like any test.
+- **Seeded by the test's name**: the same cases every run, so a property test never flakes and
+  a failure is reproducible from its seed. Inputs grow with the case number and failures shrink
+  greedily, one input at a time, so the report is a small counterexample.
+- **Generated floats are finite.** nan would make most equality properties fail for reasons
+  that are IEEE's, not the code's; a test that cares about nan writes the case out.
+- **`test --native` covers plain tests; property tests stay in the interpreter**, the
+  reference. Making the same values natively would mean a second generator; fuzzing already
+  checks the backends agree.
+- **The fuzzer generates typed programs that end**: helpers call only earlier helpers and
+  loops count to small constants. Panics are kept (half the programs end in one) because both
+  backends must give the same panic. 100 programs agreed when it was added.

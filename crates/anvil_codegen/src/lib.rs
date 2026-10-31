@@ -41,6 +41,44 @@ pub fn build_exe(program: &Program, out: &Path, work_dir: &Path, asm: bool) -> R
     Ok(listing)
 }
 
+/// Builds the program's plain tests (property tests run in the interpreter) into one
+/// executable: `exe N` runs test N, its index in `program.tests`, and exits 0 when it passes or
+/// panics like any program. Returns the indices of the tests it contains.
+pub fn build_test_exe(program: &Program, out: &Path, work_dir: &Path) -> Result<Vec<usize>, String> {
+    let mut p = program.clone();
+    p.main = None;
+    let mut entries = Vec::new();
+    for (i, t) in program.tests.iter().enumerate().filter(|(_, t)| t.inputs.is_empty()) {
+        p.funcs.push(Func {
+            name: format!("test{i}"),
+            span: Default::default(),
+            allows: Vec::new(),
+            module: 0,
+            instance: false,
+            params: Vec::new(),
+            ret: Ty::Void,
+            uses_io: t.uses_io,
+            requires: Vec::new(),
+            ensures: Vec::new(),
+            result_local: None,
+            locals: t.locals.clone(),
+            body: t.body.clone(),
+        });
+        entries.push((i, p.funcs.len() - 1));
+    }
+    let (object, _) = compile(&p, false, Entry::Tests(&entries))?;
+    link::link_exe(&object, out, work_dir)?;
+    Ok(entries.iter().map(|(i, _)| *i).collect())
+}
+
+/// What the executable's C `main` runs.
+enum Entry<'e> {
+    /// The program's main, if it has one.
+    Main,
+    /// (test index, FuncId of its body), chosen by the first argument.
+    Tests(&'e [(usize, FuncId)]),
+}
+
 const I: Type = types::I64;
 
 /// (name, params, returns) of every runtime function.
@@ -70,6 +108,8 @@ const RUNTIME: &[(&str, &[Type], &[Type])] = &[
     ("anvil_str_eq", &[I, I], &[I]),
     ("anvil_map_find_i64", &[I, I], &[I]),
     ("anvil_map_find_str", &[I, I], &[I]),
+    ("anvil_test_index", &[I, I], &[I]),
+    ("anvil_no_test", &[I], &[]),
     ("anvil_exit", &[I], &[]),
     ("anvil_check_exit", &[I], &[]),
 ];
@@ -91,6 +131,10 @@ struct Backend {
 }
 
 pub fn compile_object(program: &Program, asm: bool) -> Result<(Vec<u8>, String), String> {
+    compile(program, asm, Entry::Main)
+}
+
+fn compile(program: &Program, asm: bool, entry: Entry) -> Result<(Vec<u8>, String), String> {
     let mut listing = String::new();
     let mut flags = settings::builder();
     let set = |f: &mut settings::Builder, k: &str, v: &str| f.set(k, v).map_err(|e| format!("cranelift flag {k}: {e}"));
@@ -158,8 +202,13 @@ pub fn compile_object(program: &Program, asm: bool) -> Result<(Vec<u8>, String),
             .define_function(id, &mut ctx)
             .map_err(|e| format!("codegen of == for {} failed: {e:?}", show(program, &ty)))?;
     }
-    if let Some(main) = program.main {
-        be.c_main(program, main, &mut fbc)?;
+    match entry {
+        Entry::Main => {
+            if let Some(main) = program.main {
+                be.c_main(program, main, &mut fbc)?;
+            }
+        }
+        Entry::Tests(tests) => be.c_test_main(tests, &mut fbc)?,
     }
     let product = be.module.finish();
     Ok((product.emit().map_err(|e| e.to_string())?, listing))
@@ -297,6 +346,55 @@ impl Backend {
         self.module.define_data(id, &desc).expect("define type info");
         self.type_infos.insert(key, id);
         id
+    }
+
+    /// The C entry point of a test executable: runs the test named by its index in argv[1].
+    fn c_test_main(&mut self, tests: &[(usize, FuncId)], fbc: &mut FunctionBuilderContext) -> Result<(), String> {
+        let mut sig = self.module.make_signature();
+        sig.params.extend([AbiParam::new(types::I32), AbiParam::new(I)]);
+        sig.returns.push(AbiParam::new(types::I32));
+        let id = self.module.declare_function("main", Linkage::Export, &sig).map_err(|e| e.to_string())?;
+        let mut ctx = Context::new();
+        ctx.func.signature = sig;
+        ctx.func.name = UserFuncName::user(1, id.as_u32());
+        {
+            let mut b = FunctionBuilder::new(&mut ctx.func, fbc);
+            let entry = b.create_block();
+            b.append_block_params_for_function_params(entry);
+            b.switch_to_block(entry);
+            b.seal_block(entry);
+            let (argc, argv) = (b.block_params(entry)[0], b.block_params(entry)[1]);
+            let argc = b.ins().sextend(I, argc);
+            let index_of = self.module.declare_func_in_func(self.runtime["anvil_test_index"], b.func);
+            let call = b.ins().call(index_of, &[argc, argv]);
+            let index = b.inst_results(call)[0];
+            let done = b.create_block();
+            for (i, fid) in tests {
+                let run = b.create_block();
+                let next = b.create_block();
+                let hit = b.ins().icmp_imm_s(IntCC::Equal, index, *i as i64);
+                b.ins().brif(hit, run, &[], next, &[]);
+                b.switch_to_block(run);
+                b.seal_block(run);
+                let f = self.module.declare_func_in_func(self.funcs[*fid], b.func);
+                b.ins().call(f, &[]);
+                b.ins().jump(done, &[]);
+                b.switch_to_block(next);
+                b.seal_block(next);
+            }
+            let none = self.module.declare_func_in_func(self.runtime["anvil_no_test"], b.func);
+            b.ins().call(none, &[index]);
+            b.ins().jump(done, &[]);
+            b.switch_to_block(done);
+            b.seal_block(done);
+            let exit = self.module.declare_func_in_func(self.runtime["anvil_exit"], b.func);
+            let zero = b.ins().iconst(I, 0);
+            b.ins().call(exit, &[zero]);
+            let zero = b.ins().iconst(types::I32, 0);
+            b.ins().return_(&[zero]);
+            b.finalize(self.module.isa().frontend_config());
+        }
+        self.module.define_function(id, &mut ctx).map_err(|e| format!("codegen of the test main failed: {e:?}"))
     }
 
     /// The C entry point: calls anv_main, validates the exit code, flushes and exits.

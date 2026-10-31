@@ -3,16 +3,20 @@
 //! is the one list of commands and their arguments: the CLI parses with it and a test checks
 //! that the MCP server has a tool for each, with the same parameters.
 
+mod fuzz;
 pub mod golden;
 mod inspect;
 mod proj;
 pub mod project;
+mod testing;
 
+pub use fuzz::{fuzz, program_for};
 pub use inspect::{profile, trace, TRACE_LIMIT};
 pub use proj::{
     fmt, golden_approve, golden_check, list, record_decide, record_export, record_import_roadmap, record_query,
     record_status, review, verify, watch,
 };
+pub use testing::{test, PROPERTY_CASES};
 
 use anvil_front::check::{Analysis, Def};
 use anvil_front::diag::{self, Diagnostic, FixKind};
@@ -59,8 +63,13 @@ pub const COMMANDS: &[Command] = &[
     Command {
         name: "test",
         positionals: &["file"],
-        options: &[("max-steps", "N", "stop each test after N steps")],
-        summary: "run every test block",
+        options: &[
+            ("max-steps", "N", "stop each test (or property case) after N steps"),
+            ("native", "", "also run the plain tests as a native executable; it must agree"),
+            ("cases", "N", "cases per property test (default 100)"),
+            ("seed", "N", "seed for property tests' inputs (default 0)"),
+        ],
+        summary: "run every test block; `for all` tests on generated inputs",
     },
     Command {
         name: "fmt",
@@ -109,6 +118,15 @@ pub const COMMANDS: &[Command] = &[
             STEPS,
         ],
         summary: "a timeline of calls, arguments, returns and prints",
+    },
+    Command {
+        name: "fuzz",
+        positionals: &[],
+        options: &[
+            ("seed", "N", "seed of the first program (default 1); program N is always the same"),
+            ("count", "N", "programs to try (default 10)"),
+        ],
+        summary: "random well-typed programs on both backends; any difference is a backend bug",
     },
     Command {
         name: "profile",
@@ -341,46 +359,6 @@ pub(crate) fn unique() -> u64 {
     use std::sync::atomic::{AtomicU64, Ordering};
     static NEXT: AtomicU64 = AtomicU64::new(0);
     NEXT.fetch_add(1, Ordering::Relaxed)
-}
-
-pub fn test(root: &Path, file: &str, max_steps: Option<u64>) -> Report {
-    let (_, program) = try_report!(compile(root, file));
-    let results = anvil_interp::run_on_big_stack(move || {
-        let mut results = Vec::new();
-        for (i, t) in program.tests.iter().enumerate() {
-            let mut out = Vec::new();
-            let r = anvil_interp::run_test(&program, i, &mut out, max_steps);
-            results.push((t.name.clone(), r, String::from_utf8_lossy(&out).into_owned()));
-        }
-        results
-    });
-    let failed = results.iter().filter(|r| r.1.is_err()).count();
-    let passed = results.len() - failed;
-    let tests: Vec<_> = results
-        .iter()
-        .map(|(name, r, out)| match r {
-            Ok(()) => json!({ "name": name, "ok": true }),
-            Err(m) => json!({ "name": name, "ok": false, "panic": m, "output": out }),
-        })
-        .collect();
-    let mut text = String::new();
-    for (name, r, out) in &results {
-        if let Err(m) = r {
-            text.push_str(&format!("FAIL \"{name}\": {m}\n"));
-            for line in out.lines() {
-                text.push_str(&format!("  | {line}\n"));
-            }
-        }
-    }
-    text.push_str(&format!("{passed} passed, {failed} failed\n"));
-    let json = json!({ "ok": failed == 0, "passed": passed, "failed": failed, "tests": tests });
-    Report {
-        json,
-        stdout: text,
-        stderr: String::new(),
-        exit: if failed == 0 { EXIT_OK } else { EXIT_FAILED },
-        failed: failed > 0,
-    }
 }
 
 /// Applies every mechanical fix in `file`, rechecks, and repeats until none is left (at most 20

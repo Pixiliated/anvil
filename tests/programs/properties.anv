@@ -1,0 +1,78 @@
+// Property tests: each `for all` test runs on 100 generated inputs, the same ones every run.
+struct Point {
+    x: i64,
+    y: i64,
+}
+
+fn reverse[T](xs: [T]) -> [T] {
+    var out: [T] = [];
+    var i: i64 = xs.len();
+    while i > 0 {
+        i = i - 1;
+        out.push(xs[i]);
+    }
+    return out;
+}
+
+fn insert_sorted(xs: [i64], x: i64) -> [i64] {
+    var out: [i64] = [];
+    var placed: bool = false;
+    for v in xs {
+        if !placed && x <= v {
+            out.push(x);
+            placed = true;
+        }
+        out.push(v);
+    }
+    if !placed {
+        out.push(x);
+    }
+    return out;
+}
+
+fn sort(xs: [i64]) -> [i64] {
+    var out: [i64] = [];
+    for x in xs {
+        out = insert_sorted(xs: out, x: x);
+    }
+    return out;
+}
+
+fn is_sorted(xs: [i64]) -> bool {
+    for i in 1..xs.len() {
+        if xs[i - 1] > xs[i] {
+            return false;
+        }
+    }
+    return true;
+}
+
+fn flip(p: Point) -> Point {
+    return Point { x: p.y, y: p.x };
+}
+
+test "reverse twice gives back the input" for all xs: [str] {
+    assert(reverse(reverse(xs)) == xs);
+}
+
+test "sort orders and keeps the length" for all xs: [i64] {
+    let s: [i64] = sort(xs);
+    assert(is_sorted(s));
+    assert(s.len() == xs.len());
+    assert(sort(s) == s);
+}
+
+test "flipping twice is no change" for all p: Point {
+    assert(flip(flip(p)) == p);
+}
+
+test "a set key reads back" for all m: Map[str, i64], k: str, v: i64 {
+    var n: Map[str, i64] = m;
+    n.set(key: k, value: v);
+    assert(n.get(k) == Some(v));
+    assert(n.len() >= m.len());
+}
+
+fn main() uses io {
+    print("{sort([3, 1, 2]) == [1, 2, 3]} {is_sorted([1, 2, 2])}");
+}

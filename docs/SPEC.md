@@ -1,4 +1,4 @@
-# Anvil language specification (v0.9)
+# Anvil language specification (v0.10)
 
 Anvil is a small, compiled, general-purpose language designed to be written mostly by AI agents
 and read by humans. Its rules aim at three things: one obvious way to write each thing, code
@@ -422,6 +422,24 @@ randomness, clock or environment access.
 `test "name" { ... }` blocks run with `anvil test file.anv`. A test passes if it finishes and
 fails if it panics (`assert`, a contract, overflow, a bad index). Tests may declare `uses io`.
 
+A **property test** names inputs after `for all` and runs on generated values of their types:
+
+```
+test "sort keeps the length" for all xs: [i64] {
+    assert(sort(xs).len() == xs.len());
+}
+```
+
+It runs 100 cases (`--cases N`), small inputs first. The inputs come from a generator seeded by
+the test's name (and `--seed N`, default 0), so every run sees the same cases. Any type works:
+integers include 0, -1 and the extremes, floats are finite, text includes characters of two and
+three bytes, and arrays, maps, structs and enums are built from their parts. A failing case is
+shrunk while it still fails, and reported with its smallest inputs: `for all: xs: [-1]`.
+
+`anvil test --native` also builds the plain tests into one executable and runs each natively,
+with the leak check; a test that passes, panics or prints differently there fails as "the
+backends disagree". Property tests run in the interpreter, the reference.
+
 ## Tooling
 
 ```
@@ -429,10 +447,12 @@ anvil check   file.anv                 type-check
 anvil run     file.anv [--max-steps N] interpret (the reference semantics)
 anvil build   file.anv [-o out.exe] [--asm]
                                        native executable via Cranelift
-anvil test    file.anv [--max-steps N] run test blocks
+anvil test    file.anv [--native] [--cases N] [--seed N] [--max-steps N]
+                                       run test blocks; `for all` tests on generated inputs
 anvil fmt     [file.anv] [--check]     put the file (or every project file) in canonical
                                        layout; --check changes nothing
 anvil fix     file.anv                 apply every mechanical fix until none is left
+anvil fuzz    [--seed N] [--count N]   random programs on both backends (see below)
 anvil trace   file.anv [--test NAME] [--only F,G] [--limit N]
                                        a run as a timeline: calls, returns, prints
 anvil profile file.anv [--test NAME]   calls and steps per function
@@ -515,5 +535,6 @@ failing check is a tool error. Over MCP, every run stops after 100,000,000 steps
 `max_steps` says otherwise.
 
 The interpreter and the native compiler must agree exactly: same stdout, same panic message,
-same exit code. The one known difference: the interpreter panics past 10,000 nested calls,
+same exit code. `anvil fuzz` checks it on random well-typed programs (seed N always makes the
+same program); a program on which they differ is saved to `out/fuzz/<seed>.anv`. The one known difference: the interpreter panics past 10,000 nested calls,
 while native code recurses until its 64 MiB stack runs out.

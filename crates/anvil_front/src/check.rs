@@ -1358,10 +1358,25 @@ impl<'a> Checker<'a> {
     fn test(&mut self, t: &ast::TestDecl) -> Test {
         let uses_io = self.effects(&t.uses);
         let mut b = self.new_body(Ty::Void, uses_io, t.uses_insert);
+        let mut inputs = Vec::new();
+        for p in &t.inputs {
+            let ty = self.resolve_type(&p.ty);
+            let meta = LocalMeta {
+                span: p.name.span,
+                kw_span: None,
+                mutable: false,
+                is_param: true,
+                is_loop_var: false,
+                used: false,
+                assigned: false,
+                rename_fix: None,
+            };
+            inputs.push(self.declare_local(&mut b, &p.name, ty, meta));
+        }
         let body = self.block(&mut b, &t.body);
         self.finish_locals(&b);
         self.check_effect_usage(&b, t.uses_span, t.uses_insert);
-        Test { name: t.name.clone(), uses_io, locals: b.locals, body }
+        Test { name: t.name.clone(), inputs, uses_io, locals: b.locals, body }
     }
 
     fn block(&mut self, b: &mut Body, block: &ast::Block) -> Vec<Stmt> {

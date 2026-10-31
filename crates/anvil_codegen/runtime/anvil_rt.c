@@ -421,3 +421,19 @@ int64_t anvil_map_find_str(const AnvArr *m, const AnvStr *key) {
     }
     return -lo - 1;
 }
+
+/* ---- test executables: `exe N` runs test N ---- */
+
+int64_t anvil_test_index(int64_t argc, char **argv) {
+    if (argc != 2) runtime_error("a test executable takes one argument, the index of the test to run");
+    char *end;
+    long long v = strtoll(argv[1], &end, 10);
+    if (*argv[1] == 0 || *end != 0 || v < 0) runtime_error("the test index must be a whole number");
+    return (int64_t)v;
+}
+
+void anvil_no_test(int64_t index) {
+    char buf[64];
+    snprintf(buf, sizeof buf, "no test with index %lld", (long long)index);
+    runtime_error(buf);
+}

@@ -1,6 +1,7 @@
 //! Reference interpreter over the typed IR. It defines what a program means; the native backend
 //! is tested against it (same stdout, same panic message, same exit code).
 
+pub mod gen;
 mod show;
 pub use show::{show, SHOWN_BYTES, SHOWN_CHARS, SHOWN_ITEMS};
 
@@ -35,7 +36,7 @@ fn key_order(a: &Value, b: &Value) -> std::cmp::Ordering {
 }
 
 /// Ok(index) of `key`, or Err(the index where it would go).
-fn find_key(entries: &[(Value, Value)], key: &Value) -> Result<usize, usize> {
+pub(crate) fn find_key(entries: &[(Value, Value)], key: &Value) -> Result<usize, usize> {
     entries.binary_search_by(|(k, _)| key_order(k, key))
 }
 
@@ -237,17 +238,131 @@ pub fn run_test_recorded(
     max_steps: Option<u64>,
     rec: Option<&mut Recorder>,
 ) -> Result<(), String> {
+    run_test_with(program, index, &[], out, max_steps, rec).map_err(|f| match f {
+        TestFail::Panic(m) | TestFail::Stopped(m) => m,
+    })
+}
+
+/// Why a test run did not finish.
+#[derive(Clone, Debug, PartialEq)]
+pub enum TestFail {
+    /// The text after "panic: ".
+    Panic(String),
+    /// The step limit's message.
+    Stopped(String),
+}
+
+/// Runs one test body with `inputs` bound to its `for all` inputs (none for a plain test).
+pub fn run_test_with(
+    program: &Program,
+    index: usize,
+    inputs: &[Value],
+    out: &mut dyn Write,
+    max_steps: Option<u64>,
+    rec: Option<&mut Recorder>,
+) -> Result<(), TestFail> {
     let test = &program.tests[index];
     let mut it = Interp { program, out, depth: 0, steps_left: max_steps, taken: 0, rec };
     let mut frame = vec![Value::Void; test.locals.len()];
+    for (l, v) in test.inputs.iter().zip(inputs) {
+        frame[*l] = v.clone();
+    }
     let r = it.block(&test.body, &mut frame);
     it.finish();
     match r {
         Ok(_) => Ok(()),
-        Err(Unwind::Panic(m)) => Err(m),
-        Err(Unwind::OutOfSteps) => Err(step_limit_message(max_steps.unwrap())),
+        Err(Unwind::Panic(m)) => Err(TestFail::Panic(m)),
+        Err(Unwind::OutOfSteps) => Err(TestFail::Stopped(step_limit_message(max_steps.unwrap()))),
         Err(Unwind::Return(v)) => unreachable!("`?` in a test: {v:?}"),
     }
+}
+
+/// How a property test went.
+#[derive(Debug)]
+pub enum Property {
+    Passed {
+        cases: u64,
+    },
+    /// The first failing case, after shrinking: its inputs, its panic and what it printed.
+    Failed {
+        case: u64,
+        inputs: Vec<Value>,
+        message: String,
+        output: String,
+        shrinks: u64,
+    },
+    Stopped(String),
+}
+
+/// Shrinking stops after this many tries, whatever it has reached.
+pub const MAX_SHRINKS: u64 = 1000;
+
+/// Runs property test `index` on `cases` generated inputs (seeded by its name and `seed`, so
+/// every run sees the same cases); a failing case is shrunk while it keeps failing.
+pub fn run_property(
+    program: &Program,
+    index: usize,
+    cases: u64,
+    seed: u64,
+    max_steps: Option<u64>,
+    mut rec: Option<&mut Recorder>,
+) -> Property {
+    let test = &program.tests[index];
+    let types: Vec<Ty> = test.inputs.iter().map(|l| test.locals[*l].ty.clone()).collect();
+    let mut rng = gen::Rng::new(gen::test_seed(&test.name, seed));
+    for case in 0..cases {
+        // Small inputs first, larger as the cases go on.
+        let size = 1 + case * 30 / cases.max(1);
+        let inputs: Vec<Value> = types.iter().map(|t| gen::generate(t, program, &mut rng, size)).collect();
+        let mut out = Vec::new();
+        match run_test_with(program, index, &inputs, &mut out, max_steps, rec.as_deref_mut()) {
+            Ok(()) => {}
+            Err(TestFail::Stopped(m)) => return Property::Stopped(m),
+            Err(TestFail::Panic(message)) => {
+                let (inputs, message, output, shrinks) =
+                    shrink_failure(program, index, &types, inputs, message, out, max_steps);
+                return Property::Failed { case, inputs, message, output, shrinks };
+            }
+        }
+    }
+    Property::Passed { cases }
+}
+
+/// Greedily replaces one input at a time with a smaller one that still fails.
+fn shrink_failure(
+    program: &Program,
+    index: usize,
+    types: &[Ty],
+    mut inputs: Vec<Value>,
+    mut message: String,
+    out: Vec<u8>,
+    max_steps: Option<u64>,
+) -> (Vec<Value>, String, String, u64) {
+    let mut output = String::from_utf8_lossy(&out).into_owned();
+    let mut tries = 0;
+    let mut kept = 0;
+    'smaller: loop {
+        for i in 0..inputs.len() {
+            for c in gen::shrink(&inputs[i], &types[i], program) {
+                if tries == MAX_SHRINKS {
+                    break 'smaller;
+                }
+                tries += 1;
+                let mut trial = inputs.clone();
+                trial[i] = c;
+                let mut out = Vec::new();
+                if let Err(TestFail::Panic(m)) = run_test_with(program, index, &trial, &mut out, max_steps, None) {
+                    inputs = trial;
+                    message = m;
+                    output = String::from_utf8_lossy(&out).into_owned();
+                    kept += 1;
+                    continue 'smaller;
+                }
+            }
+        }
+        break;
+    }
+    (inputs, message, output, kept)
 }
 
 /// Runs `f` on a thread with a stack big enough for MAX_CALL_DEPTH interpreted calls.

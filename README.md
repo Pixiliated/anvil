@@ -81,7 +81,7 @@ in full (`anvil spec` prints it).
 
 ## Status
 
-v0.9: programs of one or more files (modules with explicit imports and `pub`), generic
+v0.10: programs of one or more files (modules with explicit imports and `pub`), generic
 functions, structs and enums with built-in constraints, i64, f64 with units, bool, strings with interpolation,
 search and split, growable arrays and slices, maps in key order, structs, enums with
 exhaustive `match`, structural `==`, `Option` and `Result` with `?`,
@@ -92,8 +92,9 @@ contracts, effects and tests. There are two backends:
   are reference counted with copy-on-write; the tests check that every object is freed.
 
 The test suite runs every program through both and requires identical stdout, panic messages
-and exit codes. Verification tools (fuzzing, property tests), other platforms and a language
-server are on the
+and exit codes, on a corpus, on every test (`anvil test --native`) and on random programs
+(`anvil fuzz`). Property tests (`test "name" for all xs: [i64] { ... }`) run on seeded,
+generated inputs and shrink failures. Other platforms and a language server are on the
 [roadmap](docs/ROADMAP.md).
 
 ## Using it
@@ -118,7 +119,8 @@ target/release/anvil build examples/orders.anv -o orders.exe
 | `anvil check f.anv` | type-check |
 | `anvil run f.anv [--max-steps N]` | interpret `main` |
 | `anvil build f.anv [-o out.exe] [--asm]` | compile to a native executable |
-| `anvil test f.anv [--max-steps N]` | run `test` blocks |
+| `anvil test f.anv [--native] [--cases N]` | run `test` blocks, property tests on generated inputs |
+| `anvil fuzz [--seed N] [--count N]` | random programs on both backends |
 | `anvil fmt [f.anv] [--check]` | put a file, or every project file, in the canonical layout |
 | `anvil fix f.anv` | apply every mechanical fix until none is left |
 | `anvil outline f.anv` | list items and signatures |

@@ -425,11 +425,33 @@ impl Parser {
             Tok::Str(s) => (s, self.bump().span),
             _ => return Err(self.unexpected("a test name in quotes")),
         };
-        let uses_insert = name_span.at_end();
+        let mut inputs = Vec::new();
+        if self.eat(&Tok::For) {
+            match self.peek().clone() {
+                Tok::Ident(w) if w == "all" => {
+                    self.bump();
+                }
+                _ => {
+                    return Err(self
+                        .unexpected("`all`")
+                        .note("a property test names its inputs: test \"name\" for all n: i64 { ... }", None))
+                }
+            }
+            loop {
+                let pname = self.ident("an input name")?;
+                self.expect(Tok::Colon)?;
+                let ty = self.type_expr()?;
+                inputs.push(Param { name: pname, ty });
+                if !self.eat(&Tok::Comma) {
+                    break;
+                }
+            }
+        }
+        let uses_insert = self.prev_span().at_end();
         let (uses, uses_span) = self.uses_clause()?;
         let body = self.block()?;
         let span = start.to(body.span);
-        Ok(TestDecl { name, name_span, uses, uses_span, uses_insert, body, span })
+        Ok(TestDecl { name, name_span, inputs, uses, uses_span, uses_insert, body, span })
     }
 
     fn block(&mut self) -> PResult<Block> {

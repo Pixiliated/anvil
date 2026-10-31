@@ -61,10 +61,10 @@ green and the interpreter and native backend agreeing on every program in `tests
 ## M8: Generics (v0.9)
 - [x] Generic functions and structs with explicit, use-site-visible constraints
 
-## M9: Verification
-- [ ] `anvil test --native`
-- [ ] Differential fuzzing: random well-typed programs, interpreter vs native
-- [ ] Property tests in the language (`for all` over generated inputs, seeded)
+## M9: Verification (v0.10)
+- [x] `anvil test --native`
+- [x] Differential fuzzing: random well-typed programs, interpreter vs native
+- [x] Property tests in the language (`for all` over generated inputs, seeded)
 
 ## M10: Platforms
 - [ ] Linux x86-64 and AArch64 (ELF), macOS (Mach-O)

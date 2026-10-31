@@ -95,6 +95,8 @@ pub struct Func {
 #[derive(Clone, Debug)]
 pub struct Test {
     pub name: String,
+    /// The generated inputs of a property test (`for all`), as locals; empty for a plain test.
+    pub inputs: Vec<LocalId>,
     pub uses_io: bool,
     pub locals: Vec<Local>,
     pub body: Vec<Stmt>,

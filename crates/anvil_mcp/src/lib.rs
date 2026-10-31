@@ -112,6 +112,30 @@ pub struct VerifyArgs {
 
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
+pub struct FuzzArgs {
+    /// Seed of the first program (default 1); a seed always makes the same program.
+    pub seed: Option<u64>,
+    /// Programs to try (default 10); each is built natively, so each takes a second or two.
+    pub count: Option<u64>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct TestArgs {
+    /// Path of the .anv file, relative to the server's root or absolute.
+    pub file: String,
+    /// Stop each test (or property case) after this many statements and loop iterations (default 100000000).
+    pub max_steps: Option<u64>,
+    /// Also run the plain tests as a native executable; its results must equal the interpreter's.
+    pub native: Option<bool>,
+    /// Cases per property test (`for all`); default 100.
+    pub cases: Option<u64>,
+    /// Seed for the property tests' generated inputs; default 0, so runs repeat.
+    pub seed: Option<u64>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct FmtArgs {
     /// Path of the .anv file, relative to the server's root or absolute; leave it out to format
     /// every project file.
@@ -266,8 +290,18 @@ impl AnvilServer {
 
     #[tool(description = "Run every test block. Any failing test is a tool error; each result has \
         the panic message and the test's output.")]
-    async fn test(&self, Parameters(a): Parameters<RunArgs>) -> Result<CallToolResult, ErrorData> {
-        self.op(move |root| anvil_ops::test(root, &a.file, Some(steps(a.max_steps)))).await
+    async fn test(&self, Parameters(a): Parameters<TestArgs>) -> Result<CallToolResult, ErrorData> {
+        self.op(move |root| {
+            anvil_ops::test(root, &a.file, Some(steps(a.max_steps)), a.native.unwrap_or(false), a.cases, a.seed)
+        })
+        .await
+    }
+
+    #[tool(description = "Generate random well-typed programs (from a seed, so each is reproducible) and \
+        run each in the interpreter and natively with the leak check. Any difference in output, panic \
+        or exit code is a backend bug; failing programs are saved in out/fuzz/<seed>.anv.")]
+    async fn fuzz(&self, Parameters(a): Parameters<FuzzArgs>) -> Result<CallToolResult, ErrorData> {
+        self.op(move |root| anvil_ops::fuzz(root, a.seed, a.count)).await
     }
 
     #[tool(description = "Put a file (or, without file, every project file) in canonical layout, \

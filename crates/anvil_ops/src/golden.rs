@@ -211,11 +211,19 @@ pub fn native(program: &Program, scratch: &Path, name: &str) -> Result<Output, S
     std::fs::create_dir_all(scratch).map_err(|e| format!("cannot create {}: {e}", scratch.display()))?;
     let exe = scratch.join(format!("{}.exe", name.replace(['/', '\\', '.'], "_")));
     anvil_codegen::build_exe(program, &exe, &scratch.join("work"), false)?;
-    let out = Command::new(&exe)
+    let result = run_native(&exe, &[]);
+    let _ = std::fs::remove_file(&exe);
+    result
+}
+
+/// Runs a built executable with the leak check on and reads what it did. Err for a runtime
+/// error (a leak or refcount fault: a bug in Anvil, not in the program) or odd stderr.
+pub(crate) fn run_native(exe: &Path, args: &[&str]) -> Result<Output, String> {
+    let out = Command::new(exe)
+        .args(args)
         .env("ANVIL_CHECK_LEAKS", "1")
         .output()
         .map_err(|e| format!("cannot run {}: {e}", exe.display()))?;
-    let _ = std::fs::remove_file(&exe);
     let stderr = String::from_utf8_lossy(&out.stderr);
     let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
     let exit = out.status.code().ok_or("the executable was killed")?;

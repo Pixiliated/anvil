@@ -241,7 +241,14 @@ impl Printer<'_> {
             }
             Item::Fn(f) => self.func(f),
             Item::Test(t) => {
-                let head = format!("test {}{}", self.slice(t.name_span), uses(&t.uses));
+                let inputs = if t.inputs.is_empty() {
+                    String::new()
+                } else {
+                    let ps: Vec<String> =
+                        t.inputs.iter().map(|p| format!("{}: {}", p.name.name, self.ty(&p.ty))).collect();
+                    format!(" for all {}", ps.join(", "))
+                };
+                let head = format!("test {}{inputs}{}", self.slice(t.name_span), uses(&t.uses));
                 self.block(&head, &t.body, "");
             }
         }

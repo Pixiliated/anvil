@@ -122,7 +122,7 @@ fn dispatch(p: &Parsed) -> Result<Report, String> {
             let out = p.options.get("out").and_then(|v| v.as_deref());
             anvil_ops::build(root, file, out, p.options.contains_key("asm"))
         }
-        "test" => anvil_ops::test(root, file, steps),
+        "test" => anvil_ops::test(root, file, steps, native, count("cases")?, count("seed")?),
         "fmt" => anvil_ops::fmt(root, pos(0), p.options.contains_key("check")),
         "fix" => anvil_ops::fix(root, file),
         "outline" => anvil_ops::outline(root, file),
@@ -132,6 +132,7 @@ fn dispatch(p: &Parsed) -> Result<Report, String> {
         "spec" => anvil_ops::spec(),
         "trace" => anvil_ops::trace(root, file, text("test"), text("only"), count("limit")?, steps),
         "profile" => anvil_ops::profile(root, file, text("test"), steps),
+        "fuzz" => anvil_ops::fuzz(root, count("seed")?, count("count")?),
         "list" => anvil_ops::list(root),
         "verify" => anvil_ops::verify(root, native, steps),
         "review" => anvil_ops::review(root, native, steps),
