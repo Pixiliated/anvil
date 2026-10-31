@@ -209,7 +209,7 @@ pub fn clear_actual(project: &Project, file: &str) {
 /// error (a leak or a refcount fault, which are bugs in Anvil, not in the program).
 pub fn native(program: &Program, scratch: &Path, name: &str) -> Result<Output, String> {
     std::fs::create_dir_all(scratch).map_err(|e| format!("cannot create {}: {e}", scratch.display()))?;
-    let exe = scratch.join(format!("{}.exe", name.replace(['/', '\\', '.'], "_")));
+    let exe = scratch.join(format!("{}{}", name.replace(['/', '\\', '.'], "_"), std::env::consts::EXE_SUFFIX));
     anvil_codegen::build_exe(program, &exe, &scratch.join("work"), false)?;
     let result = run_native(&exe, &[]);
     let _ = std::fs::remove_file(&exe);

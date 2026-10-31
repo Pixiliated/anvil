@@ -422,13 +422,20 @@ int64_t anvil_map_find_str(const AnvArr *m, const AnvStr *key) {
     return -lo - 1;
 }
 
-/* ---- test executables: `exe N` runs test N ---- */
+/* ---- the entry point ---- */
 
-int64_t anvil_test_index(int64_t argc, char **argv) {
-    if (argc != 2) runtime_error("a test executable takes one argument, the index of the test to run");
+/* Generated: the program's main, or (in a test executable) the test argv[1] names. */
+extern void anvil_program(void);
+
+static int saved_argc = 0;
+static char **saved_argv = NULL;
+
+/* Test executables: `exe N` runs test N. */
+int64_t anvil_test_index(void) {
+    if (saved_argc != 2) runtime_error("a test executable takes one argument, the index of the test to run");
     char *end;
-    long long v = strtoll(argv[1], &end, 10);
-    if (*argv[1] == 0 || *end != 0 || v < 0) runtime_error("the test index must be a whole number");
+    long long v = strtoll(saved_argv[1], &end, 10);
+    if (*saved_argv[1] == 0 || *end != 0 || v < 0) runtime_error("the test index must be a whole number");
     return (int64_t)v;
 }
 
@@ -437,3 +444,35 @@ void anvil_no_test(int64_t index) {
     snprintf(buf, sizeof buf, "no test with index %lld", (long long)index);
     runtime_error(buf);
 }
+
+#ifdef _WIN32
+/* The linker gives the main thread 64 MiB of stack (/STACK). */
+int main(int argc, char **argv) {
+    saved_argc = argc;
+    saved_argv = argv;
+    anvil_program();
+    return 0;
+}
+#else
+#include <pthread.h>
+
+static void *run_program(void *unused) {
+    (void)unused;
+    anvil_program();
+    return NULL;
+}
+
+/* The main thread's stack is the process limit (often 8 MiB), so the program runs on a thread
+ * with 64 MiB, as on Windows: deep recursion behaves alike on every platform. */
+int main(int argc, char **argv) {
+    saved_argc = argc;
+    saved_argv = argv;
+    pthread_attr_t attr;
+    pthread_t thread;
+    if (pthread_attr_init(&attr) != 0 || pthread_attr_setstacksize(&attr, (size_t)64 << 20) != 0 ||
+        pthread_create(&thread, &attr, run_program, NULL) != 0)
+        runtime_error("cannot start the program's thread");
+    pthread_join(thread, NULL);
+    return 0;
+}
+#endif

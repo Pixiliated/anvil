@@ -174,3 +174,17 @@ Short records of choices that are not obvious from the code. Newest last.
 - **The fuzzer generates typed programs that end**: helpers call only earlier helpers and
   loops count to small constants. Panics are kept (half the programs end in one) because both
   backends must give the same panic. 100 programs agreed when it was added.
+
+## M10 (v0.11)
+
+- **Native code is for the host.** Cranelift and the C runtime are built for the machine the
+  compiler runs on; there is no `--target` yet, since a cross build would need that target's
+  linker and C library anyway. The release workflow builds a compiler on each platform instead.
+- **The C runtime owns `main`.** The generated code exports `anvil_program`; `main` saves argv
+  (for test executables) and, outside Windows, runs the program on a thread with 64 MiB of stack,
+  the size `/STACK` gives on Windows, so deep recursion behaves alike everywhere.
+- **Position-independent code on Linux and macOS** (PIE is the default there); Windows keeps a
+  fixed base. `cc` (or `$CC`) links, with `-lm -lpthread`.
+- **Only what ran is ticked.** Windows x64 and Linux x86-64 (in WSL) passed the whole suite,
+  every golden on both backends, fuzzing and the release script. ARM64 Linux and macOS have their
+  code paths and workflow jobs but have not run, so that roadmap item stays open.

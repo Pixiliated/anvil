@@ -108,11 +108,14 @@ const RUNTIME: &[(&str, &[Type], &[Type])] = &[
     ("anvil_str_eq", &[I, I], &[I]),
     ("anvil_map_find_i64", &[I, I], &[I]),
     ("anvil_map_find_str", &[I, I], &[I]),
-    ("anvil_test_index", &[I, I], &[I]),
+    ("anvil_test_index", &[], &[I]),
     ("anvil_no_test", &[I], &[]),
     ("anvil_exit", &[I], &[]),
     ("anvil_check_exit", &[I], &[]),
 ];
+
+/// The function the C runtime's `main` runs: the program's main, or a test chosen by argv.
+const ENTRY: &str = "anvil_program";
 
 /// Object layout shared with anvil_rt.c.
 const OBJ_LEN: i32 = 16;
@@ -141,6 +144,10 @@ fn compile(program: &Program, asm: bool, entry: Entry) -> Result<(Vec<u8>, Strin
     set(&mut flags, "opt_level", "speed")?;
     set(&mut flags, "enable_multi_ret_implicit_sret", "true")?;
     set(&mut flags, "enable_verifier", "true")?;
+    // ELF and Mach-O executables are position independent (PIE); Windows links at a fixed base.
+    if !cfg!(windows) {
+        set(&mut flags, "is_pic", "true")?;
+    }
     let isa = cranelift_codegen::isa::lookup_by_name(link::TARGET)
         .map_err(|e| e.to_string())?
         .finish(settings::Flags::new(flags))
@@ -350,23 +357,18 @@ impl Backend {
 
     /// The C entry point of a test executable: runs the test named by its index in argv[1].
     fn c_test_main(&mut self, tests: &[(usize, FuncId)], fbc: &mut FunctionBuilderContext) -> Result<(), String> {
-        let mut sig = self.module.make_signature();
-        sig.params.extend([AbiParam::new(types::I32), AbiParam::new(I)]);
-        sig.returns.push(AbiParam::new(types::I32));
-        let id = self.module.declare_function("main", Linkage::Export, &sig).map_err(|e| e.to_string())?;
+        let sig = self.module.make_signature();
+        let id = self.module.declare_function(ENTRY, Linkage::Export, &sig).map_err(|e| e.to_string())?;
         let mut ctx = Context::new();
         ctx.func.signature = sig;
         ctx.func.name = UserFuncName::user(1, id.as_u32());
         {
             let mut b = FunctionBuilder::new(&mut ctx.func, fbc);
             let entry = b.create_block();
-            b.append_block_params_for_function_params(entry);
             b.switch_to_block(entry);
             b.seal_block(entry);
-            let (argc, argv) = (b.block_params(entry)[0], b.block_params(entry)[1]);
-            let argc = b.ins().sextend(I, argc);
             let index_of = self.module.declare_func_in_func(self.runtime["anvil_test_index"], b.func);
-            let call = b.ins().call(index_of, &[argc, argv]);
+            let call = b.ins().call(index_of, &[]);
             let index = b.inst_results(call)[0];
             let done = b.create_block();
             for (i, fid) in tests {
@@ -390,18 +392,17 @@ impl Backend {
             let exit = self.module.declare_func_in_func(self.runtime["anvil_exit"], b.func);
             let zero = b.ins().iconst(I, 0);
             b.ins().call(exit, &[zero]);
-            let zero = b.ins().iconst(types::I32, 0);
-            b.ins().return_(&[zero]);
+            b.ins().return_(&[]);
             b.finalize(self.module.isa().frontend_config());
         }
         self.module.define_function(id, &mut ctx).map_err(|e| format!("codegen of the test main failed: {e:?}"))
     }
 
-    /// The C entry point: calls anv_main, validates the exit code, flushes and exits.
+    /// The program's entry: calls anv_main, validates the exit code, flushes and exits. The C
+    /// runtime's `main` calls it (on a thread with a large stack outside Windows).
     fn c_main(&mut self, program: &Program, main: FuncId, fbc: &mut FunctionBuilderContext) -> Result<(), String> {
-        let mut sig = self.module.make_signature();
-        sig.returns.push(AbiParam::new(types::I32));
-        let id = self.module.declare_function("main", Linkage::Export, &sig).map_err(|e| e.to_string())?;
+        let sig = self.module.make_signature();
+        let id = self.module.declare_function(ENTRY, Linkage::Export, &sig).map_err(|e| e.to_string())?;
         let mut ctx = Context::new();
         ctx.func.signature = sig;
         ctx.func.name = UserFuncName::user(1, id.as_u32());
@@ -423,8 +424,7 @@ impl Backend {
             };
             let exit = self.module.declare_func_in_func(self.runtime["anvil_exit"], b.func);
             b.ins().call(exit, &[code]);
-            let zero = b.ins().iconst(types::I32, 0);
-            b.ins().return_(&[zero]);
+            b.ins().return_(&[]);
             b.finalize(self.module.isa().frontend_config());
         }
         self.module.define_function(id, &mut ctx).map_err(|e| format!("codegen of main failed: {e:?}"))

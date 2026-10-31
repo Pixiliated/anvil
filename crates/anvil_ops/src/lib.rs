@@ -55,7 +55,7 @@ pub const COMMANDS: &[Command] = &[
         name: "build",
         positionals: &["file"],
         options: &[
-            ("out", "PATH", "executable to write (default: the file with .exe)"),
+            ("out", "PATH", "executable to write (default: the file without .anv; .exe on Windows)"),
             ("asm", "", "include each function's machine code"),
         ],
         summary: "compile main to a native executable",
@@ -203,6 +203,11 @@ const NATIVE: (&str, &str, &str) = ("native", "", "also build and run each progr
 
 pub const SPEC: &str = include_str!("../../../docs/SPEC.md");
 
+/// `0.11.0 (x86_64-unknown-linux-gnu)`: the version and the target native builds produce.
+pub fn version() -> String {
+    format!("{} ({})", env!("CARGO_PKG_VERSION"), anvil_codegen::link::TARGET)
+}
+
 /// CLI exit codes: 0 success, 1 errors or failures, 2 usage errors. `run` passes through the
 /// program's own exit code (101 on panic).
 pub const EXIT_OK: u8 = 0;
@@ -337,7 +342,7 @@ pub fn build(root: &Path, file: &str, out: Option<&str>, asm: bool) -> Report {
     let (_, program) = try_report!(with_main(root, file));
     let out: PathBuf = match out {
         Some(o) => root.join(o),
-        None => root.join(file).with_extension("exe"),
+        None => root.join(file).with_extension(std::env::consts::EXE_EXTENSION),
     };
     let work = std::env::temp_dir().join(format!("anvil_build_{}_{}", std::process::id(), unique()));
     let result = anvil_codegen::build_exe(&program, &out, &work, asm);

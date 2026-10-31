@@ -117,7 +117,7 @@ pub fn test(
     let mut disagree: Vec<Option<String>> = vec![None; ran.len()];
     if native && ran.iter().any(|r| !r.property) {
         let scratch = std::env::temp_dir().join(format!("anvil_tests_{}_{}", std::process::id(), unique()));
-        let exe = scratch.join("tests.exe");
+        let exe = scratch.join(format!("tests{}", std::env::consts::EXE_SUFFIX));
         let built = std::fs::create_dir_all(&scratch)
             .map_err(|e| e.to_string())
             .and_then(|_| anvil_codegen::build_test_exe(&program, &exe, &scratch.join("work")));

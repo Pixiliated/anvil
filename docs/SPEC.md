@@ -1,4 +1,4 @@
-# Anvil language specification (v0.10)
+# Anvil language specification (v0.11)
 
 Anvil is a small, compiled, general-purpose language designed to be written mostly by AI agents
 and read by humans. Its rules aim at three things: one obvious way to write each thing, code
@@ -445,8 +445,9 @@ backends disagree". Property tests run in the interpreter, the reference.
 ```
 anvil check   file.anv                 type-check
 anvil run     file.anv [--max-steps N] interpret (the reference semantics)
-anvil build   file.anv [-o out.exe] [--asm]
-                                       native executable via Cranelift
+anvil build   file.anv [-o out] [--asm]
+                                       native executable via Cranelift, for the host:
+                                       Windows x64 (MSVC), Linux or macOS (x86-64, ARM64)
 anvil test    file.anv [--native] [--cases N] [--seed N] [--max-steps N]
                                        run test blocks; `for all` tests on generated inputs
 anvil fmt     [file.anv] [--check]     put the file (or every project file) in canonical

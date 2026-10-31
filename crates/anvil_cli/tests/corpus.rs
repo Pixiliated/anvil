@@ -79,8 +79,8 @@ fn run_reports_panics_exactly() {
 fn native_build_is_deterministic() {
     let dir = std::env::temp_dir().join(format!("anvil_det_{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
-    let a = dir.join("a.exe");
-    let b = dir.join("b.exe");
+    let a = dir.join(format!("a{}", std::env::consts::EXE_SUFFIX));
+    let b = dir.join(format!("b{}", std::env::consts::EXE_SUFFIX));
     for exe in [&a, &b] {
         let out = anvil(&["build", "examples/projectile.anv", "-o", exe.to_str().unwrap()]);
         assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));

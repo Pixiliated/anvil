@@ -81,7 +81,7 @@ in full (`anvil spec` prints it).
 
 ## Status
 
-v0.10: programs of one or more files (modules with explicit imports and `pub`), generic
+v0.11: programs of one or more files (modules with explicit imports and `pub`), generic
 functions, structs and enums with built-in constraints, i64, f64 with units, bool, strings with interpolation,
 search and split, growable arrays and slices, maps in key order, structs, enums with
 exhaustive `match`, structural `==`, `Option` and `Result` with `?`,
@@ -99,8 +99,10 @@ generated inputs and shrink failures. Other platforms and a language server are 
 
 ## Using it
 
-You need Rust (stable). Native builds also need Windows x64 with the Visual Studio C++ build
-tools.
+You need Rust (stable). Native builds are for the machine you build on and need its linker:
+the Visual Studio C++ build tools on Windows x64, a C compiler (`cc`, or `$CC`) on Linux and
+macOS. Windows x64 and Linux x86-64 are tested; ARM64 Linux and macOS are built and tested by
+the release workflow. `scripts/release.sh` packs the binaries of the host into `dist/`.
 
 ```bash
 cargo build --release

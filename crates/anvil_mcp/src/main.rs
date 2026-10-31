@@ -22,6 +22,10 @@ fn main() -> ExitCode {
                 eprintln!("{USAGE}");
                 return ExitCode::SUCCESS;
             }
+            "--version" => {
+                println!("anvil-mcp {}", anvil_ops::version());
+                return ExitCode::SUCCESS;
+            }
             other => {
                 eprintln!("error: unknown argument `{other}`\n{USAGE}");
                 return ExitCode::from(2);

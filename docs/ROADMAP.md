@@ -66,9 +66,10 @@ green and the interpreter and native backend agreeing on every program in `tests
 - [x] Differential fuzzing: random well-typed programs, interpreter vs native
 - [x] Property tests in the language (`for all` over generated inputs, seeded)
 
-## M10: Platforms
-- [ ] Linux x86-64 and AArch64 (ELF), macOS (Mach-O)
-- [ ] Release binaries
+## M10: Platforms (v0.11)
+- [x] Linux x86-64 (ELF): the whole suite, every golden on both backends and fuzzing pass
+- [ ] Linux AArch64 and macOS x86-64/ARM64 (Mach-O): written, to be run by the release workflow
+- [x] Release binaries: `scripts/release.sh` and the tag-driven release workflow
 
 ## M11: Language server
 - [ ] Language server on the same facts as `type-at` and `refs`, plus completion

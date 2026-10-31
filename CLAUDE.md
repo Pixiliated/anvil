@@ -9,6 +9,8 @@ Anvil is a compiled language designed to be written by AI agents. The compiler i
 
 ## Toolchain
 - Rust stable, MSVC. If `cargo` is not found, prepend `%USERPROFILE%\.cargo\bin` to PATH.
+- Linux works the same way (`cc` links). After a change to the backend, linker or runtime, run
+  the suite on Linux too (a WSL distribution with Rust will do).
 - `cargo test --workspace` must pass before any milestone is called done.
 - `cargo run -p anvil_cli -- <command> <file.anv>` drives the compiler; `anvil-mcp` serves the
   same commands as MCP tools.

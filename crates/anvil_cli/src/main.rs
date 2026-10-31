@@ -29,6 +29,7 @@ fn usage() -> String {
         s.push_str(&format!("{line:<48} {}\n", c.summary));
     }
     s.push_str("\n  -o is short for --out. --json prints the result as JSON (for run, on stderr).");
+    s.push_str("\n  anvil --version prints the version and the target native builds produce.");
     s
 }
 
@@ -163,6 +164,10 @@ fn dispatch(p: &Parsed) -> Result<Report, String> {
 }
 
 fn main() -> ExitCode {
+    if std::env::args().skip(1).collect::<Vec<_>>() == ["--version"] {
+        println!("anvil {}", anvil_ops::version());
+        return ExitCode::SUCCESS;
+    }
     let parsed = match parse_args() {
         Ok(p) => p,
         Err(e) => {
