@@ -24,6 +24,9 @@ pub enum Ty {
     /// `Map[K, V]`: keys (i64 or str) in ascending order, each with one value; a value like arrays.
     Map(Box<Ty>, Box<Ty>),
     Enum(EnumId),
+    /// A type parameter (`T`) while a generic body is checked against its constraints. Only
+    /// concrete instantiations reach the backends.
+    Param(String),
     /// Produced after an error so one mistake does not cascade; never reaches a backend.
     Error,
 }
@@ -76,6 +79,8 @@ pub struct Func {
     pub allows: Vec<(String, String)>,
     /// Index into `Program::modules` of the file that declares it (`span` is in that file).
     pub module: usize,
+    /// An instance of a generic function (named `max[i64]`); `span` is the generic's.
+    pub instance: bool,
     pub params: Vec<LocalId>,
     pub ret: Ty,
     pub uses_io: bool,
@@ -105,6 +110,16 @@ pub struct Program {
     /// The program's files: the root first, then each imported module. Functions from a module
     /// are named `module.name`.
     pub modules: Vec<String>,
+    /// Every generic function, instantiated or not, so coverage can see the ones never called.
+    pub generic_fns: Vec<GenericFn>,
+}
+
+#[derive(Clone, Debug)]
+pub struct GenericFn {
+    pub name: String,
+    pub module: usize,
+    pub span: Span,
+    pub allows: Vec<(String, String)>,
 }
 
 /// One step from a local to the place being assigned or mutated.
@@ -443,6 +458,7 @@ impl fmt::Display for TyDisplay<'_> {
                 TyDisplay { ty: v, structs: self.structs, enums: self.enums }
             ),
             Ty::Enum(id) => write!(f, "{}", self.enums[*id].name),
+            Ty::Param(name) => write!(f, "{name}"),
             Ty::Error => write!(f, "<error>"),
         }
     }

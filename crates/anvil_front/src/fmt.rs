@@ -209,15 +209,17 @@ impl Printer<'_> {
                 self.line(&line);
             }
             Item::Struct(s) => {
-                self.fields_block(&format!("{}struct {}", vis(s.public), s.name.name), &s.fields, s.span);
+                let head = format!("{}struct {}{}", vis(s.public), s.name.name, type_params(&s.type_params));
+                self.fields_block(&head, &s.fields, s.span);
             }
             Item::Enum(e) => {
                 let open = self.after_brace(e.name.span.end);
+                let head = format!("{}enum {}{}", vis(e.public), e.name.name, type_params(&e.type_params));
                 if e.variants.is_empty() && !self.has_comments(open, e.span.end) {
-                    self.line(&format!("{}enum {} {{}}", vis(e.public), e.name.name));
+                    self.line(&format!("{head} {{}}"));
                     return;
                 }
-                self.line(&format!("{}enum {} {{", vis(e.public), e.name.name));
+                self.line(&format!("{head} {{"));
                 self.depth += 1;
                 let close = e.span.end - 1;
                 self.entries(
@@ -276,7 +278,8 @@ impl Printer<'_> {
             self.line(&line);
         }
         let params: Vec<String> = f.params.iter().map(|p| format!("{}: {}", p.name.name, self.ty(&p.ty))).collect();
-        let mut head = format!("{}fn {}({})", vis(f.public), f.name.name, params.join(", "));
+        let mut head =
+            format!("{}fn {}{}({})", vis(f.public), f.name.name, type_params(&f.type_params), params.join(", "));
         if let Some(r) = &f.ret {
             head.push_str(&format!(" -> {}", self.ty(r)));
         }
@@ -567,6 +570,25 @@ impl Printer<'_> {
     fn has_comments(&self, from: usize, to: usize) -> bool {
         self.comments.iter().any(|c| c.start >= from && c.start < to)
     }
+}
+
+/// `[T: ordered + text, U]`, or nothing.
+fn type_params(params: &[TypeParamDecl]) -> String {
+    if params.is_empty() {
+        return String::new();
+    }
+    let ps: Vec<String> = params
+        .iter()
+        .map(|p| {
+            let cs: Vec<&str> = p.constraints.iter().map(|c| c.name.as_str()).collect();
+            if cs.is_empty() {
+                p.name.name.clone()
+            } else {
+                format!("{}: {}", p.name.name, cs.join(" + "))
+            }
+        })
+        .collect();
+    format!("[{}]", ps.join(", "))
 }
 
 fn vis(public: bool) -> &'static str {

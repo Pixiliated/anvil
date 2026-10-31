@@ -826,3 +826,46 @@ fn modules_import_by_name_and_share_coverage() {
     assert_eq!(p.anvil(&["fix", "src/main.anv"]).status.code(), Some(1));
     assert_eq!(std::fs::read_to_string(p.0.join("src/text/words.anv")).unwrap(), before);
 }
+
+#[test]
+fn generics_are_instantiated_named_and_covered() {
+    let p = hello_project("generics");
+    p.write(
+        "src/hello.anv",
+        r#"fn first[T](xs: [T]) -> Option[T] {
+    if xs.len() == 0 {
+        return None;
+    }
+    return Some(xs[0]);
+}
+
+fn never[T: ordered](a: T, b: T) -> bool {
+    return a < b;
+}
+
+fn main() uses io {
+    print("{first([3, 4]) == Some(3)} {first(["a"]) == Some("a")}");
+}
+"#,
+    );
+    assert_eq!(String::from_utf8_lossy(&p.anvil(&["run", "src/hello.anv"]).stdout), "true true\n");
+    // One instance per type, named by its types.
+    let v = p.json(&["profile", "src/hello.anv"]);
+    let mut names: Vec<&str> = v["functions"].as_array().unwrap().iter().map(|f| f["name"].as_str().unwrap()).collect();
+    names.sort();
+    assert_eq!(names, ["first[i64]", "first[str]", "main"], "{v}");
+    let outline = p.json(&["outline", "src/hello.anv"]);
+    assert_eq!(outline["items"][1]["signature"], "fn never[T: ordered](a: T, b: T) -> bool");
+    // A generic that nothing instantiates is untested; one that runs for any type is tested.
+    assert!(p.anvil(&["golden", "approve", "src/hello.anv"]).status.success());
+    let v = p.json(&["verify"]);
+    let open: Vec<&str> = v["open"].as_array().unwrap().iter().map(|f| f["message"].as_str().unwrap()).collect();
+    assert_eq!(open.len(), 1, "{v}");
+    assert!(open[0].starts_with("`never` never runs"), "{v}");
+    // Constraint errors carry the constraint as a fix that changes meaning.
+    p.write("src/maths.anv", "fn bigger[T](a: T, b: T) -> bool {\n    return a > b;\n}\n\ntest \"bigger\" {\n    assert(bigger(a: 2, b: 1));\n}\n");
+    let v = p.json(&["check", "src/maths.anv"]);
+    assert_eq!(v["diagnostics"][0]["code"], "E0703", "{v}");
+    assert_eq!(v["diagnostics"][0]["fixes"][0]["kind"], "changes_meaning");
+    assert_eq!(v["diagnostics"][0]["fixes"][0]["edits"][0]["text"], ": ordered");
+}

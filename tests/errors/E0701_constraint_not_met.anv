@@ -1,0 +1,16 @@
+// expect: E0701
+struct Point {
+    x: i64,
+}
+
+fn max[T: ordered](a: T, b: T) -> T {
+    if a > b {
+        return a;
+    }
+    return b;
+}
+
+fn main() -> i64 {
+    let p: Point = max(a: Point { x: 1 }, b: Point { x: 2 });
+    return p.x;
+}

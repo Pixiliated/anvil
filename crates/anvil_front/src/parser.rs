@@ -254,9 +254,37 @@ impl Parser {
         Ok(TypeExpr { kind: TypeKind::Named { name, unit, args }, span })
     }
 
+    /// `[T: ordered + text, U]` after a declared name, or nothing.
+    fn type_params(&mut self) -> PResult<Vec<TypeParamDecl>> {
+        let mut out = Vec::new();
+        if !self.eat(&Tok::LBracket) {
+            return Ok(out);
+        }
+        while self.peek() != &Tok::RBracket {
+            let name = self.ident("a type parameter name")?;
+            let mut constraints = Vec::new();
+            if self.eat(&Tok::Colon) {
+                constraints.push(self.ident("a constraint: ordered, text or key")?);
+                while self.eat(&Tok::Plus) {
+                    constraints.push(self.ident("a constraint: ordered, text or key")?);
+                }
+            }
+            out.push(TypeParamDecl { name, constraints });
+            if !self.eat(&Tok::Comma) {
+                break;
+            }
+        }
+        self.expect(Tok::RBracket)?;
+        if out.is_empty() {
+            return Err(Diagnostic::new("E0100", self.prev_span(), "`[]` declares no type parameters"));
+        }
+        Ok(out)
+    }
+
     fn struct_decl(&mut self) -> PResult<StructDecl> {
         let start = self.bump().span;
         let name = self.ident("struct name")?;
+        let type_params = self.type_params()?;
         self.expect(Tok::LBrace)?;
         let mut fields = Vec::new();
         while self.peek() != &Tok::RBrace {
@@ -269,12 +297,13 @@ impl Parser {
             }
         }
         let end = self.expect(Tok::RBrace)?;
-        Ok(StructDecl { public: false, name, fields, span: start.to(end) })
+        Ok(StructDecl { public: false, name, type_params, fields, span: start.to(end) })
     }
 
     fn enum_decl(&mut self) -> PResult<EnumDecl> {
         let start = self.bump().span;
         let name = self.ident("enum name")?;
+        let type_params = self.type_params()?;
         self.expect(Tok::LBrace)?;
         let mut variants = Vec::new();
         while self.peek() != &Tok::RBrace {
@@ -305,7 +334,7 @@ impl Parser {
             return Err(self.unexpected("a variant name").note("an enum needs at least one variant", None));
         }
         let end = self.expect(Tok::RBrace)?;
-        Ok(EnumDecl { public: false, name, variants, span: start.to(end) })
+        Ok(EnumDecl { public: false, name, type_params, variants, span: start.to(end) })
     }
 
     fn uses_clause(&mut self) -> PResult<(Vec<Ident>, Option<Span>)> {
@@ -333,6 +362,7 @@ impl Parser {
     fn fn_decl(&mut self, allows: Vec<AllowDecl>) -> PResult<FnDecl> {
         let start = self.bump().span;
         let name = self.ident("function name")?;
+        let type_params = self.type_params()?;
         self.expect(Tok::LParen)?;
         let mut params = Vec::new();
         while self.peek() != &Tok::RParen {
@@ -375,6 +405,7 @@ impl Parser {
         Ok(FnDecl {
             public: false,
             name,
+            type_params,
             params,
             ret,
             uses,

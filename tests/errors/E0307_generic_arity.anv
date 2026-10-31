@@ -1,0 +1,10 @@
+// expect: E0307
+struct Pair[A, B] {
+    first: A,
+    second: B,
+}
+
+fn main() -> i64 {
+    let p: Pair[i64] = Pair { first: 1, second: 2 };
+    return p.first;
+}

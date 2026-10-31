@@ -1,0 +1,11 @@
+// expect: E0702
+fn same[T: orderd](a: T, b: T) -> bool {
+    return a == b;
+}
+
+fn main() -> i64 {
+    if same(a: 1, b: 1) {
+        return 0;
+    }
+    return 1;
+}

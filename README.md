@@ -81,7 +81,8 @@ in full (`anvil spec` prints it).
 
 ## Status
 
-v0.8: programs of one or more files (modules with explicit imports and `pub`) with i64, f64 with units, bool, strings with interpolation,
+v0.9: programs of one or more files (modules with explicit imports and `pub`), generic
+functions, structs and enums with built-in constraints, i64, f64 with units, bool, strings with interpolation,
 search and split, growable arrays and slices, maps in key order, structs, enums with
 exhaustive `match`, structural `==`, `Option` and `Result` with `?`,
 contracts, effects and tests. There are two backends:
@@ -91,7 +92,8 @@ contracts, effects and tests. There are two backends:
   are reference counted with copy-on-write; the tests check that every object is freed.
 
 The test suite runs every program through both and requires identical stdout, panic messages
-and exit codes. Generics, verification tools and other platforms are on the
+and exit codes. Verification tools (fuzzing, property tests), other platforms and a language
+server are on the
 [roadmap](docs/ROADMAP.md).
 
 ## Using it

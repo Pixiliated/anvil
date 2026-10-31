@@ -42,6 +42,13 @@ impl ImportDecl {
     }
 }
 
+/// `T: ordered + text` in `fn max[T: ordered + text]`: a type parameter and its constraints.
+#[derive(Clone, Debug)]
+pub struct TypeParamDecl {
+    pub name: Ident,
+    pub constraints: Vec<Ident>,
+}
+
 /// `unit m` declares a base unit; `unit N = kg*m/s^2` an alias.
 #[derive(Clone, Debug)]
 pub struct UnitDecl {
@@ -76,6 +83,7 @@ pub enum TypeKind {
 pub struct StructDecl {
     pub public: bool,
     pub name: Ident,
+    pub type_params: Vec<TypeParamDecl>,
     pub fields: Vec<(Ident, TypeExpr)>,
     pub span: Span,
 }
@@ -85,6 +93,7 @@ pub struct StructDecl {
 pub struct EnumDecl {
     pub public: bool,
     pub name: Ident,
+    pub type_params: Vec<TypeParamDecl>,
     pub variants: Vec<VariantDecl>,
     pub span: Span,
 }
@@ -106,6 +115,7 @@ pub struct Param {
 pub struct FnDecl {
     pub public: bool,
     pub name: Ident,
+    pub type_params: Vec<TypeParamDecl>,
     pub params: Vec<Param>,
     pub ret: Option<TypeExpr>,
     pub uses: Vec<Ident>,

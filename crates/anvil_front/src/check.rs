@@ -6,6 +6,10 @@ use crate::diag::{self, Diagnostic, Edit, FixKind};
 use crate::ir::*;
 use crate::span::{SourceFile, Span};
 use crate::units::Unit;
+#[path = "check_generic.rs"]
+mod generic;
+
+use generic::{Constraint, Generic, GenericKind, Pending, Scope};
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 
@@ -17,6 +21,11 @@ const INDENT: &str = "    ";
 
 fn printable(ty: &Ty) -> bool {
     matches!(ty, Ty::I64 | Ty::F64(_) | Ty::Bool | Ty::Str)
+}
+
+/// The types `==` compares part by part; scalars and str have their own comparisons.
+fn compound(ty: &Ty) -> bool {
+    matches!(ty, Ty::Array(_) | Ty::Struct(_) | Ty::Enum(_) | Ty::Map(..) | Ty::Param(_))
 }
 
 struct FuncSig {
@@ -45,6 +54,8 @@ struct Exports {
     structs: HashMap<String, StructId>,
     enums: HashMap<String, EnumId>,
     units: HashMap<String, Unit>,
+    generic_fns: HashMap<String, usize>,
+    generic_types: HashMap<String, usize>,
     public: HashSet<String>,
 }
 
@@ -95,6 +106,33 @@ pub struct Checker<'a> {
     /// (module, pub) of each struct; of each enum, None for Option/Result instantiations.
     struct_owner: Vec<(usize, bool)>,
     enum_owner: Vec<Option<(usize, bool)>>,
+    /// Generic declarations, the names the current module sees them by, and their instances
+    /// ((generic, type arguments) to the FuncId, StructId or EnumId made for them).
+    generics: Vec<Generic<'a>>,
+    generic_fns: HashMap<String, usize>,
+    generic_types: HashMap<String, usize>,
+    instances: HashMap<(usize, String), usize>,
+    struct_inst: HashMap<StructId, (usize, Vec<Ty>)>,
+    enum_inst: HashMap<EnumId, (usize, Vec<Ty>)>,
+    /// The type arguments of each Option/Result instantiation.
+    builtin_args: HashMap<EnumId, Vec<Ty>>,
+    /// What each type parameter name means right now (a concrete type in an instance,
+    /// `Ty::Param` in a generic body), and the constraints of those being checked abstractly.
+    type_params: HashMap<String, Ty>,
+    param_constraints: HashMap<String, generic::TypeParam>,
+    /// True while a generic body is checked against its constraints (its IR is dropped).
+    abstract_body: bool,
+    pending: Vec<Pending>,
+    /// While above 0, errors go to `quiet_errors` and no facts are kept.
+    quiet: usize,
+    quiet_errors: Vec<Diagnostic>,
+    depth: usize,
+    depth_reported: bool,
+    /// The level of the instance whose body is being checked (0 outside instances).
+    inst_level: usize,
+    /// Each module's name tables once it is checked, and its name.
+    scopes: Vec<Option<Scope>>,
+    module_names: Vec<String>,
     diags: Vec<Diagnostic>,
     facts: Facts,
     /// Declaration spans of types, struct fields, enum variants and their fields, and units.
@@ -160,7 +198,8 @@ pub fn analyze(src: &SourceFile, file: &ast::File) -> Analysis {
 
 /// Checks the modules of a program in `order` (each after the modules it imports, the root
 /// last) and joins them into one program; diagnostics carry the index of their module's file.
-pub fn analyze_modules(modules: &[Module], order: &[usize]) -> Analysis {
+pub fn analyze_modules<'a>(modules: &[Module<'a>], order: &[usize]) -> Analysis {
+    let srcs: Vec<&'a SourceFile> = modules.iter().map(|m| m.src).collect();
     let mut c = Checker {
         src: modules[0].src,
         module: 0,
@@ -170,6 +209,24 @@ pub fn analyze_modules(modules: &[Module], order: &[usize]) -> Analysis {
         failed_imports: HashSet::new(),
         struct_owner: Vec::new(),
         enum_owner: Vec::new(),
+        generics: Vec::new(),
+        generic_fns: HashMap::new(),
+        generic_types: HashMap::new(),
+        instances: HashMap::new(),
+        struct_inst: HashMap::new(),
+        enum_inst: HashMap::new(),
+        builtin_args: HashMap::new(),
+        type_params: HashMap::new(),
+        param_constraints: HashMap::new(),
+        abstract_body: false,
+        pending: Vec::new(),
+        quiet: 0,
+        quiet_errors: Vec::new(),
+        depth: 0,
+        depth_reported: false,
+        inst_level: 0,
+        scopes: vec![None; modules.len()],
+        module_names: modules.iter().map(|m| m.name.clone()).collect(),
         diags: Vec::new(),
         facts: Facts::default(),
         type_spans: HashMap::new(),
@@ -191,7 +248,7 @@ pub fn analyze_modules(modules: &[Module], order: &[usize]) -> Analysis {
     let mut main = None;
     for &m in order {
         c.begin_module(m, modules[m].src);
-        let (fs, ts, mn) = c.module(&modules[m]);
+        let (fs, ts, mn) = c.module(&modules[m], &srcs);
         funcs.extend(fs);
         if m == 0 {
             tests = ts;
@@ -208,6 +265,19 @@ pub fn analyze_modules(modules: &[Module], order: &[usize]) -> Analysis {
         }
     }
     c.diags.sort_by_key(|d| (d.file, d.span.start, d.code));
+    let generic_fns = c
+        .generics
+        .iter()
+        .filter_map(|g| match g.kind {
+            GenericKind::Fn(d) => Some(GenericFn {
+                name: g.name.clone(),
+                module: g.module,
+                span: d.name.span,
+                allows: d.allows.iter().map(|a| (a.lint.name.clone(), a.reason.clone())).collect(),
+            }),
+            _ => None,
+        })
+        .collect();
     let program = Program {
         structs: c.structs.clone(),
         enums: c.enums.clone(),
@@ -215,6 +285,7 @@ pub fn analyze_modules(modules: &[Module], order: &[usize]) -> Analysis {
         tests,
         main,
         modules: modules.iter().map(|m| m.src.name.clone()).collect(),
+        generic_fns,
     };
     let program = c.diags.is_empty().then_some(program);
     Analysis { program, diags: c.diags, facts: c.facts }
@@ -259,17 +330,21 @@ pub fn closest<'b>(name: &str, candidates: impl Iterator<Item = &'b String>) -> 
 impl<'a> Checker<'a> {
     fn err(&mut self, mut d: Diagnostic) {
         d.file = self.module;
-        self.diags.push(d);
+        if self.quiet > 0 {
+            self.quiet_errors.push(d);
+        } else {
+            self.diags.push(d);
+        }
     }
 
     fn def(&mut self, span: Span, name: impl Into<String>, kind: &'static str, detail: impl Into<String>) {
-        if self.module == 0 {
+        if self.module == 0 && self.quiet == 0 {
             self.facts.defs.push(Def { span, name: name.into(), kind, detail: detail.into() });
         }
     }
 
     fn note_use(&mut self, span: Span, def: Option<Span>) {
-        if let (Some(def), 0) = (def, self.module) {
+        if let (Some(def), 0, 0) = (def, self.module, self.quiet) {
             self.facts.uses.push((span, def));
         }
     }
@@ -308,21 +383,28 @@ impl<'a> Checker<'a> {
         self.imported.clear();
         self.touched.borrow_mut().clear();
         self.failed_imports.clear();
+        self.generic_fns.clear();
+        self.generic_types.clear();
     }
 
     /// Checks one module: its imports, declarations and function bodies (and, for the root,
     /// its tests and main). Returns its functions in FuncId order.
-    fn module(&mut self, me: &Module) -> (Vec<Func>, Vec<Test>, Option<FuncId>) {
+    fn module(&mut self, me: &Module<'a>, srcs: &[&'a SourceFile]) -> (Vec<Func>, Vec<Test>, Option<FuncId>) {
+        let file: &'a ast::File = me.file;
         let mut import_decls = Vec::new();
         let mut unit_decls = Vec::new();
         let mut struct_decls = Vec::new();
         let mut enum_decls = Vec::new();
         let mut fn_decls = Vec::new();
         let mut test_decls = Vec::new();
-        for item in &me.file.items {
+        let mut generic_decls = Vec::new();
+        for item in &file.items {
             match item {
                 ast::Item::Import(i) => import_decls.push(i),
                 ast::Item::Unit(u) => unit_decls.push(u),
+                ast::Item::Struct(s) if !s.type_params.is_empty() => generic_decls.push(GenericKind::Struct(s)),
+                ast::Item::Enum(e) if !e.type_params.is_empty() => generic_decls.push(GenericKind::Enum(e)),
+                ast::Item::Fn(f) if !f.type_params.is_empty() => generic_decls.push(GenericKind::Fn(f)),
                 ast::Item::Struct(s) => struct_decls.push(s),
                 ast::Item::Enum(e) => enum_decls.push(e),
                 ast::Item::Fn(f) => fn_decls.push(&**f),
@@ -333,10 +415,25 @@ impl<'a> Checker<'a> {
             self.import(imp, k, me.imports.get(k).copied());
         }
         self.declare_units(&unit_decls);
+        // Generic names first, so other declarations can use them; their shapes once all names exist.
+        let first_generic = self.generics.len();
+        self.declare_generics(&generic_decls);
         self.declare_types(&struct_decls, &enum_decls);
         let sig_base = self.sigs.len();
         self.declare_fns(&fn_decls);
-        self.check_public(&struct_decls, &enum_decls, &fn_decls, sig_base);
+        let own_generics: Vec<usize> = (first_generic..self.generics.len()).collect();
+        for &g in &own_generics {
+            self.resolve_shape(g);
+        }
+        for &g in &own_generics {
+            if !matches!(self.generics[g].kind, GenericKind::Fn(_)) {
+                self.check_generic_type(g);
+            }
+        }
+        self.check_public(&struct_decls, &enum_decls, &fn_decls, sig_base, &own_generics);
+        for &g in &own_generics {
+            self.check_generic_body(g);
+        }
 
         let mut funcs = Vec::new();
         for f in &fn_decls {
@@ -375,6 +472,9 @@ impl<'a> Checker<'a> {
             );
         }
         self.unused_imports(&import_decls);
+        // Instances asked for by this module's bodies, checked where their generics live.
+        self.scopes[self.module] = Some(self.save_scope());
+        funcs.extend(self.run_pending(srcs));
 
         let mut ex = Exports::default();
         let own = |name: &String| !self.imported.contains_key(name);
@@ -382,7 +482,9 @@ impl<'a> Checker<'a> {
         ex.structs = self.struct_index.iter().filter(|(n, _)| own(n)).map(|(n, v)| (n.clone(), *v)).collect();
         ex.enums = self.enum_index.iter().filter(|(n, _)| own(n)).map(|(n, v)| (n.clone(), *v)).collect();
         ex.units = self.units.iter().filter(|(n, _)| own(n)).map(|(n, v)| (n.clone(), v.clone())).collect();
-        for item in &me.file.items {
+        ex.generic_fns = self.generic_fns.iter().filter(|(n, _)| own(n)).map(|(n, v)| (n.clone(), *v)).collect();
+        ex.generic_types = self.generic_types.iter().filter(|(n, _)| own(n)).map(|(n, v)| (n.clone(), *v)).collect();
+        for item in &file.items {
             let name = match item {
                 ast::Item::Unit(d) if d.public => &d.name.name,
                 ast::Item::Struct(d) if d.public => &d.name.name,
@@ -431,6 +533,14 @@ impl<'a> Checker<'a> {
             }
             if let Some(u) = ex.units.get(name) {
                 self.units.insert(name.clone(), u.clone());
+                found = true;
+            }
+            if let Some(g) = ex.generic_fns.get(name) {
+                self.generic_fns.insert(name.clone(), *g);
+                found = true;
+            }
+            if let Some(g) = ex.generic_types.get(name) {
+                self.generic_types.insert(name.clone(), *g);
                 found = true;
             }
             if !found {
@@ -490,8 +600,19 @@ impl<'a> Checker<'a> {
         enums: &[&ast::EnumDecl],
         fns: &[&ast::FnDecl],
         sig_base: usize,
+        generics: &[usize],
     ) {
         let mut problems = Vec::new();
+        for &g in generics.iter().filter(|g| self.generics[**g].public) {
+            let (span, name) = match self.generics[g].kind {
+                GenericKind::Fn(d) => (d.name.span, d.name.name.clone()),
+                GenericKind::Struct(d) => (d.name.span, d.name.name.clone()),
+                GenericKind::Enum(d) => (d.name.span, d.name.name.clone()),
+            };
+            for t in self.shown_types(g) {
+                problems.extend(self.private_type(&t).map(|p| (span, name.clone(), p)));
+            }
+        }
         for d in structs.iter().filter(|d| d.public) {
             if let Some(&id) = self.struct_index.get(&d.name.name) {
                 for (_, t) in &self.structs[id].fields {
@@ -662,6 +783,13 @@ impl<'a> Checker<'a> {
             TypeKind::Named { name, unit, args } => (name, unit, args),
         };
         let n = name.name.as_str();
+        if let (Some(t), true, None) = (self.type_params.get(n), args.is_empty(), unit) {
+            return t.clone();
+        }
+        self.touch(n);
+        if let Some(&g) = self.generic_types.get(n) {
+            return self.generic_type(g, t, args);
+        }
         if n == "Option" || n == "Result" {
             let (want, shape) = if n == "Option" { (1, "Option[T]") } else { (2, "Result[T, E]") };
             if args.len() != want {
@@ -740,6 +868,13 @@ impl<'a> Checker<'a> {
         if matches!(k, Ty::I64 | Ty::Str) {
             return true;
         }
+        if let Ty::Param(_) = k {
+            if self.satisfies(k, Constraint::Key) {
+                return true;
+            }
+            self.needs_constraint(k, Constraint::Key, span, "a map key");
+            return false;
+        }
         let t = self.show(k);
         self.err(
             Diagnostic::new("E0408", span, format!("map keys are i64 or str, not {t}"))
@@ -748,13 +883,14 @@ impl<'a> Checker<'a> {
         false
     }
 
-    fn builtin_enum(&mut self, key: String, name: String, variants: Vec<VariantDef>) -> Ty {
+    fn builtin_enum(&mut self, key: String, name: String, variants: Vec<VariantDef>, args: Vec<Ty>) -> Ty {
         if let Some(id) = self.builtin_enums.get(&key) {
             return Ty::Enum(*id);
         }
         let id = self.enums.len();
         self.enums.push(EnumDef { name, variants });
         self.enum_owner.push(None);
+        self.builtin_args.insert(id, args);
         self.builtin_enums.insert(key, id);
         Ty::Enum(id)
     }
@@ -763,20 +899,20 @@ impl<'a> Checker<'a> {
         let key = format!("Option[{t:?}]");
         let name = format!("Option[{}]", self.show(&t));
         let variants = vec![
-            VariantDef { name: "Some".into(), fields: vec![("value".into(), t)] },
+            VariantDef { name: "Some".into(), fields: vec![("value".into(), t.clone())] },
             VariantDef { name: "None".into(), fields: Vec::new() },
         ];
-        self.builtin_enum(key, name, variants)
+        self.builtin_enum(key, name, variants, vec![t])
     }
 
     fn result_of(&mut self, t: Ty, e: Ty) -> Ty {
         let key = format!("Result[{t:?}, {e:?}]");
         let name = format!("Result[{}, {}]", self.show(&t), self.show(&e));
         let variants = vec![
-            VariantDef { name: "Ok".into(), fields: vec![("value".into(), t)] },
-            VariantDef { name: "Err".into(), fields: vec![("error".into(), e)] },
+            VariantDef { name: "Ok".into(), fields: vec![("value".into(), t.clone())] },
+            VariantDef { name: "Err".into(), fields: vec![("error".into(), e.clone())] },
         ];
-        self.builtin_enum(key, name, variants)
+        self.builtin_enum(key, name, variants, vec![t, e])
     }
 
     /// "Option" or "Result" for instantiations of the built-in enums.
@@ -799,6 +935,10 @@ impl<'a> Checker<'a> {
                 self.err(Diagnostic::new("E0201", d.name.span, format!("`{}` is a built-in type", d.name.name)));
                 continue;
             }
+            if self.generic_types.contains_key(&d.name.name) {
+                self.err(Diagnostic::new("E0201", d.name.span, format!("type `{}` is declared twice", d.name.name)));
+                continue;
+            }
             if self.check_new_name(&d.name, "type", &mut seen) {
                 self.type_spans.insert(d.name.name.clone(), d.name.span);
                 self.def(d.name.span, d.name.name.clone(), "struct", format!("struct {}", d.name.name));
@@ -812,6 +952,10 @@ impl<'a> Checker<'a> {
         for d in enum_decls {
             if TYPE_NAMES.contains(&d.name.name.as_str()) {
                 self.err(Diagnostic::new("E0201", d.name.span, format!("`{}` is a built-in type", d.name.name)));
+                continue;
+            }
+            if self.generic_types.contains_key(&d.name.name) {
+                self.err(Diagnostic::new("E0201", d.name.span, format!("type `{}` is declared twice", d.name.name)));
                 continue;
             }
             if self.check_new_name(&d.name, "type", &mut seen) {
@@ -925,13 +1069,45 @@ impl<'a> Checker<'a> {
         io
     }
 
+    /// Registers generic functions, structs and enums by name; their shapes come later.
+    fn declare_generics(&mut self, decls: &[GenericKind<'a>]) {
+        let mut seen_types = HashMap::new();
+        let mut seen_fns = HashMap::new();
+        for kind in decls {
+            let (name, params, public, is_fn, header) = match *kind {
+                GenericKind::Fn(d) => {
+                    let header = self.text(Span::new(d.span.start, d.body.span.start)).trim_end().to_string();
+                    (&d.name, &d.type_params, d.public, true, header)
+                }
+                GenericKind::Struct(d) => (&d.name, &d.type_params, d.public, false, format!("struct {}", d.name.name)),
+                GenericKind::Enum(d) => (&d.name, &d.type_params, d.public, false, format!("enum {}", d.name.name)),
+            };
+            let what = if is_fn { "function" } else { "type" };
+            let seen = if is_fn { &mut seen_fns } else { &mut seen_types };
+            if !self.check_new_name(name, what, seen) {
+                continue;
+            }
+            let tps = self.type_params(params);
+            self.def(name.span, name.name.clone(), if is_fn { "fn" } else { "type" }, header);
+            self.add_generic(*kind, name, tps, public);
+        }
+    }
+
     fn declare_fns(&mut self, decls: &[&ast::FnDecl]) {
         let mut seen = HashMap::new();
         for d in decls {
             if BUILTINS.contains(&d.name.name.as_str()) || CONSTRUCTORS.contains(&d.name.name.as_str()) {
                 self.err(Diagnostic::new("E0201", d.name.span, format!("`{}` is a built-in function", d.name.name)));
             }
-            let fresh = self.check_new_name(&d.name, "function", &mut seen);
+            let mut fresh = self.check_new_name(&d.name, "function", &mut seen);
+            if self.generic_fns.contains_key(&d.name.name) {
+                self.err(Diagnostic::new(
+                    "E0201",
+                    d.name.span,
+                    format!("function `{}` is declared twice", d.name.name),
+                ));
+                fresh = false;
+            }
             let params = d.params.iter().map(|p| (p.name.name.clone(), self.resolve_type(&p.ty))).collect();
             let ret = d.ret.as_ref().map(|t| self.resolve_type(t)).unwrap_or(Ty::Void);
             let uses_io = self.effects(&d.uses);
@@ -971,10 +1147,11 @@ impl<'a> Checker<'a> {
                 Diagnostic::new("E0202", name.span, format!("`{}` is already declared in this function", name.name))
                     .note("first declared here", Some(prev)),
             );
-        } else if self.func_index.contains_key(&name.name) {
+        } else if self.func_index.contains_key(&name.name) || self.generic_fns.contains_key(&name.name) {
             self.err(Diagnostic::new("E0202", name.span, format!("`{}` is the name of a function", name.name)));
         } else if self.struct_index.contains_key(&name.name)
             || self.enum_index.contains_key(&name.name)
+            || self.generic_types.contains_key(&name.name)
             || CONSTRUCTORS.contains(&name.name.as_str())
         {
             self.err(Diagnostic::new(
@@ -1091,6 +1268,11 @@ impl<'a> Checker<'a> {
 
     fn func(&mut self, d: &ast::FnDecl) -> Func {
         let id = self.sigs.iter().position(|s| s.module == self.module && s.span == d.name.span).unwrap();
+        self.func_at(d, id)
+    }
+
+    /// Checks the body of `d` against signature `id` (an instance's, for a generic function).
+    fn func_at(&mut self, d: &ast::FnDecl, id: FuncId) -> Func {
         let ret = self.sigs[id].ret.clone();
         let uses_io = self.sigs[id].uses_io;
         let mut b = self.new_body(ret.clone(), uses_io, d.uses_insert);
@@ -1161,6 +1343,7 @@ impl<'a> Checker<'a> {
             span: d.name.span,
             allows,
             module: self.module,
+            instance: false,
             params,
             ret,
             uses_io,
@@ -1880,7 +2063,7 @@ impl<'a> Checker<'a> {
     /// `hint` is the expected type where one is known; it types `None`, `Ok`, `Err` and `[]`.
     fn expr_hint(&mut self, b: &mut Body, e: &ast::Expr, hint: Option<&Ty>) -> Expr {
         let x = self.expr_kind(b, e, hint);
-        if x.ty != Ty::Error && self.module == 0 {
+        if x.ty != Ty::Error && self.module == 0 && self.quiet == 0 {
             let shown = self.show(&x.ty);
             self.facts.exprs.push((e.span, shown));
         }
@@ -1932,6 +2115,14 @@ impl<'a> Checker<'a> {
                     }
                 }
             }
+            AK::Field(base, field) if self.generic_enum(b, base).is_some() => {
+                let g = self.generic_enum(b, base).unwrap();
+                let what = format!("`{}.{}`", self.generics[g].name, field.name);
+                return match self.infer_instance(b, g, hint, Vec::new(), e.span, &what) {
+                    Some(id) => self.variant_ctor(b, e, (id, base.span), field, None),
+                    None => Self::err_expr(),
+                };
+            }
             AK::Field(base, field) if self.enum_name(b, base).is_some() => {
                 let eid = self.enum_name(b, base).unwrap();
                 return self.variant_ctor(b, e, (eid, base.span), field, None);
@@ -1958,7 +2149,7 @@ impl<'a> Checker<'a> {
                     }
                 }
             }
-            AK::Method { receiver, method, args } => return self.method(b, e, receiver, method, args),
+            AK::Method { receiver, method, args } => return self.method(b, e, receiver, method, args, hint),
             AK::Index(base, index) => {
                 let x = self.expr(b, base);
                 let i = self.expect(b, index, &Ty::I64);
@@ -2084,7 +2275,10 @@ impl<'a> Checker<'a> {
                             let x = self.expr(b, pe);
                             if x.ty == Ty::Error {
                                 bad = true;
-                            } else if !printable(&x.ty) {
+                            } else if matches!(x.ty, Ty::Param(_)) && !self.satisfies(&x.ty, Constraint::Text) {
+                                bad = true;
+                                self.needs_constraint(&x.ty, Constraint::Text, pe.span, "interpolating it");
+                            } else if !printable(&x.ty) && !matches!(x.ty, Ty::Param(_)) {
                                 bad = true;
                                 let t = self.show(&x.ty);
                                 self.err(Diagnostic::new(
@@ -2114,7 +2308,7 @@ impl<'a> Checker<'a> {
                 );
                 return Self::err_expr();
             }
-            AK::StructLit { name, fields } => return self.struct_lit(b, e, name, fields),
+            AK::StructLit { name, fields } => return self.struct_lit(b, e, name, fields, hint),
             AK::Call { callee, args } if CONSTRUCTORS.contains(&callee.name.as_str()) => {
                 return self.builtin_ctor(b, e, callee, Some(args), hint)
             }
@@ -2148,7 +2342,9 @@ impl<'a> Checker<'a> {
     fn binary(&mut self, b: &mut Body, e: &ast::Expr, op: BinOp, l: &ast::Expr, r: &ast::Expr) -> Expr {
         let x = self.expr(b, l);
         // `opt == None`, `xs == []`: the left side gives the right its type.
-        let y = if matches!(op, BinOp::Eq | BinOp::Ne) && matches!(x.ty, Ty::Enum(_) | Ty::Array(_) | Ty::Map(..)) {
+        let y = if matches!(op, BinOp::Eq | BinOp::Ne)
+            && matches!(x.ty, Ty::Enum(_) | Ty::Array(_) | Ty::Map(..) | Ty::Struct(_))
+        {
             let hint = x.ty.clone();
             self.expr_hint(b, r, Some(&hint))
         } else {
@@ -2230,9 +2426,15 @@ impl<'a> Checker<'a> {
                     return Expr { kind: ExprKind::Cmp(cmp_op(op), bx(x), bx(y)), ty: Ty::Bool };
                 }
                 // Structural: equal when every part is (floats as IEEE values).
-                let aggregate = matches!(lt, Ty::Array(_) | Ty::Struct(_) | Ty::Enum(_) | Ty::Map(..));
-                if aggregate && lt == rt && matches!(op, BinOp::Eq | BinOp::Ne) {
+                if compound(&lt) && lt == rt && matches!(op, BinOp::Eq | BinOp::Ne) {
                     return Expr { kind: ExprKind::Cmp(cmp_op(op), bx(x), bx(y)), ty: Ty::Bool };
+                }
+                if let (Ty::Param(_), true, true) = (&lt, lt == rt, op.is_comparison()) {
+                    if self.satisfies(&lt, Constraint::Ordered) {
+                        return Expr { kind: ExprKind::Cmp(cmp_op(op), bx(x), bx(y)), ty: Ty::Bool };
+                    }
+                    self.needs_constraint(&lt, Constraint::Ordered, e.span, &format!("`{}`", op.text()));
+                    return Self::err_expr();
                 }
                 // i64 mixed with f64: point at the integer side.
                 let mixed = match (&lt, &rt) {
@@ -2307,9 +2509,32 @@ impl<'a> Checker<'a> {
         e: &ast::Expr,
         name: &ast::Ident,
         fields: &[(ast::Ident, ast::Expr)],
+        hint: Option<&Ty>,
     ) -> Expr {
         self.touch(&name.name);
-        let Some(&sid) = self.struct_index.get(&name.name) else {
+        let generic = self.generic_types.get(&name.name).copied();
+        let generic_sid = match generic {
+            Some(g) if matches!(self.generics[g].kind, GenericKind::Struct(_)) => {
+                self.resolve_shape(g);
+                let shape = self.generics[g].fields.clone();
+                let pairs: Vec<(&ast::Expr, Ty)> = fields
+                    .iter()
+                    .filter_map(|(f, v)| shape.iter().find(|(n, _)| *n == f.name).map(|(_, t)| (v, t.clone())))
+                    .collect();
+                let what = format!("`{}`", name.name);
+                match self.infer_instance(b, g, hint, pairs, e.span, &what) {
+                    Some(id) => Some(id),
+                    None => {
+                        for (_, v) in fields {
+                            self.expr(b, v);
+                        }
+                        return Self::err_expr();
+                    }
+                }
+            }
+            _ => None,
+        };
+        let Some(sid) = generic_sid.or_else(|| self.struct_index.get(&name.name).copied()) else {
             if self.failed_imports.contains(&name.name) {
                 for (_, v) in fields {
                     self.expr(b, v);
@@ -2422,6 +2647,9 @@ impl<'a> Checker<'a> {
             return self.builtin(b, e, callee, args);
         }
         self.touch(name);
+        if let (None, Some(&g)) = (self.func_index.get(name), self.generic_fns.get(name)) {
+            return self.generic_call(b, e, callee, args, g);
+        }
         let Some(&fid) = self.func_index.get(name) else {
             if self.failed_imports.contains(name) {
                 for a in args {
@@ -2609,7 +2837,11 @@ impl<'a> Checker<'a> {
                 self.err(d);
                 return Self::err_expr();
             }
-            if !printable(&vals[0].ty) {
+            if matches!(vals[0].ty, Ty::Param(_)) && !self.satisfies(&vals[0].ty, Constraint::Text) {
+                self.needs_constraint(&vals[0].ty, Constraint::Text, args[0].value.span, "printing it");
+                return Self::err_expr();
+            }
+            if !printable(&vals[0].ty) && !matches!(vals[0].ty, Ty::Param(_)) {
                 let t = self.show(&vals[0].ty);
                 let hint = match vals[0].ty {
                     Ty::Struct(_) => "print the fields one by one",
@@ -2727,6 +2959,16 @@ impl<'a> Checker<'a> {
         }
         out.push('"');
         Some(out)
+    }
+
+    /// The generic enum named by `base` in `Tree.Leaf(x)`, unless a local has that name.
+    fn generic_enum(&self, b: &Body, base: &ast::Expr) -> Option<usize> {
+        let AK::Name(n) = &base.kind else { return None };
+        if self.lookup_local(b, n).is_some() {
+            return None;
+        }
+        self.touch(&n.name);
+        self.generic_types.get(&n.name).copied().filter(|g| matches!(self.generics[*g].kind, GenericKind::Enum(_)))
     }
 
     /// The enum named by `base` in `Shape.Circle`, unless a local has that name.
@@ -2913,7 +3155,35 @@ impl<'a> Checker<'a> {
         receiver: &ast::Expr,
         method: &ast::Ident,
         args: &[ast::Arg],
+        hint: Option<&Ty>,
     ) -> Expr {
+        if let Some(g) = self.generic_enum(b, receiver) {
+            self.resolve_shape(g);
+            let fields: Vec<(String, Ty)> = self.generics[g]
+                .variants
+                .iter()
+                .find(|v| v.name == method.name)
+                .map(|v| v.fields.clone())
+                .unwrap_or_default();
+            let pairs: Vec<(&ast::Expr, Ty)> = args
+                .iter()
+                .enumerate()
+                .filter_map(|(i, a)| {
+                    let by_name = a.name.as_ref().and_then(|n| fields.iter().find(|(f, _)| *f == n.name));
+                    by_name.or(fields.get(i)).map(|(_, t)| (&a.value, t.clone()))
+                })
+                .collect();
+            let what = format!("`{}.{}`", self.generics[g].name, method.name);
+            return match self.infer_instance(b, g, hint, pairs, e.span, &what) {
+                Some(id) => self.variant_ctor(b, e, (id, receiver.span), method, Some(args)),
+                None => {
+                    for a in args {
+                        self.expr(b, &a.value);
+                    }
+                    Self::err_expr()
+                }
+            };
+        }
         if let Some(eid) = self.enum_name(b, receiver) {
             return self.variant_ctor(b, e, (eid, receiver.span), method, Some(args));
         }

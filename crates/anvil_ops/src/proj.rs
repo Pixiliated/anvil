@@ -217,6 +217,7 @@ fn verify_file(
     let tests = program.tests.clone();
     let funcs = program.funcs.clone();
     let modules = program.modules.clone();
+    let generic_fns = program.generic_fns.clone();
     let program_main = program.main;
     let p2 = program.clone();
     let (results, mut ran) = anvil_interp::run_on_big_stack(move || {
@@ -248,12 +249,19 @@ fn verify_file(
     let key = |f: &anvil_front::ir::Func| (modules[f.module].clone(), f.span.start);
     let mut own = Vec::new();
     for (i, f) in funcs.iter().enumerate() {
-        if f.module != 0 || (main && program_main == Some(i)) {
+        // An instance runs for its generic, which is listed below.
+        if f.module != 0 || f.instance || (main && program_main == Some(i)) {
             continue;
         }
         let (l, c) = src.line_col(f.span.start);
         let allowed = f.allows.iter().any(|(lint, _)| lint == "untested");
         own.push((f.name.clone(), key(f), format!("{l}:{c}"), allowed));
+    }
+    // Generic functions, called or not: one that no test or main instantiates and runs is untested.
+    for g in generic_fns.iter().filter(|g| g.module == 0) {
+        let (l, c) = src.line_col(g.span.start);
+        let allowed = g.allows.iter().any(|(lint, _)| lint == "untested");
+        own.push((g.name.clone(), (modules[0].clone(), g.span.start), format!("{l}:{c}"), allowed));
     }
     let ran = funcs.iter().zip(&ran).filter(|(_, r)| **r).map(|(f, _)| key(f)).collect();
     let steps = g.counts.as_ref().map(|c| c.steps);

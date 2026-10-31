@@ -192,7 +192,7 @@ fn flat(program: &Program, ty: &Ty, out: &mut Vec<Scalar>) {
                 }
             }
         }
-        Ty::Error => unreachable!("error type reached the backend"),
+        Ty::Param(_) | Ty::Error => unreachable!("{ty:?} reached the backend"),
     }
 }
 
@@ -1318,7 +1318,7 @@ impl<'a, 'b> Gen<'a, 'b> {
                 self.eq_parts(&parts, a, b, 1, &mut acc);
                 acc
             }
-            Ty::Void | Ty::Error => unreachable!("== on {ty:?}"),
+            Ty::Void | Ty::Param(_) | Ty::Error => unreachable!("== on {ty:?}"),
         }
     }
 

@@ -1,0 +1,26 @@
+// A generic stack whose helper stays private; its instances are checked here, in this file.
+pub struct Stack[T] {
+    items: [T],
+}
+
+pub fn push[T](s: Stack[T], x: T) -> Stack[T] {
+    var items: [T] = s.items;
+    items.push(x);
+    return Stack { items: items };
+}
+
+pub fn top[T](s: Stack[T]) -> Option[T] {
+    return last_of(s.items);
+}
+
+fn last_of[T](xs: [T]) -> Option[T] {
+    if xs.len() == 0 {
+        return None;
+    }
+    return Some(xs[xs.len() - 1]);
+}
+
+test "top of a stack" {
+    let s: Stack[i64] = push(s: Stack { items: [1] }, x: 2);
+    assert(top(s) == Some(2));
+}

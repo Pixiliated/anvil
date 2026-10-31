@@ -312,6 +312,19 @@ pub fn explain(code: &str) -> Option<&'static str> {
         "E0607" => {
             "Private type in a pub item. A pub function, struct or enum cannot use a type its module                     keeps private, since importers could not name it. Make the type pub, or the item private."
         }
+        "E0700" => {
+            "Type parameter not inferable. Calls and literals never write type arguments; they are read                     from what is passed, so every parameter of a generic function appears in a parameter's                     type, and every parameter of a generic struct or enum in a field's."
+        }
+        "E0701" => {
+            "Constraint not met. The generic declares what its type parameter must allow (`T: ordered`),                     and the type used here does not. ordered: i64, f64, str. text: i64, f64, bool, str. key: i64, str."
+        }
+        "E0702" => "Unknown constraint. The constraints are ordered (<, <=, >, >=), text (print, interpolation) and key (map keys).",
+        "E0703" => {
+            "Operation needs a constraint. A type parameter allows only ==, !=, copying and passing,                     unless declared otherwise: `T: ordered` for <, `T: text` to print it, `T: key` for map keys.                     The fix adds the constraint, which callers must then meet."
+        }
+        "E0704" => {
+            "Endless instantiation. A generic that calls itself with a type built from its own                     parameter (f[T] calling f[[T]]) would need an instance for every depth. Recurse with the same types."
+        }
         "E0500" => {
             "Unknown lint in an allow. `allow LINT \"reason\"` names one of the lints that \
                     `anvil explain` lists after the error codes."
@@ -343,5 +356,6 @@ pub const ALL_CODES: &[&str] = &[
     "E0302", "E0303", "E0304", "E0305", "E0306", "E0307", "E0308", "E0310", "E0311", "E0320", "E0321", "E0322",
     "E0323", "E0330", "E0331", "E0332", "E0340", "E0341", "E0350", "E0360", "E0370", "E0380", "E0390", "E0391",
     "E0392", "E0400", "E0401", "E0402", "E0403", "E0404", "E0405", "E0406", "E0407", "E0408", "E0500", "E0501",
-    "E0502", "E0601", "E0602", "E0603", "E0604", "E0605", "E0606", "E0607",
+    "E0502", "E0601", "E0602", "E0603", "E0604", "E0605", "E0606", "E0607", "E0700", "E0701", "E0702", "E0703",
+    "E0704",
 ];

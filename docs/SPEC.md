@@ -1,4 +1,4 @@
-# Anvil language specification (v0.8)
+# Anvil language specification (v0.9)
 
 Anvil is a small, compiled, general-purpose language designed to be written mostly by AI agents
 and read by humans. Its rules aim at three things: one obvious way to write each thing, code
@@ -20,6 +20,7 @@ unit N = kg*m/s^2;            // unit alias
 struct Body { mass: f64[kg], pos: f64[m], }
 enum Shape { Circle(radius: f64[m]), Empty, }
 fn name(param: Type, ...) -> Ret uses io requires cond ensures cond { body }
+fn first[T](xs: [T]) -> Option[T] { body }   // generic (see Generics)
 test "description" { body }
 allow untested "reason"       // before a fn: switches one lint off for it (see Projects)
 ```
@@ -268,6 +269,40 @@ for name in ages.keys() {
   like any call with two parameters.
 - A literal `[k: v, ...]` that repeats a key panics. `[:]` needs an expected type.
 - Maps are values like arrays: assigning or passing one gives an independent copy.
+
+## Generics
+
+```
+fn largest[T: ordered](xs: [T]) -> Option[T] { ... }
+struct Pair[A, B] { first: A, second: B, }
+enum Tree[T] { Leaf(value: T), Node(children: [Tree[T]]), }
+
+let p: Pair[i64, str] = Pair { first: 1, second: "one" };
+let top: Option[i64] = largest([4, 9, 2]);
+let leaf: Tree[str] = Tree.Leaf("a");
+```
+
+- Functions, structs and enums take type parameters in brackets after their name. Written
+  types give the arguments (`Pair[i64, str]`), but calls, literals and constructors never do:
+  the arguments come from the values passed (or from the expected type). So every type
+  parameter appears in a parameter's or a field's type (E0700).
+- A type parameter allows copying, passing, storing and `==`. Anything more is a constraint
+  declared with it, so the signature tells every caller what the body needs:
+
+| Constraint | Types | Allows |
+|---|---|---|
+| `ordered` | i64, f64, str | `<`, `<=`, `>`, `>=` |
+| `text` | i64, f64, bool, str | print, interpolation |
+| `key` | i64, str | map keys |
+
+  `T: ordered + text` combines them. An operation the constraints do not allow is E0703 (its
+  fix adds the constraint); a call, literal or type whose arguments do not meet them is E0701,
+  reported where it is used.
+- A generic body is checked once, against its constraints. Each set of type arguments then
+  gets its own copy (`max[i64]`, `Pair[i64, str]` in traces and errors), so generic code is as
+  fast as code written for one type. A generic that calls itself with a larger type
+  (`f[T]` calling `f[[T]]`) would need endless copies (E0704).
+- Generics can be pub and imported like any item.
 
 ## Equality
 

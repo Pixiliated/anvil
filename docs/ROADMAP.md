@@ -58,8 +58,8 @@ green and the interpreter and native backend agreeing on every program in `tests
 - [x] Multiple files, explicit imports by name, no wildcard imports
 - [x] Visibility (`pub`), one module per file
 
-## M8: Generics
-- [ ] Generic functions and structs with explicit, use-site-visible constraints
+## M8: Generics (v0.9)
+- [x] Generic functions and structs with explicit, use-site-visible constraints
 
 ## M9: Verification
 - [ ] `anvil test --native`

@@ -1,0 +1,10 @@
+// expect: E0703
+fn show_all[T: ordered](xs: [T]) uses io {
+    for x in xs {
+        print("{x}");
+    }
+}
+
+fn main() uses io {
+    show_all([1, 2]);
+}

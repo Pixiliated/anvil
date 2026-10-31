@@ -1,0 +1,98 @@
+// Generic functions, structs and enums: one copy of each per set of types, read from the arguments.
+import lib.stack.{Stack, push, top};
+
+unit m;
+
+struct Pair[A, B] {
+    first: A,
+    second: B,
+}
+
+enum Tree[T] {
+    Leaf(value: T),
+    Node(children: [Tree[T]]),
+}
+
+struct Index[K: key, V] {
+    entries: Map[K, V],
+}
+
+fn max[T: ordered](a: T, b: T) -> T {
+    if a > b {
+        return a;
+    }
+    return b;
+}
+
+fn largest[T: ordered](xs: [T]) -> Option[T] {
+    var best: Option[T] = None;
+    for x in xs {
+        match best {
+            Some(value) => { best = Some(max(a: value, b: x)); }
+            None => { best = Some(x); }
+        }
+    }
+    return best;
+}
+
+fn swap[A, B](p: Pair[A, B]) -> Pair[B, A] {
+    return Pair { first: p.second, second: p.first };
+}
+
+fn leaves[T](t: Tree[T]) -> [T] {
+    var out: [T] = [];
+    match t {
+        Leaf(value) => { out.push(value); }
+        Node(children) => {
+            for c in children {
+                for v in leaves(c) {
+                    out.push(v);
+                }
+            }
+        }
+    }
+    return out;
+}
+
+fn describe[T: text](xs: [T]) -> str {
+    var out: str = "";
+    for x in xs {
+        out = out + "<{x}>";
+    }
+    return out;
+}
+
+fn index_of[T](xs: [T], want: T) -> Option[i64] {
+    for i in 0..xs.len() {
+        if xs[i] == want {
+            return Some(i);
+        }
+    }
+    return None;
+}
+
+fn lookup[K: key, V](ix: Index[K, V], k: K) -> Option[V] {
+    return ix.entries.get(k);
+}
+
+fn main() uses io {
+    print("{max(a: 3, b: 7)} {max(a: "pear", b: "apple")} {max(a: 1.5[m], b: 2.5[m])}");
+    let none: [i64] = [];
+    print("{largest([4, 9, 2]) == Some(9)} {largest(none) == None} {largest([2.0, -1.0]) == Some(2.0)}");
+    let p: Pair[i64, str] = Pair { first: 1, second: "one" };
+    let q: Pair[str, i64] = swap(p);
+    print("{q.first} {q.second} {swap(q) == p}");
+    let t: Tree[str] = Tree.Node([Tree.Leaf("a"), Tree.Node([Tree.Leaf("b"), Tree.Leaf("c")])]);
+    let ns: Tree[i64] = Tree.Node([Tree.Leaf(1), Tree.Leaf(2)]);
+    print("{describe(leaves(t))} {describe(leaves(ns))} {describe([true, false])}");
+    let pairs: [Pair[str, i64]] = [Pair { first: "x", second: 1 }, Pair { first: "y", second: 2 }];
+    let want: Pair[str, i64] = Pair { first: "y", second: 2 };
+    print("{index_of(xs: pairs, want: want) == Some(1)} {index_of(xs: ["a", "b"], want: "c") == None}");
+    let ix: Index[str, f64] = Index { entries: ["pi": 3.14, "e": 2.72] };
+    print("{lookup(ix: ix, k: "e") == Some(2.72)} {lookup(ix: ix, k: "tau") == None}");
+    var s: Stack[str] = Stack { items: [] };
+    s = push(s: s, x: "a");
+    s = push(s: s, x: "b");
+    let floats: Stack[f64] = Stack { items: [1.0] };
+    print("{top(s) == Some("b")} {top(floats) == Some(1.0)}");
+}

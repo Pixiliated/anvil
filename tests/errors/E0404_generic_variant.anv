@@ -1,0 +1,14 @@
+// expect: E0404
+enum Maybe[T] {
+    Nothing,
+    Just(value: T),
+}
+
+fn main() -> i64 {
+    let m: i64 = 0;
+    match Maybe.Nothing {
+        Nothing => {}
+        Just(value: _) => {}
+    }
+    return m;
+}

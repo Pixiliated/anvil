@@ -139,3 +139,22 @@ Short records of choices that are not obvious from the code. Newest last.
   layouts are keyed by type, not by name, since two modules may each have a `Shape`.
 - **Coverage is project-wide:** a module's function counts as tested when any project file's
   tests or golden-checked main run it.
+
+## M8 (v0.9)
+
+- **Monomorphised in the checker:** each set of type arguments gets its own function or type
+  in the IR, so the interpreter and native backend did not change and generic code costs
+  nothing at runtime.
+- **Bodies are checked once, abstractly**, with each parameter as `Ty::Param`, so errors show
+  up in the generic itself, once, whether or not anything calls it. Instances are checked again
+  quietly; anything they find is reported in the body with a note naming the instance.
+- **Three built-in constraints, no user traits:** `ordered`, `text` and `key` cover what the
+  operators and built-ins need; `==` needs none, since every type has it. "Use-site-visible"
+  means the constraint is in the signature, and a call that breaks it fails at the call.
+- **Type arguments are never written at a use**, only in types. They are read from what is
+  passed, which is why every parameter must appear in a parameter or field type (E0700); one
+  way to call a generic.
+- **Generics count as tested** when any of their instances runs; one that nothing instantiates
+  is untested.
+- **Endless instances are an error** (E0704), found by counting how many instances deep a chain
+  of instances goes.
