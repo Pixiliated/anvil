@@ -66,6 +66,7 @@ pub fn build_test_exe(program: &Program, out: &Path, work_dir: &Path) -> Result<
             result_local: None,
             locals: t.locals.clone(),
             body: t.body.clone(),
+            captures: None,
         });
         entries.push((i, p.funcs.len() - 1));
     }
@@ -111,6 +112,7 @@ const RUNTIME: &[(&str, &[Type], &[Type])] = &[
     ("anvil_str_parse_i64", &[I], &[I]),
     ("anvil_str_parse_f64", &[I], &[types::F64]),
     ("anvil_parse_ok", &[], &[I]),
+    ("anvil_fn_new", &[I, I], &[I]),
     ("anvil_panic", &[I], &[]),
     ("anvil_panic_index", &[I, I, I], &[]),
     ("anvil_arr_new", &[I, I], &[I]),
@@ -141,6 +143,11 @@ const ENTRY: &str = "anvil_program";
 const OBJ_LEN: i32 = 16;
 const ARR_DATA: i32 = 40;
 const SLOT: i64 = 8;
+/// A function value: rc, kind, the layout of its captures (at 16), its code (at 24), then the
+/// captured values. The code takes the object itself first, then the call's arguments.
+const FN_CODE: i32 = 24;
+const FN_ENV: i64 = 32;
+const KIND_FN: i64 = 2;
 
 struct Backend {
     module: ObjectModule,
@@ -151,6 +158,11 @@ struct Backend {
     /// `==` helpers for arrays and maps by type name, and those declared but not yet generated.
     eq_helpers: HashMap<String, ClFuncId>,
     pending_eq: Vec<(ClFuncId, Ty)>,
+    /// A declared function's value code: a thunk taking (closure, args) that calls it; those
+    /// declared but not yet generated. Static function objects by their code.
+    thunks: HashMap<FuncId, ClFuncId>,
+    pending_thunks: Vec<(FuncId, ClFuncId)>,
+    fn_objects: HashMap<ClFuncId, DataId>,
 }
 
 pub fn compile_object(program: &Program, asm: bool) -> Result<(Vec<u8>, String), String> {
@@ -181,6 +193,9 @@ fn compile(program: &Program, asm: bool, entry: Entry) -> Result<(Vec<u8>, Strin
         type_infos: HashMap::new(),
         eq_helpers: HashMap::new(),
         pending_eq: Vec::new(),
+        thunks: HashMap::new(),
+        pending_thunks: Vec::new(),
+        fn_objects: HashMap::new(),
     };
 
     for (name, params, rets) in RUNTIME {
@@ -191,7 +206,7 @@ fn compile(program: &Program, asm: bool, entry: Entry) -> Result<(Vec<u8>, Strin
         be.runtime.insert(name, id);
     }
     for (i, f) in program.funcs.iter().enumerate() {
-        let sig = be.signature(program, f.params.iter().map(|p| &f.locals[*p].ty), &f.ret);
+        let sig = be.func_signature(program, f);
         let id = match &f.external {
             // C's symbol; i64 and f64 pass as C's int64_t and double in the platform's C convention.
             Some(x) => be
@@ -200,7 +215,7 @@ fn compile(program: &Program, asm: bool, entry: Entry) -> Result<(Vec<u8>, Strin
                 .map_err(|e| format!("extern `{}` is declared twice with different signatures: {e}", x.symbol))?,
             None => {
                 // Two modules may each have a private `helper`, so the index makes the symbol unique.
-                let name = format!("anv{i}_{}", f.name.replace('.', "_"));
+                let name = format!("anv{i}_{}", symbol_part(&f.name));
                 be.module.declare_function(&name, Linkage::Local, &sig).map_err(|e| e.to_string())?
             }
         };
@@ -211,7 +226,7 @@ fn compile(program: &Program, asm: bool, entry: Entry) -> Result<(Vec<u8>, Strin
     for (i, f) in program.funcs.iter().enumerate().filter(|(_, f)| f.external.is_none()) {
         let mut ctx = Context::new();
         ctx.set_disasm(asm);
-        ctx.func.signature = be.signature(program, f.params.iter().map(|p| &f.locals[*p].ty), &f.ret);
+        ctx.func.signature = be.func_signature(program, f);
         ctx.func.name = UserFuncName::user(0, be.funcs[i].as_u32());
         {
             let b = FunctionBuilder::new(&mut ctx.func, &mut fbc);
@@ -224,6 +239,28 @@ fn compile(program: &Program, asm: bool, entry: Entry) -> Result<(Vec<u8>, Strin
             let code = ctx.compiled_code().and_then(|c| c.vcode.clone()).unwrap_or_default();
             listing.push_str(&format!("; fn {}\n{code}\n", f.name));
         }
+    }
+    while let Some((fid, id)) = be.pending_thunks.pop() {
+        let mut ctx = Context::new();
+        ctx.func.signature = be.value_signature(program, &program.funcs[fid]);
+        ctx.func.name = UserFuncName::user(3, id.as_u32());
+        {
+            let mut b = FunctionBuilder::new(&mut ctx.func, &mut fbc);
+            let entry = b.create_block();
+            b.append_block_params_for_function_params(entry);
+            b.switch_to_block(entry);
+            b.seal_block(entry);
+            // The closure (a static object) is not needed; the arguments pass through, owned.
+            let params = b.block_params(entry)[1..].to_vec();
+            let f = be.module.declare_func_in_func(be.funcs[fid], b.func);
+            let call = b.ins().call(f, &params);
+            let results = b.inst_results(call).to_vec();
+            b.ins().return_(&results);
+            b.finalize(be.module.isa().frontend_config());
+        }
+        be.module
+            .define_function(id, &mut ctx)
+            .map_err(|e| format!("codegen of the value of `{}` failed: {e:?}", program.funcs[fid].name))?;
     }
     // Helpers can ask for more (an array of arrays), so generate until none is pending.
     while let Some((id, ty)) = be.pending_eq.pop() {
@@ -263,7 +300,7 @@ fn flat(program: &Program, ty: &Ty, out: &mut Vec<Scalar>) {
         Ty::I64 => out.push(Scalar { ty: I, heap: false }),
         Ty::F64(_) => out.push(Scalar { ty: types::F64, heap: false }),
         Ty::Bool => out.push(Scalar { ty: types::I8, heap: false }),
-        Ty::Str | Ty::Array(_) | Ty::Map(..) => out.push(Scalar { ty: I, heap: true }),
+        Ty::Str | Ty::Array(_) | Ty::Map(..) | Ty::Fn(_) => out.push(Scalar { ty: I, heap: true }),
         Ty::Struct(id) => {
             for (_, t) in &program.structs[*id].fields {
                 flat(program, t, out);
@@ -308,6 +345,11 @@ fn variant_field_range(program: &Program, eid: EnumId, variant: usize, field: us
     (1 + before + within, flat_len(program, &fields[field].1))
 }
 
+/// A name as part of a symbol: letters, digits and `_` (literals are named `main/fn@3:17`).
+fn symbol_part(name: &str) -> String {
+    name.chars().map(|c| if c.is_ascii_alphanumeric() || c == '_' { c } else { '_' }).collect()
+}
+
 fn show(program: &Program, ty: &Ty) -> String {
     TyDisplay { ty, structs: &program.structs, enums: &program.enums }.to_string()
 }
@@ -320,6 +362,57 @@ impl Backend {
         }
         sig.returns.extend(layout(program, ret).iter().map(|s| AbiParam::new(s.ty)));
         sig
+    }
+
+    /// How `f` is called directly. A function literal takes its closure first and reads its
+    /// captured values from it; the rest is its own parameters.
+    fn func_signature(&self, program: &Program, f: &Func) -> Signature {
+        match f.captures {
+            Some(_) => self.value_signature(program, f),
+            None => self.signature(program, f.params.iter().map(|p| &f.locals[*p].ty), &f.ret),
+        }
+    }
+
+    /// How a function value is called: (the closure, then the arguments).
+    fn value_signature(&self, program: &Program, f: &Func) -> Signature {
+        let own = &f.params[f.captures.unwrap_or(0)..];
+        let mut sig = self.signature(program, own.iter().map(|p| &f.locals[*p].ty), &f.ret);
+        sig.params.insert(0, AbiParam::new(I));
+        sig
+    }
+
+    /// The value code of a declared function: a thunk, generated once all functions are.
+    fn thunk(&mut self, program: &Program, fid: FuncId) -> ClFuncId {
+        if let Some(id) = self.thunks.get(&fid) {
+            return *id;
+        }
+        let sig = self.value_signature(program, &program.funcs[fid]);
+        let name = format!("anv{fid}_{}_value", symbol_part(&program.funcs[fid].name));
+        let id = self.module.declare_function(&name, Linkage::Local, &sig).expect("declare thunk");
+        self.thunks.insert(fid, id);
+        self.pending_thunks.push((fid, id));
+        id
+    }
+
+    /// A static function object (refcount -1, never freed) with no captures, running `code`.
+    fn fn_object(&mut self, code: ClFuncId) -> DataId {
+        if let Some(id) = self.fn_objects.get(&code) {
+            return *id;
+        }
+        let name = format!("anvil_fn_{}", self.fn_objects.len());
+        let id = self.module.declare_data(&name, Linkage::Local, true, false).expect("declare function object");
+        let mut bytes = Vec::new();
+        bytes.extend((-1i64).to_le_bytes());
+        bytes.extend(KIND_FN.to_le_bytes());
+        bytes.extend([0u8; 16]);
+        let mut desc = DataDescription::new();
+        desc.set_align(8);
+        desc.define(bytes.into_boxed_slice());
+        let f = self.module.declare_func_in_data(code, &mut desc);
+        desc.write_function_addr(FN_CODE as u32, f);
+        self.module.define_data(id, &desc).expect("define function object");
+        self.fn_objects.insert(code, id);
+        id
     }
 
     /// A static str object: refcount -1 (never freed), kind 0, length, bytes.
@@ -494,7 +587,14 @@ fn mutates(e: &Expr) -> bool {
         ExprKind::Push { .. } | ExprKind::Pop { .. } | ExprKind::MapSet { .. } | ExprKind::MapRemove { .. } => true,
         ExprKind::Slice { base, from, to, .. } => mutates(base) || mutates(from) || mutates(to),
         ExprKind::MapLit { entries, .. } => entries.iter().any(|(k, v)| mutates(k) || mutates(v)),
-        ExprKind::Int(_) | ExprKind::Float(_) | ExprKind::Bool(_) | ExprKind::Str(_) | ExprKind::Local(_) => false,
+        ExprKind::Int(_)
+        | ExprKind::Float(_)
+        | ExprKind::Bool(_)
+        | ExprKind::Str(_)
+        | ExprKind::Local(_)
+        | ExprKind::FnRef(_) => false,
+        ExprKind::CallValue(callee, es) => mutates(callee) || any(es),
+        ExprKind::Closure { captures: es, .. } => any(es),
         ExprKind::Field(x, _) | ExprKind::Not(x) | ExprKind::FNeg(x) | ExprKind::INeg { e: x, .. } => mutates(x),
         ExprKind::Try { inner, .. } => mutates(inner),
         ExprKind::Index { base, index, .. } => mutates(base) || mutates(index),
@@ -622,7 +722,25 @@ impl<'a, 'b> Gen<'a, 'b> {
         self.b.seal_block(entry);
         let params: Vec<Value> = self.b.block_params(entry).to_vec();
         let mut i = 0;
-        for p in &f.params {
+        let n = f.captures.unwrap_or(0);
+        if f.captures.is_some() {
+            // The closure is borrowed: each captured value is copied out with a reference of
+            // its own, which the function releases at its end like any parameter's.
+            let env = self.b.ins().iadd_imm_s(params[0], FN_ENV);
+            let mut slot = 0;
+            for p in &f.params[..n] {
+                let lay = self.layouts[*p].clone();
+                let base = self.b.ins().iadd_imm_s(env, slot * SLOT);
+                let vals = self.load(base, &lay);
+                self.retain(&lay, &vals);
+                for (v, x) in self.vars[*p].clone().into_iter().zip(vals) {
+                    self.b.def_var(v, x);
+                }
+                slot += lay.len() as i64;
+            }
+            i = 1;
+        }
+        for p in &f.params[n..] {
             for v in self.vars[*p].clone() {
                 self.b.def_var(v, params[i]);
                 i += 1;
@@ -1047,6 +1165,51 @@ impl<'a, 'b> Gen<'a, 'b> {
                 let call = self.b.ins().call(f, &vals);
                 self.b.inst_results(call).to_vec()
             }
+            ExprKind::FnRef(fid) => {
+                let code = self.be.thunk(self.program, *fid);
+                let obj = self.be.fn_object(code);
+                vec![self.data_ptr(obj)]
+            }
+            ExprKind::Closure { func, captures } if captures.is_empty() => {
+                let obj = self.be.fn_object(self.be.funcs[*func]);
+                vec![self.data_ptr(obj)]
+            }
+            ExprKind::Closure { func, captures } => {
+                // The captured values move into the new object, after its header.
+                let mut lay = Vec::new();
+                let mut vals = Vec::new();
+                for c in captures {
+                    lay.extend(self.layout(&c.ty));
+                    vals.extend(self.expr(c));
+                }
+                let key = format!("captures {:?}", captures.iter().map(|c| &c.ty).collect::<Vec<_>>());
+                let info = self.be.layout_info(key, lay);
+                let ti = self.data_ptr(info);
+                let f = self.func_ref(*func);
+                let code = self.b.ins().func_addr(I, f);
+                let obj = self.call_rt("anvil_fn_new", &[ti, code]).unwrap();
+                let env = self.b.ins().iadd_imm_s(obj, FN_ENV);
+                self.store(env, &vals);
+                vec![obj]
+            }
+            ExprKind::CallValue(callee, call_args) => {
+                let (c, owned) = self.borrow(callee);
+                let mut vals = vec![c[0]];
+                for a in call_args {
+                    vals.extend(self.expr(a));
+                }
+                let Ty::Fn(ft) = &callee.ty else { unreachable!() };
+                let mut sig = self.be.signature(self.program, ft.params.iter(), &ft.ret);
+                sig.params.insert(0, AbiParam::new(I));
+                let sig = self.b.import_signature(sig);
+                let code = self.b.ins().load(I, self.trusted, c[0], FN_CODE);
+                let call = self.b.ins().call_indirect(sig, code, &vals);
+                let results = self.b.inst_results(call).to_vec();
+                if owned {
+                    self.call_rt("anvil_release", &[c[0]]);
+                }
+                results
+            }
             ExprKind::StructLit(_, fields) => {
                 let mut vals = Vec::new();
                 for f in fields {
@@ -1458,7 +1621,7 @@ impl<'a, 'b> Gen<'a, 'b> {
                 self.eq_parts(&parts, a, b, 1, &mut acc);
                 acc
             }
-            Ty::Void | Ty::Param(_) | Ty::Error => unreachable!("== on {ty:?}"),
+            Ty::Void | Ty::Fn(_) | Ty::Param(_) | Ty::Error => unreachable!("== on {ty:?}"),
         }
     }
 

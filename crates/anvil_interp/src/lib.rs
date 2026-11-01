@@ -26,6 +26,15 @@ pub enum Value {
     Enum(usize, Vec<Value>),
     /// Entries in ascending key order (i64 keys by value, str keys bytewise).
     Map(Rc<Vec<(Value, Value)>>),
+    /// A function value (never compared: the checker refuses `==` on functions).
+    Fn(Rc<Closure>),
+}
+
+/// A function and the values it captured, which are passed before the call's arguments.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Closure {
+    pub func: FuncId,
+    pub captures: Vec<Value>,
 }
 
 /// The order of map keys: i64 by value, str bytewise (as `<` on str).
@@ -712,6 +721,18 @@ impl<'p, 'h> Interp<'p, 'h> {
             ExprKind::Call(fid, args) => {
                 let vals = self.eval_all(args, frame)?;
                 self.call(*fid, vals)?
+            }
+            ExprKind::FnRef(fid) => Value::Fn(Rc::new(Closure { func: *fid, captures: Vec::new() })),
+            ExprKind::Closure { func, captures } => {
+                Value::Fn(Rc::new(Closure { func: *func, captures: self.eval_all(captures, frame)? }))
+            }
+            ExprKind::CallValue(callee, args) => {
+                let Value::Fn(c) = self.eval(callee, frame)? else {
+                    unreachable!("calling a value that is not a function")
+                };
+                let mut vals = c.captures.clone();
+                vals.extend(self.eval_all(args, frame)?);
+                self.call(c.func, vals)?
             }
             ExprKind::StructLit(_, fields) => Value::Struct(self.eval_all(fields, frame)?),
             ExprKind::ArrayLit(elems) => Value::Array(Rc::new(self.eval_all(elems, frame)?)),

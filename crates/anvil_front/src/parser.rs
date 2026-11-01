@@ -30,10 +30,10 @@ pub fn parse(toks: Vec<Token>) -> (File, Vec<Diagnostic>) {
             Err(d) => {
                 errors.push(d);
                 p.pos = p.pos.max(start + 1);
+                // `fn(` is a function literal or type inside the broken item, not the next item.
                 while !matches!(
                     p.peek(),
                     Tok::Eof
-                        | Tok::Fn
                         | Tok::Struct
                         | Tok::Enum
                         | Tok::Unit
@@ -42,7 +42,8 @@ pub fn parse(toks: Vec<Token>) -> (File, Vec<Diagnostic>) {
                         | Tok::Import
                         | Tok::Pub
                         | Tok::Extern
-                ) {
+                ) && !(p.peek() == &Tok::Fn && p.peek_at(1) != &Tok::LParen)
+                {
                     p.bump();
                 }
             }
@@ -235,6 +236,25 @@ impl Parser {
     }
 
     fn type_expr(&mut self) -> PResult<TypeExpr> {
+        self.type_of(true)
+    }
+
+    /// The type after `->`. A function type there takes no `uses` or `noalloc`: those belong to
+    /// the function being declared, unless the type is in parentheses.
+    fn ret_type(&mut self) -> PResult<TypeExpr> {
+        self.type_of(false)
+    }
+
+    fn type_of(&mut self, effects: bool) -> PResult<TypeExpr> {
+        if self.peek() == &Tok::LParen {
+            let start = self.bump().span;
+            let inner = self.type_of(true)?;
+            let end = self.expect(Tok::RParen)?;
+            return Ok(TypeExpr { span: start.to(end), ..inner });
+        }
+        if self.peek() == &Tok::Fn {
+            return self.fn_type(effects);
+        }
         if self.peek() == &Tok::LBracket {
             let start = self.bump().span;
             let elem = self.type_expr()?;
@@ -260,6 +280,45 @@ impl Parser {
             span = span.to(self.expect(Tok::RBracket)?);
         }
         Ok(TypeExpr { kind: TypeKind::Named { name, unit, args }, span })
+    }
+
+    /// `fn(T, U) -> R uses io noalloc`.
+    fn fn_type(&mut self, effects: bool) -> PResult<TypeExpr> {
+        let start = self.bump().span;
+        self.expect(Tok::LParen)?;
+        let mut params = Vec::new();
+        while self.peek() != &Tok::RParen {
+            params.push(self.type_of(true)?);
+            if !self.eat(&Tok::Comma) {
+                break;
+            }
+        }
+        self.expect(Tok::RParen)?;
+        let ret = if self.eat(&Tok::Arrow) { Some(Box::new(self.ret_type()?)) } else { None };
+        let (mut uses, mut noalloc) = (Vec::new(), None);
+        if effects {
+            uses = self.type_uses()?;
+            if self.peek() == &Tok::Noalloc {
+                noalloc = Some(self.bump().span);
+            }
+        }
+        Ok(TypeExpr { kind: TypeKind::Fn { params, ret, uses, noalloc }, span: start.to(self.prev_span()) })
+    }
+
+    /// `uses io, fs` inside a type, where a comma may also end the type (`f: fn() uses io, x: i64`):
+    /// after a comma, only an effect name continues the list.
+    fn type_uses(&mut self) -> PResult<Vec<Ident>> {
+        if !self.eat(&Tok::Uses) {
+            return Ok(Vec::new());
+        }
+        let mut uses = vec![self.ident("an effect name")?];
+        while self.peek() == &Tok::Comma
+            && matches!(self.peek_at(1), Tok::Ident(n) if crate::check::EFFECTS.contains(&n.as_str()))
+        {
+            self.bump();
+            uses.push(self.ident("an effect name")?);
+        }
+        Ok(uses)
     }
 
     /// `[T: ordered + text, U]` after a declared name, or nothing.
@@ -400,7 +459,7 @@ impl Parser {
             }
         }
         self.expect(Tok::RParen)?;
-        let ret = if self.eat(&Tok::Arrow) { Some(self.type_expr()?) } else { None };
+        let ret = if self.eat(&Tok::Arrow) { Some(self.ret_type()?) } else { None };
         let uses_insert = self.prev_span().at_end();
         let (uses, uses_span) = self.uses_clause()?;
         let noalloc = if self.peek() == &Tok::Noalloc { Some(self.bump().span) } else { None };
@@ -789,6 +848,51 @@ impl Parser {
         }
     }
 
+    /// `fn(x: i64) -> i64 uses io noalloc { body }`, as a declaration with an empty name.
+    fn lambda(&mut self) -> PResult<FnDecl> {
+        let start = self.bump().span;
+        self.expect(Tok::LParen)?;
+        let mut params = Vec::new();
+        while self.peek() != &Tok::RParen {
+            let pname = self.ident("parameter name: a function literal names and types its parameters")?;
+            self.expect(Tok::Colon)?;
+            let ty = self.type_expr()?;
+            params.push(Param { name: pname, ty });
+            if !self.eat(&Tok::Comma) {
+                break;
+            }
+        }
+        self.expect(Tok::RParen)?;
+        let ret = if self.eat(&Tok::Arrow) { Some(self.ret_type()?) } else { None };
+        let uses_insert = self.prev_span().at_end();
+        let (uses, uses_span) = self.uses_clause()?;
+        let noalloc = if self.peek() == &Tok::Noalloc { Some(self.bump().span) } else { None };
+        if matches!(self.peek(), Tok::Requires | Tok::Ensures) {
+            return Err(self.unexpected("`{`").note(
+                "a function literal has no contracts: check its arguments in its body, or name the function",
+                None,
+            ));
+        }
+        let body = self.block()?;
+        Ok(FnDecl {
+            public: false,
+            name: Ident { name: String::new(), span: start },
+            type_params: Vec::new(),
+            params,
+            ret,
+            uses,
+            uses_span,
+            uses_insert,
+            noalloc,
+            external: None,
+            requires: Vec::new(),
+            ensures: Vec::new(),
+            span: start.to(body.span),
+            body,
+            allows: Vec::new(),
+        })
+    }
+
     /// Call arguments after `(`, through `)`.
     fn args(&mut self) -> PResult<Vec<Arg>> {
         let mut args = Vec::new();
@@ -891,6 +995,7 @@ impl Parser {
                 self.bump();
                 ExprKind::Result
             }
+            Tok::Fn => ExprKind::Lambda(Box::new(self.lambda()?)),
             Tok::LParen => {
                 self.bump();
                 let e = self.expr()?;

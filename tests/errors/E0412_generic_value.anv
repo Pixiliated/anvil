@@ -1,0 +1,9 @@
+// expect: E0412
+fn first[T](xs: [T]) -> T {
+    return xs[0];
+}
+
+fn main() uses io {
+    let f: fn([i64]) -> i64 = first;
+    print(f([1]));
+}

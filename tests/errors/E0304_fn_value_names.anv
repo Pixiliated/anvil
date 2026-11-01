@@ -1,0 +1,8 @@
+// expect: E0304
+// resolve: mechanical
+fn main() uses io {
+    let add: fn(i64, i64) -> i64 = fn(a: i64, b: i64) -> i64 {
+        return a + b;
+    };
+    print(add(a: 1, b: 2));
+}

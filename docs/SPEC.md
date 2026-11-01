@@ -1,4 +1,4 @@
-# Anvil language specification (v0.14)
+# Anvil language specification (v0.15)
 
 Anvil is a small, compiled, general-purpose language designed to be written mostly by AI agents
 and read by humans. Its rules aim at three things: one obvious way to write each thing, code
@@ -103,6 +103,7 @@ an expression or a signature, has no place in the layout and is an error (E0111)
 | enums | declared with `enum` |
 | `Option[T]` | `Some(x)` or `None` |
 | `Result[T, E]` | `Ok(x)` or `Err(e)` |
+| `fn(T, U) -> R` | a function value (see Function values) |
 
 There are **no implicit conversions**. `i64` and `f64` never mix; `3` is an `i64` and `3.0`
 an `f64`. Convert with `to_f64(i)` and `to_i64(x)` (truncates toward zero; panics on NaN,
@@ -166,6 +167,51 @@ fn area(width: f64[m], height: f64[m]) -> f64[m^2] {
 - A call that returns a value cannot be used as a statement; bind the value.
 - Functions may be declared in any order and may recurse.
 - Arguments are evaluated left to right.
+
+### Function values
+
+```
+fn apply(f: fn(i64) -> i64, x: i64) -> i64 {
+    return f(x);
+}
+
+fn adder(k: i64) -> (fn(i64) -> i64) {
+    return fn(x: i64) -> i64 {
+        return x + k;
+    };
+}
+
+let a: i64 = apply(f: double, x: 21);          // a declared function as a value
+let b: i64 = apply(f: adder(1), x: 41);        // a closure made by a function literal
+```
+
+- **A function type** is `fn(T, U) -> R uses io noalloc`: the parameter types, the result (none
+  for a function that returns nothing), its effects and its promise. A function type written
+  after `->` is in parentheses, so `uses` after it belongs to the outer function:
+  `fn make() -> (fn(i64) -> i64) uses io`.
+- **A declared function's name is a value** of its function type, from this file or imported.
+  A generic function or a built-in is not (E0412): pass a literal that calls it.
+- **A function literal** is `fn(x: i64) -> i64 { ... }`: parameters with names and types, a
+  result, effects and `noalloc` like a declaration, and a body; no contracts. It can be written
+  wherever a value can.
+- **Captures are copies.** A literal's body may read the locals of the functions around it; each
+  one it reads is copied into the closure when the literal is evaluated, so assigning the
+  variable afterwards does not change the closure, and the body cannot assign it (E0410). Its
+  own names must differ from the ones around it.
+- **Calling a function value:** a local holding one is called by its name, with the arguments in
+  order and unnamed, since a function type's parameters have no names (`f(x)`, E0304). To call
+  one held in a field or an array element, bind it to a local first.
+- **Effects and noalloc go with the type.** Calling a value of type `fn(str) uses io` needs
+  `uses io`; a noalloc function may only call function values whose type is noalloc. A function
+  that does less than a type allows fits it: a pure function can be passed for
+  `fn(i64) uses io`, and a noalloc one for a type without the promise; one that does more cannot
+  (E0300).
+- Function values cannot be compared (E0411), printed or used as map keys, and a property test
+  cannot generate them (E0414). Values holding them (a struct with a function field) cannot be
+  compared either.
+- A literal that captures values allocates its closure (E0333 in a noalloc function); one that
+  captures nothing, and a declared function, do not. Traces show a function value by name:
+  `fn double`, or `fn main/fn@12:9` for the literal at line 12, column 9 of `main`.
 
 ### Effects
 
@@ -367,7 +413,8 @@ let leaf: Tree[str] = Tree.Leaf("a");
 
 ## Equality
 
-`==` and `!=` work on any two values of the same type. Arrays, structs, enums and maps are equal
+`==` and `!=` work on any two values of the same type, except functions and values that hold
+them (E0411). Arrays, structs, enums and maps are equal
 when every part is: the same length, fields, variant and payload, keys and values. Floats
 compare as IEEE values everywhere, so `[nan] != [nan]` and `[0.0] == [-0.0]`. Only `i64`, `f64`
 and `str` are ordered.

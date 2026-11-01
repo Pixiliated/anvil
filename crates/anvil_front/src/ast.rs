@@ -77,6 +77,8 @@ pub enum TypeKind {
     Named { name: Ident, unit: Option<UnitExpr>, args: Vec<TypeExpr> },
     /// `[T]`
     Array(Box<TypeExpr>),
+    /// `fn(i64, str) -> bool uses io noalloc`: the type of a function value.
+    Fn { params: Vec<TypeExpr>, ret: Option<Box<TypeExpr>>, uses: Vec<Ident>, noalloc: Option<Span> },
 }
 
 #[derive(Clone, Debug)]
@@ -310,6 +312,9 @@ pub enum ExprKind {
     Unary(UnOp, Box<Expr>),
     Binary(BinOp, Box<Expr>, Box<Expr>),
     Paren(Box<Expr>),
+    /// `fn(x: i64) -> i64 { return x * k; }`: a function literal. Its name is empty, and it has
+    /// no type parameters, contracts or allows.
+    Lambda(Box<FnDecl>),
 }
 
 #[derive(Clone, Debug)]

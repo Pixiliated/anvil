@@ -245,6 +245,8 @@ pub struct Checker<'a> {
     builtin_enums: HashMap<String, EnumId>,
     /// The built-in `FileError`, which every module sees.
     file_error: EnumId,
+    /// Function literals' bodies, lifted into functions of their own, by FuncId.
+    lifted: Vec<(FuncId, Func)>,
     sigs: Vec<FuncSig>,
     func_index: HashMap<String, FuncId>,
 }
@@ -283,6 +285,21 @@ struct Body {
     result_local: Option<LocalId>,
     in_ensures: bool,
     in_contract: bool,
+    /// What lambdas are named after: the function or test this body belongs to.
+    name: String,
+    /// In a function literal: the locals of the functions around it, which its body may read
+    /// (their type and where they are declared). Reading one captures it.
+    enclosing: Option<HashMap<String, (Ty, Span)>>,
+    /// The locals made for captured values, in the order they were first read.
+    captures: Vec<LocalId>,
+}
+
+impl Body {
+    /// Whether `name` is a local here, or one this function literal could capture.
+    fn sees(&self, name: &str) -> bool {
+        self.scopes.iter().any(|s| s.contains_key(name))
+            || self.enclosing.as_ref().is_some_and(|e| e.contains_key(name))
+    }
 }
 
 pub fn check(src: &SourceFile, file: &ast::File) -> Result<Program, Vec<Diagnostic>> {
@@ -347,6 +364,7 @@ pub fn analyze_modules<'a>(modules: &[Module<'a>], order: &[usize]) -> Analysis 
         enum_index: HashMap::new(),
         builtin_enums: HashMap::new(),
         file_error: 0,
+        lifted: Vec::new(),
         sigs: Vec::new(),
         func_index: HashMap::new(),
     };
@@ -367,6 +385,14 @@ pub fn analyze_modules<'a>(modules: &[Module<'a>], order: &[usize]) -> Analysis 
             main = mn;
         }
     }
+    // Function literals were given FuncIds as they were met, between the declared functions
+    // and the instances: put every function in FuncId order.
+    funcs.append(&mut c.lifted);
+    funcs.sort_by_key(|(id, _)| *id);
+    if c.diags.is_empty() {
+        assert!(funcs.iter().enumerate().all(|(i, (id, _))| i == *id), "FuncIds have a gap");
+    }
+    let funcs: Vec<Func> = funcs.into_iter().map(|(_, f)| f).collect();
     // Layout last, and only for an otherwise clean program: a broken file is fixed first.
     if c.diags.is_empty() {
         for (m, module) in modules.iter().enumerate() {
@@ -538,7 +564,7 @@ impl<'a> Checker<'a> {
 
     /// Checks one module: its imports, declarations and function bodies (and, for the root,
     /// its tests and main). Returns its functions in FuncId order.
-    fn module(&mut self, me: &Module<'a>, srcs: &[&'a SourceFile]) -> (Vec<Func>, Vec<Test>, Option<FuncId>) {
+    fn module(&mut self, me: &Module<'a>, srcs: &[&'a SourceFile]) -> (Vec<(FuncId, Func)>, Vec<Test>, Option<FuncId>) {
         let file: &'a ast::File = me.file;
         let mut import_decls = Vec::new();
         let mut unit_decls = Vec::new();
@@ -603,11 +629,11 @@ impl<'a> Checker<'a> {
 
         let mut funcs = Vec::new();
         for f in &fn_decls {
-            let mut func = self.func(f);
+            let (id, mut func) = self.func(f);
             if !me.name.is_empty() {
                 func.name = format!("{}.{}", me.name, func.name);
             }
-            funcs.push(func);
+            funcs.push((id, func));
         }
         let mut tests = Vec::new();
         let mut main = None;
@@ -839,6 +865,7 @@ impl<'a> Checker<'a> {
             },
             Ty::Array(e) => self.private_type(e),
             Ty::Map(_, v) => self.private_type(v),
+            Ty::Fn(f) => f.params.iter().chain([&f.ret]).find_map(|t| self.private_type(t)),
             _ => None,
         }
     }
@@ -963,6 +990,15 @@ impl<'a> Checker<'a> {
                 return if e == Ty::Error { Ty::Error } else { Ty::Array(Box::new(e)) };
             }
             TypeKind::Named { name, unit, args } => (name, unit, args),
+            TypeKind::Fn { params, ret, uses, noalloc } => {
+                let params: Vec<Ty> = params.iter().map(|p| self.resolve_type(p)).collect();
+                let ret = ret.as_ref().map(|r| self.resolve_type(r)).unwrap_or(Ty::Void);
+                let effects = self.effects(uses);
+                if params.contains(&Ty::Error) || ret == Ty::Error {
+                    return Ty::Error;
+                }
+                return Ty::Fn(Box::new(FnTy { params, ret, effects, noalloc: noalloc.is_some() }));
+            }
         };
         let n = name.name.as_str();
         if let (Some(t), true, None) = (self.type_params.get(n), args.is_empty(), unit) {
@@ -1357,6 +1393,9 @@ impl<'a> Checker<'a> {
             result_local: None,
             in_ensures: false,
             in_contract: false,
+            name: String::new(),
+            enclosing: None,
+            captures: Vec::new(),
         }
     }
 
@@ -1366,6 +1405,16 @@ impl<'a> Checker<'a> {
             self.err(
                 Diagnostic::new("E0202", name.span, format!("`{}` is already declared in this function", name.name))
                     .note("first declared here", Some(prev)),
+            );
+        } else if let Some((_, prev)) = b.enclosing.as_ref().and_then(|e| e.get(&name.name)) {
+            let prev = *prev;
+            self.err(
+                Diagnostic::new(
+                    "E0202",
+                    name.span,
+                    format!("`{}` is already declared in the function around this literal", name.name),
+                )
+                .note("first declared here", Some(prev)),
             );
         } else if self.func_index.contains_key(&name.name) || self.generic_fns.contains_key(&name.name) {
             self.err(Diagnostic::new("E0202", name.span, format!("`{}` is the name of a function", name.name)));
@@ -1502,12 +1551,13 @@ impl<'a> Checker<'a> {
         allows
     }
 
-    fn func(&mut self, d: &ast::FnDecl) -> Func {
+    fn func(&mut self, d: &ast::FnDecl) -> (FuncId, Func) {
         let id = self.sigs.iter().position(|s| s.module == self.module && s.span == d.name.span).unwrap();
-        match &d.external {
+        let f = match &d.external {
             Some(x) => self.extern_func(d, x, id),
             None => self.func_at(d, id),
-        }
+        };
+        (id, f)
     }
 
     /// An extern function: only its signature, which must be one C can have.
@@ -1610,6 +1660,7 @@ impl<'a> Checker<'a> {
             result_local: None,
             locals: b.locals,
             body: Vec::new(),
+            captures: None,
         }
     }
 
@@ -1618,6 +1669,7 @@ impl<'a> Checker<'a> {
         let ret = self.sigs[id].ret.clone();
         let effects = self.sigs[id].effects;
         let mut b = self.new_body(ret.clone(), effects, &d.uses, d.uses_span, d.uses_insert, d.noalloc);
+        b.name = d.name.name.clone();
         let mut params = Vec::new();
         for (i, p) in d.params.iter().enumerate() {
             let ty = self.sigs[id].params[i].1.clone();
@@ -1696,15 +1748,240 @@ impl<'a> Checker<'a> {
             result_local,
             locals: b.locals,
             body,
+            captures: None,
+        }
+    }
+
+    /// `fn(x: i64) -> i64 { ... }`: checked as a function of its own whose body may read the
+    /// locals around it. Each one it reads is captured: copied into the closure when the literal
+    /// is evaluated, and passed to the lifted function before its own parameters.
+    fn lambda(&mut self, b: &mut Body, d: &ast::FnDecl) -> Expr {
+        let params: Vec<(String, Ty)> =
+            d.params.iter().map(|p| (p.name.name.clone(), self.resolve_type(&p.ty))).collect();
+        let ret = d.ret.as_ref().map(|t| self.resolve_type(t)).unwrap_or(Ty::Void);
+        let effects = self.effects(&d.uses);
+        let ty = FnTy {
+            params: params.iter().map(|(_, t)| t.clone()).collect(),
+            ret: ret.clone(),
+            effects,
+            noalloc: d.noalloc.is_some(),
+        };
+        let id = self.sigs.len();
+        self.sigs.push(FuncSig {
+            params: params.clone(),
+            ret: ret.clone(),
+            effects,
+            noalloc: d.noalloc.is_some(),
+            noalloc_insert: noalloc_insert(d),
+            span: d.name.span,
+            module: self.module,
+        });
+        // Every local visible here, and whatever this body could itself capture.
+        let mut names = b.enclosing.clone().unwrap_or_default();
+        for scope in &b.scopes {
+            for (n, &l) in scope {
+                names.insert(n.clone(), (b.locals[l].ty.clone(), b.meta[l].span));
+            }
+        }
+        let mut ib = self.new_body(ret.clone(), effects, &d.uses, d.uses_span, d.uses_insert, d.noalloc);
+        let (line, col) = self.src.line_col(d.name.span.start);
+        let module = &self.module_names[self.module];
+        let owner = if module.is_empty() { b.name.clone() } else { format!("{module}.{}", b.name) };
+        ib.name = format!("{owner}/fn@{line}:{col}");
+        ib.enclosing = Some(names);
+        let mut own = Vec::new();
+        for (p, (_, t)) in d.params.iter().zip(&params) {
+            let meta = LocalMeta {
+                span: p.name.span,
+                kw_span: None,
+                mutable: false,
+                is_param: true,
+                is_loop_var: false,
+                used: false,
+                assigned: false,
+                rename_fix: None,
+            };
+            own.push(self.declare_local(&mut ib, &p.name, t.clone(), meta));
+        }
+        let body = self.block(&mut ib, &d.body);
+        self.close_scope(&mut ib, d.body.span.end);
+        if ret != Ty::Void && ret != Ty::Error && !always_returns(&d.body.stmts) {
+            self.err(
+                Diagnostic::new(
+                    "E0320",
+                    d.body.span.at_end().to(Span::new(d.body.span.end - 1, d.body.span.end)),
+                    format!("this function literal must return {} on every path", self.show(&ret)),
+                )
+                .note("the end of its body can be reached without a return", None),
+            );
+        }
+        self.finish_locals(&ib);
+        self.check_effect_usage(&ib);
+        // The captured values, read here (which may capture them from further out in turn).
+        let mut captures = Vec::new();
+        for &l in &ib.captures {
+            let name = ast::Ident { name: ib.locals[l].name.clone(), span: d.name.span };
+            let outer = self.lookup_local(b, &name).expect("a capture is visible around the literal");
+            b.meta[outer].used = true;
+            captures.push(Expr { kind: ExprKind::Local(outer), ty: b.locals[outer].ty.clone() });
+        }
+        if !captures.is_empty() {
+            self.note_alloc(b, d.name.span, "a function literal that captures values");
+        }
+        let mut all_params = ib.captures.clone();
+        all_params.extend(own);
+        if !self.abstract_body {
+            self.lifted.push((
+                id,
+                Func {
+                    name: ib.name.clone(),
+                    span: d.name.span,
+                    allows: Vec::new(),
+                    module: self.module,
+                    instance: false,
+                    params: all_params,
+                    ret,
+                    effects,
+                    external: None,
+                    requires: Vec::new(),
+                    ensures: Vec::new(),
+                    result_local: None,
+                    locals: ib.locals,
+                    body,
+                    captures: Some(captures.len()),
+                },
+            ));
+        }
+        Expr { kind: ExprKind::Closure { func: id, captures }, ty: Ty::Fn(Box::new(ty)) }
+    }
+
+    /// A declared function used as a value.
+    fn fn_value(&mut self, id: &ast::Ident, fid: FuncId) -> Expr {
+        let sig = &self.sigs[fid];
+        let ty = FnTy {
+            params: sig.params.iter().map(|(_, t)| t.clone()).collect(),
+            ret: sig.ret.clone(),
+            effects: sig.effects,
+            noalloc: sig.noalloc,
+        };
+        let decl = Loc { file: sig.module, span: sig.span };
+        self.note_use(id.span, Some(decl));
+        if ty.params.contains(&Ty::Error) || ty.ret == Ty::Error {
+            return Self::err_expr();
+        }
+        Expr { kind: ExprKind::FnRef(fid), ty: Ty::Fn(Box::new(ty)) }
+    }
+
+    /// `f(x, y)` where `f` is a local holding a function value: arguments in order, unnamed.
+    fn call_value(&mut self, b: &mut Body, e: &ast::Expr, callee: &ast::Ident, l: LocalId, args: &[ast::Arg]) -> Expr {
+        b.meta[l].used = true;
+        self.note_use(callee.span, Some(self.here(b.meta[l].span)));
+        let name = &callee.name;
+        let f = match b.locals[l].ty.clone() {
+            Ty::Fn(f) => *f,
+            other => {
+                if other != Ty::Error {
+                    let t = self.show(&other);
+                    self.err(
+                        Diagnostic::new("E0413", callee.span, format!("`{name}` is {t}, not a function"))
+                            .note("only a local holding a function value can be called by its name", None),
+                    );
+                }
+                for a in args {
+                    self.expr(b, &a.value);
+                }
+                return Self::err_expr();
+            }
+        };
+        let mut named = false;
+        for a in args {
+            if let Some(n) = &a.name {
+                named = true;
+                self.err(
+                    Diagnostic::new(
+                        "E0304",
+                        n.span,
+                        format!(
+                            "`{name}` is a function value, whose parameters have no names: pass arguments in order"
+                        ),
+                    )
+                    .fix1(
+                        FixKind::Mechanical,
+                        "remove the name",
+                        Span::new(n.span.start, a.value.span.start),
+                        "",
+                    ),
+                );
+            }
+        }
+        if args.len() != f.params.len() {
+            let t = self.show(&Ty::Fn(Box::new(f.clone())));
+            self.err(
+                Diagnostic::new(
+                    "E0303",
+                    e.span,
+                    format!("`{name}` takes {} argument(s), found {}", f.params.len(), args.len()),
+                )
+                .note(format!("its type: {t}"), None),
+            );
+            for a in args {
+                self.expr(b, &a.value);
+            }
+            return Self::err_expr();
+        }
+        for eff in f.effects.iter() {
+            self.note_effect(b, eff, callee.span, &format!("calling `{name}`"));
+        }
+        if !f.noalloc {
+            self.note_alloc_call(b, callee.span, name, None);
+        }
+        let vals: Vec<Expr> = args.iter().zip(&f.params).map(|(a, t)| self.expect(b, &a.value, t)).collect();
+        if named || vals.iter().any(|v| v.ty == Ty::Error) {
+            return Self::err_expr();
+        }
+        let ty = f.ret.clone();
+        let callee = Expr { kind: ExprKind::Local(l), ty: Ty::Fn(Box::new(f)) };
+        Expr { kind: ExprKind::CallValue(Box::new(callee), vals), ty }
+    }
+
+    /// Whether a value of `t` holds a function somewhere (functions cannot be compared or
+    /// generated).
+    fn has_fn(&self, t: &Ty) -> bool {
+        self.has_fn_in(t, &mut Vec::new())
+    }
+
+    fn has_fn_in(&self, t: &Ty, seen: &mut Vec<Ty>) -> bool {
+        match t {
+            Ty::Fn(_) => true,
+            Ty::Array(e) => self.has_fn_in(e, seen),
+            Ty::Map(_, v) => self.has_fn_in(v, seen),
+            Ty::Struct(id) if !seen.contains(t) => {
+                seen.push(t.clone());
+                self.structs[*id].fields.iter().any(|(_, f)| self.has_fn_in(f, seen))
+            }
+            Ty::Enum(id) if !seen.contains(t) => {
+                seen.push(t.clone());
+                self.enums[*id].variants.iter().flat_map(|v| &v.fields).any(|(_, f)| self.has_fn_in(f, seen))
+            }
+            _ => false,
         }
     }
 
     fn test(&mut self, t: &ast::TestDecl) -> Test {
         let effects = self.effects(&t.uses);
         let mut b = self.new_body(Ty::Void, effects, &t.uses, t.uses_span, t.uses_insert, None);
+        b.name = format!("test {:?}", t.name);
         let mut inputs = Vec::new();
         for p in &t.inputs {
-            let ty = self.resolve_type(&p.ty);
+            let mut ty = self.resolve_type(&p.ty);
+            if self.has_fn(&ty) {
+                let shown = self.show(&ty);
+                self.err(
+                    Diagnostic::new("E0414", p.ty.span, format!("a property test cannot generate {shown}"))
+                        .note("inputs are generated values; a function is not one: write a plain test that passes the functions to check", None),
+                );
+                ty = Ty::Error;
+            }
             let meta = LocalMeta {
                 span: p.name.span,
                 kw_span: None,
@@ -2248,6 +2525,20 @@ impl<'a> Checker<'a> {
                     return None;
                 };
                 self.note_use(id.span, Some(self.here(b.meta[local].span)));
+                if b.captures.contains(&local) {
+                    self.err(
+                        Diagnostic::new(
+                            "E0410",
+                            target.span,
+                            format!("`{}` is captured by this function literal, so it cannot be assigned", id.name),
+                        )
+                        .note(
+                            "a function literal gets a copy of each value it reads; return the new value instead",
+                            None,
+                        ),
+                    );
+                    return None;
+                }
                 let m = &mut b.meta[local];
                 m.assigned = true;
                 if !m.mutable {
@@ -2331,8 +2622,28 @@ impl<'a> Checker<'a> {
         None
     }
 
-    fn lookup_local(&self, b: &Body, id: &ast::Ident) -> Option<LocalId> {
-        b.scopes.iter().rev().find_map(|s| s.get(&id.name).copied())
+    /// The local `id` names: in this body's scopes or, in a function literal, one of the
+    /// functions around it, which is then captured (once, the first time it is read).
+    fn lookup_local(&self, b: &mut Body, id: &ast::Ident) -> Option<LocalId> {
+        if let Some(l) = b.scopes.iter().rev().find_map(|s| s.get(&id.name).copied()) {
+            return Some(l);
+        }
+        let (ty, span) = b.enclosing.as_ref()?.get(&id.name)?.clone();
+        let l = b.locals.len();
+        b.locals.push(Local { name: id.name.clone(), ty });
+        b.meta.push(LocalMeta {
+            span,
+            kw_span: None,
+            mutable: false,
+            is_param: false,
+            is_loop_var: false,
+            used: true,
+            assigned: false,
+            rename_fix: None,
+        });
+        b.scopes[0].insert(id.name.clone(), l);
+        b.captures.push(l);
+        Some(l)
     }
 
     fn unknown_name(&mut self, b: &mut Body, id: &ast::Ident) {
@@ -2372,9 +2683,24 @@ impl<'a> Checker<'a> {
         if x.ty == *want || x.ty == Ty::Error || *want == Ty::Error {
             return;
         }
+        // A function that does less than a type allows still fits it.
+        if let (Ty::Fn(have), Ty::Fn(w)) = (&x.ty, want) {
+            if have.fits(w) {
+                return;
+            }
+        }
         let got_s = self.show(&x.ty);
         let want_s = self.show(want);
         let d = match (&x.ty, want) {
+            (Ty::Fn(have), Ty::Fn(w)) if have.params == w.params && have.ret == w.ret => {
+                let extra: Vec<&str> = have.effects.iter().filter(|x| !w.effects.has(*x)).map(Effect::name).collect();
+                let why = if extra.is_empty() {
+                    "the type promises noalloc, and this function does not".to_string()
+                } else {
+                    format!("this function uses {}, which the type does not allow", extra.join(", "))
+                };
+                Diagnostic::new("E0300", e.span, format!("expected {want_s}, found {got_s}")).note(why, None)
+            }
             (Ty::F64(_), Ty::F64(u)) => {
                 let mut d = Diagnostic::new("E0301", e.span, format!("expected {want_s}, found {got_s}"));
                 if let AK::Float(_, None) = &e.kind {
@@ -2465,10 +2791,30 @@ impl<'a> Checker<'a> {
                     (ExprKind::Local(l), b.locals[l].ty.clone())
                 }
                 None => {
+                    self.touch(&id.name);
+                    if let Some(&fid) = self.func_index.get(&id.name) {
+                        return self.fn_value(id, fid);
+                    }
+                    if self.generic_fns.contains_key(&id.name) || BUILTINS.contains(&id.name.as_str()) {
+                        let what =
+                            if BUILTINS.contains(&id.name.as_str()) { "a built-in" } else { "a generic function" };
+                        self.err(
+                            Diagnostic::new("E0412", id.span, format!("`{}` is {what}, which is not a value", id.name))
+                                .note(
+                                    format!(
+                                        "pass a function literal that calls it, such as fn(x: i64) -> i64 {{ return {}(x); }}",
+                                        id.name
+                                    ),
+                                    None,
+                                ),
+                        );
+                        return Self::err_expr();
+                    }
                     self.unknown_name(b, id);
                     return Self::err_expr();
                 }
             },
+            AK::Lambda(d) => return self.lambda(b, d),
             AK::Result => {
                 if !b.in_ensures {
                     self.err(Diagnostic::new("E0322", e.span, "`result` is only valid in ensures clauses"));
@@ -2726,6 +3072,15 @@ impl<'a> Checker<'a> {
             self.expr(b, r)
         };
         if x.ty == Ty::Error || y.ty == Ty::Error {
+            return Self::err_expr();
+        }
+        if matches!(op, BinOp::Eq | BinOp::Ne) && (self.has_fn(&x.ty) || self.has_fn(&y.ty)) {
+            let t = self.show(if self.has_fn(&x.ty) { &x.ty } else { &y.ty });
+            let what = if matches!(x.ty, Ty::Fn(_)) { String::new() } else { format!(", and {t} holds one") };
+            self.err(Diagnostic::new("E0411", e.span, format!("functions cannot be compared{what}")).note(
+                "two functions that compute the same thing are not equal values; compare what they return",
+                None,
+            ));
             return Self::err_expr();
         }
         let site = self.site(e.span);
@@ -3074,6 +3429,11 @@ impl<'a> Checker<'a> {
         let name = callee.name.as_str();
         if BUILTINS.contains(&name) {
             return self.builtin(b, e, callee, args);
+        }
+        if b.sees(name) {
+            if let Some(l) = self.lookup_local(b, callee) {
+                return self.call_value(b, e, callee, l, args);
+            }
         }
         self.touch(name);
         if let (None, Some(&g)) = (self.func_index.get(name), self.generic_fns.get(name)) {
@@ -3467,7 +3827,7 @@ impl<'a> Checker<'a> {
     /// The generic enum named by `base` in `Tree.Leaf(x)`, unless a local has that name.
     fn generic_enum(&self, b: &Body, base: &ast::Expr) -> Option<usize> {
         let AK::Name(n) = &base.kind else { return None };
-        if self.lookup_local(b, n).is_some() {
+        if b.sees(&n.name) {
             return None;
         }
         self.touch(&n.name);
@@ -3477,7 +3837,7 @@ impl<'a> Checker<'a> {
     /// The enum named by `base` in `Shape.Circle`, unless a local has that name.
     fn enum_name(&self, b: &Body, base: &ast::Expr) -> Option<EnumId> {
         let AK::Name(n) = &base.kind else { return None };
-        if self.lookup_local(b, n).is_some() {
+        if b.sees(&n.name) {
             return None;
         }
         self.touch(&n.name);

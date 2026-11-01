@@ -89,5 +89,12 @@ green and the interpreter and native backend agreeing on every program in `tests
   runs read the disk and keep their writes in memory, on both backends
 - [x] Reading values from text: `trim`, `parse_i64`, `parse_f64`
 
-## M14: Publishing
+## M14: Function values (v0.15)
+- [x] Function types `fn(T) -> R uses ... noalloc`; declared functions as values
+- [x] Function literals capturing by value, on both backends (closures natively, with leak checks)
+- [x] Effects and noalloc in function types, with a function that does less fitting a type that
+  allows more; generics over function types (`map`, `keep`, `fold`, `sort_by` in Anvil)
+- [x] The fuzzer makes function literals and passes helpers as values
+
+## M15: Publishing
 - [ ] crates.io as `anvil-lang` (`anvil` is taken), docs site, contribution guide

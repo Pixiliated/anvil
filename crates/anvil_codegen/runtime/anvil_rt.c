@@ -38,7 +38,7 @@ __declspec(dllimport) unsigned long __stdcall GetFileAttributesW(const wchar_t *
 #define ANVIL_PANIC_EXIT 101
 #define ANVIL_RUNTIME_ERROR_EXIT 70
 
-enum { KIND_STR = 0, KIND_ARR = 1 };
+enum { KIND_STR = 0, KIND_ARR = 1, KIND_FN = 2 };
 
 typedef struct {
     int64_t rc;
@@ -67,6 +67,16 @@ typedef struct {
     const AnvTypeInfo *ti;
     char *data;
 } AnvArr;
+
+/* A function value: the layout of its captured values, its code, then the values. The code
+ * takes the object itself first; static objects (refcount -1) capture nothing. */
+typedef struct {
+    int64_t rc;
+    int64_t kind;
+    const AnvTypeInfo *ti;
+    void *code;
+    char env[];
+} AnvFn;
 
 /* Objects allocated and not yet freed; checked at exit when ANVIL_CHECK_LEAKS is set. */
 static int64_t live_objects = 0;
@@ -114,9 +124,23 @@ void anvil_release(AnvObj *o) {
             for (int64_t k = 0; k < a->ti->nptrs; k++) anvil_release(*(AnvObj **)(elem + a->ti->offsets[k]));
         }
         free(a->data);
+    } else if (o->kind == KIND_FN) {
+        AnvFn *f = (AnvFn *)o;
+        for (int64_t k = 0; k < f->ti->nptrs; k++) anvil_release(*(AnvObj **)(f->env + f->ti->offsets[k]));
     }
     live_objects--;
     free(o);
+}
+
+/* A closure: the generated code stores the captured values into env. */
+AnvFn *anvil_fn_new(const AnvTypeInfo *ti, void *code) {
+    AnvFn *f = xmalloc(sizeof(AnvFn) + (size_t)ti->elem_size);
+    f->rc = 1;
+    f->kind = KIND_FN;
+    f->ti = ti;
+    f->code = code;
+    live_objects++;
+    return f;
 }
 
 /* ---- strings ---- */

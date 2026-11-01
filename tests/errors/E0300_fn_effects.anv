@@ -1,0 +1,13 @@
+// expect: E0300
+fn twice(f: fn(i64) -> i64, x: i64) -> i64 {
+    return f(f(x));
+}
+
+fn noisy(x: i64) -> i64 uses io {
+    print(x);
+    return x;
+}
+
+fn main() uses io {
+    print(twice(f: noisy, x: 1));
+}

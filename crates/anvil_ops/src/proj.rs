@@ -257,8 +257,9 @@ fn verify_file(
     let key = |f: &anvil_front::ir::Func| (modules[f.module].clone(), f.span.start);
     let mut own = Vec::new();
     for (i, f) in funcs.iter().enumerate() {
-        // An instance runs for its generic, which is listed below.
-        if f.module != 0 || f.instance || (main && program_main == Some(i)) {
+        // An instance runs for its generic, which is listed below; a function literal is part
+        // of the function it is written in.
+        if f.module != 0 || f.instance || f.captures.is_some() || (main && program_main == Some(i)) {
             continue;
         }
         let (l, c) = src.line_col(f.span.start);

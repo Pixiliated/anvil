@@ -269,3 +269,28 @@ Short records of choices that are not obvious from the code. Newest last.
   both backends. Not-a-number and infinities are not text a program parses.
 - **Windows executables start at `wmain`**, so arguments arrive as UTF-16 and reach the
   program as UTF-8; paths go back to UTF-16 for the file calls.
+
+## M14 (v0.15)
+
+- **Function values before interfaces.** Passing behaviour (a comparator, a callback) was the
+  largest gap; interfaces can come later, and need no change to these types.
+- **Captures are copies, made when the literal is evaluated.** It is the rule for every other
+  value: nothing is shared, so a closure cannot change behind the code that made it, and the
+  body cannot assign a captured name (E0410) because only the copy would change.
+- **Function types have no parameter names, so calls through a value are positional.** Names
+  in the type would make `fn(a: i64)` and `fn(x: i64)` different types, and passing `max` where
+  `fn(i64, i64) -> i64` is expected would need a rename. Named arguments stay the rule for
+  declared functions.
+- **A function that does less fits a type that allows more**, at the point a value is passed,
+  bound or returned (effects contained, noalloc kept); nowhere else is there subtyping, and the
+  value is the same either way.
+- **A function type after `->` is in parentheses** (the formatter writes them), so `uses` after
+  it always belongs to the declaration; inside a type, a comma continues a `uses` list only with
+  an effect name.
+- **Literals are lifted into functions** whose first parameters are the captured values: the
+  interpreter calls them with the captures prepended, native code passes the closure object
+  (refcounted, the captured values after a header the runtime frees through) and the function
+  loads its captures from it. Declared functions get a small thunk; closures that capture
+  nothing are static objects, so they never allocate.
+- **Function literals are not linted as untested**: they belong to the function they are
+  written in, which is.

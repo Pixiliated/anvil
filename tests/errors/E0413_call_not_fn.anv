@@ -1,0 +1,5 @@
+// expect: E0413
+fn main() uses io {
+    let width: i64 = 3;
+    print(width(2));
+}

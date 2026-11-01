@@ -1,0 +1,10 @@
+// expect: E0410
+fn main() uses io {
+    var count: i64 = 0;
+    let bump: fn() = fn() {
+        count = count + 1;
+    };
+    bump();
+    count = 2;
+    print(count);
+}

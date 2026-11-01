@@ -30,6 +30,11 @@ fn write(out: &mut String, v: &Value, ty: &Ty, program: &Program) {
         (Value::F64(x), Ty::F64(u)) if !u.is_dimensionless() => out.push_str(&format!("{}[{u}]", format_f64(*x))),
         (Value::F64(x), _) => out.push_str(&format_f64(*x)),
         (Value::Bool(b), _) => out.push_str(&b.to_string()),
+        // A function has no source text: its name (a literal's says where it is written).
+        (Value::Fn(c), _) => {
+            out.push_str("fn ");
+            out.push_str(&program.funcs[c.func].name);
+        }
         (Value::Str(s), _) => quote(out, s),
         (Value::Struct(fields), Ty::Struct(id)) => {
             let def = &program.structs[*id];

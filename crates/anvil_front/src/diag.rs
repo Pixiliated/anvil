@@ -221,7 +221,7 @@ pub fn explain(code: &str) -> Option<&'static str> {
         "E0304" => {
             "Argument names. Calls to a function with two or more parameters name every argument, \
                     in parameter order: area(width: 2.0, height: 3.0). Calls with one parameter do not name it. \
-                    Named arguments make swapped arguments impossible."
+                    Named arguments make swapped arguments impossible. A function value's parameters                     have no names (its type is fn(i64, i64) -> i64), so a call through one passes its                     arguments in order, unnamed."
         }
         "E0305" => "Struct literal fields. A struct literal lists every field exactly once, in declaration order.",
         "E0306" => "Unknown field.",
@@ -321,6 +321,21 @@ pub fn explain(code: &str) -> Option<&'static str> {
                     field by field, arrays in a loop and enums with match."
         }
         "E0408" => "Map key type. Map keys are i64 or str, which have one order every program agrees on, so iteration order is fixed.",
+        "E0410" => {
+            "Assigning a captured variable. A function literal gets a copy of every value it reads from                     the function around it, made when the literal is evaluated, so assigning one would change                     only the copy. Return the new value from the literal instead, or pass it in and out."
+        }
+        "E0411" => {
+            "Comparing functions. Two functions that compute the same thing are not equal values, so                     == and != are not defined on functions or on values that hold them. Compare what the                     functions return."
+        }
+        "E0412" => {
+            "Not a value. A declared function is a value (`apply(f: double, x: 1)`), but a generic                     function has one copy per type and a built-in none at all. Pass a function literal that                     calls it: fn(xs: [i64]) -> i64 { return first(xs); }."
+        }
+        "E0413" => {
+            "Calling something that is not a function. Only a local holding a function value can be                     called by its name; this local holds another type."
+        }
+        "E0414" => {
+            "Generated functions. A property test generates values of its inputs' types, and a function                     is not a generated value. Write a plain test that passes the functions to check."
+        }
         "E0601" => {
             "Module not found. `import shapes.circle.{area};` reads shapes/circle.anv, a path relative to                     the directory of the file that imports it."
         }
@@ -406,6 +421,6 @@ pub const ALL_CODES: &[&str] = &[
     "E0302", "E0303", "E0304", "E0305", "E0306", "E0307", "E0308", "E0310", "E0311", "E0320", "E0321", "E0322",
     "E0323", "E0330", "E0331", "E0332", "E0333", "E0334", "E0340", "E0341", "E0350", "E0360", "E0370", "E0380",
     "E0390", "E0391", "E0392", "E0400", "E0401", "E0402", "E0403", "E0404", "E0405", "E0406", "E0407", "E0408",
-    "E0500", "E0501", "E0502", "E0601", "E0602", "E0603", "E0604", "E0605", "E0606", "E0607", "E0700", "E0701",
-    "E0702", "E0703", "E0704", "E0800", "E0801", "E0802", "E0803",
+    "E0410", "E0411", "E0412", "E0413", "E0414", "E0500", "E0501", "E0502", "E0601", "E0602", "E0603", "E0604",
+    "E0605", "E0606", "E0607", "E0700", "E0701", "E0702", "E0703", "E0704", "E0800", "E0801", "E0802", "E0803",
 ];

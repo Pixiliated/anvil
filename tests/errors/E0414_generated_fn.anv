@@ -1,0 +1,4 @@
+// expect: E0414
+test "functions are not generated" for all f: fn(i64) -> i64 {
+    assert(f(1) == f(1));
+}

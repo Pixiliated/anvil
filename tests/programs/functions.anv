@@ -1,0 +1,212 @@
+// Function values: named functions, function literals that capture by value, function types
+// with effects and noalloc, generics over functions, and functions inside data.
+import lib.units.{speed};
+
+unit m;
+unit s;
+
+extern "c/ffi_math.c" fn gcd(a: i64, b: i64) -> i64 noalloc;
+
+struct Op {
+    name: str,
+    run: fn(i64, i64) -> i64,
+}
+
+enum Step {
+    Map(f: fn(i64) -> i64),
+    Keep(wanted: fn(i64) -> bool),
+}
+
+fn add(a: i64, b: i64) -> i64 {
+    return a + b;
+}
+
+fn sub(a: i64, b: i64) -> i64 {
+    return a - b;
+}
+
+fn map[T, U](xs: [T], f: fn(T) -> U) -> [U] {
+    var out: [U] = [];
+    for x in xs {
+        out.push(f(x));
+    }
+    return out;
+}
+
+fn keep[T](xs: [T], wanted: fn(T) -> bool) -> [T] {
+    var out: [T] = [];
+    for x in xs {
+        if wanted(x) {
+            out.push(x);
+        }
+    }
+    return out;
+}
+
+fn fold[T, A](xs: [T], start: A, f: fn(A, T) -> A) -> A {
+    var acc: A = start;
+    for x in xs {
+        acc = f(acc, x);
+    }
+    return acc;
+}
+
+// Insertion sort with the order as a parameter: `before(a, b)` puts a first.
+fn sort_by[T](xs: [T], before: fn(T, T) -> bool) -> [T] {
+    var out: [T] = xs;
+    for i in 1..out.len() {
+        var j: i64 = i;
+        while j > 0 && before(out[j], out[j - 1]) {
+            let t: T = out[j];
+            out[j] = out[j - 1];
+            out[j - 1] = t;
+            j = j - 1;
+        }
+    }
+    return out;
+}
+
+fn adder(k: i64) -> (fn(i64) -> i64) {
+    return fn(x: i64) -> i64 {
+        return x + k;
+    };
+}
+
+fn compose(f: fn(i64) -> i64, g: fn(i64) -> i64) -> (fn(i64) -> i64) {
+    return fn(x: i64) -> i64 {
+        return g(f(x));
+    };
+}
+
+// A pure function may stand where a function with io is allowed.
+fn each(xs: [i64], f: fn(i64) uses io) uses io {
+    for x in xs {
+        f(x);
+    }
+}
+
+fn run_steps(xs: [i64], steps: [Step]) -> [i64] {
+    var out: [i64] = xs;
+    for st in steps {
+        match st {
+            Map(f) => { out = map(xs: out, f: f); }
+            Keep(wanted) => { out = keep(xs: out, wanted: wanted); }
+        }
+    }
+    return out;
+}
+
+fn sum_with(xs: [i64], f: fn(i64) -> i64 noalloc) -> i64 noalloc {
+    var total: i64 = 0;
+    for x in xs {
+        total = total + f(x);
+    }
+    return total;
+}
+
+fn square(x: i64) -> i64 noalloc {
+    return x * x;
+}
+
+fn show(xs: [i64]) -> str {
+    var text: str = "";
+    for x in xs {
+        if text.len() > 0 {
+            text = text + " ";
+        }
+        text = text + "{x}";
+    }
+    return "[{text}]";
+}
+
+fn main() uses io {
+    let xs: [i64] = [5, 3, 8, 1, 9, 2];
+    print(show(map(xs: xs, f: adder(10))));
+    print(show(keep(xs: xs, wanted: fn(x: i64) -> bool {
+        return x % 2 == 1;
+    })));
+    print(fold(xs: xs, start: 0, f: add));
+    print(fold(xs: xs, start: "", f: fn(acc: str, x: i64) -> str {
+        return "{acc}{x}";
+    }));
+    print(show(sort_by(xs: xs, before: fn(a: i64, b: i64) -> bool {
+        return a < b;
+    })));
+    let words: [str] = ["pear", "fig", "banana", "kiwi"];
+    let by_length: [str] = sort_by(xs: words, before: fn(a: str, b: str) -> bool {
+        return a.len() < b.len() || (a.len() == b.len() && a < b);
+    });
+    print(fold(xs: by_length, start: "", f: fn(acc: str, w: str) -> str {
+        return "{acc} {w}";
+    }));
+
+    // Captures are copies: changing the variable later does not change the closure.
+    var k: i64 = 1;
+    let plus_k: fn(i64) -> i64 = fn(x: i64) -> i64 {
+        return x + k;
+    };
+    k = 100;
+    print("plus_k(1) = {plus_k(1)}, k = {k}");
+
+    // Captured arrays stay alive with the closure, and a closure can capture a closure.
+    let inc_twice: fn(i64) -> i64 = compose(f: adder(1), g: adder(1));
+    let table: [i64] = [10, 20, 30];
+    let lookup: fn(i64) -> i64 = fn(i: i64) -> i64 {
+        return table[i] + inc_twice(0);
+    };
+    print(lookup(2));
+
+    // Literals inside literals capture through every level.
+    let base: i64 = 1000;
+    let outer: fn(i64) -> i64 = fn(a: i64) -> i64 {
+        let inner: fn(i64) -> i64 = fn(b: i64) -> i64 {
+            return base + a + b;
+        };
+        return inner(1);
+    };
+    print(outer(20));
+
+    // Functions in data.
+    let ops: [Op] = [
+        Op { name: "add", run: add },
+        Op { name: "sub", run: sub },
+        Op { name: "gcd", run: gcd },
+    ];
+    for op in ops {
+        let run: fn(i64, i64) -> i64 = op.run;
+        print("{op.name}(84, 36) = {run(84, 36)}");
+    }
+    let steps: [Step] = [Step.Map(adder(1)), Step.Keep(fn(x: i64) -> bool {
+        return x > 4;
+    }), Step.Map(square)];
+    print(show(run_steps(xs: xs, steps: steps)));
+    let maybe: Option[fn(i64) -> i64] = Some(adder(5));
+    match maybe {
+        Some(value: f) => { print(f(5)); }
+        None => {}
+    }
+
+    // Effects and noalloc are part of the type.
+    each(xs: [1, 2], f: fn(x: i64) uses io {
+        print("each {x}");
+    });
+    each(xs: [3], f: fn(_x: i64) {});
+    print(sum_with(xs: xs, f: square));
+    print(sum_with(xs: [1, 2, 3], f: fn(x: i64) -> i64 noalloc {
+        return x * 10;
+    }));
+
+    // Functions from modules, with units.
+    let pace: fn(f64[m], f64[s]) -> f64[m/s] = speed;
+    print(pace(100.0[m], 9.58[s]));
+}
+
+test "a closure keeps what it captured" {
+    let make: fn(i64) -> (fn(i64) -> i64) = adder;
+    let add2: fn(i64) -> i64 = make(2);
+    assert(add2(40) == 42);
+    let id: fn(str) -> str = fn(t: str) -> str {
+        return t;
+    };
+    assert(map(xs: ["a", "b"], f: id) == ["a", "b"]);
+}

@@ -97,7 +97,8 @@ pub fn generate(ty: &Ty, program: &Program, rng: &mut Rng, size: u64) -> Value {
             let tag = rng.below(variants.len() as u64) as usize;
             Value::Enum(tag, variants[tag].fields.iter().map(|(_, t)| generate(t, program, rng, size / 2)).collect())
         }
-        Ty::Void | Ty::Param(_) | Ty::Error => unreachable!("no values of {ty:?}"),
+        // The checker refuses property tests over functions (E0414).
+        Ty::Void | Ty::Fn(_) | Ty::Param(_) | Ty::Error => unreachable!("no generated values of {ty:?}"),
     }
 }
 

@@ -248,6 +248,7 @@ impl<'a> Checker<'a> {
         match t {
             Ty::Param(n) => n == name,
             Ty::Array(e) => self.mentions(e, name),
+            Ty::Fn(f) => f.params.iter().any(|p| self.mentions(p, name)) || self.mentions(&f.ret, name),
             Ty::Map(k, v) => self.mentions(k, name) || self.mentions(v, name),
             Ty::Struct(id) => self.struct_inst.get(id).is_some_and(|(_, a)| a.iter().any(|t| self.mentions(t, name))),
             Ty::Enum(id) => match (self.enum_inst.get(id), self.builtin_args.get(id)) {
@@ -460,6 +461,11 @@ impl<'a> Checker<'a> {
         match t {
             Ty::Param(n) => map.get(n).cloned().unwrap_or_else(|| t.clone()),
             Ty::Array(e) => Ty::Array(Box::new(self.subst(e, map))),
+            Ty::Fn(f) => {
+                let params = f.params.iter().map(|p| self.subst(p, map)).collect();
+                let ret = self.subst(&f.ret, map);
+                Ty::Fn(Box::new(FnTy { params, ret, effects: f.effects, noalloc: f.noalloc }))
+            }
             Ty::Map(k, v) => Ty::Map(Box::new(self.subst(k, map)), Box::new(self.subst(v, map))),
             Ty::Struct(id) => match self.struct_inst.get(id).cloned() {
                 Some((g, args)) => {
@@ -474,6 +480,8 @@ impl<'a> Checker<'a> {
                     return self.instantiate_type(g, args);
                 }
                 match self.builtin_args.get(id).cloned() {
+                    // FileError has no type arguments.
+                    Some(args) if args.is_empty() => t.clone(),
                     Some(args) if args.len() == 1 => {
                         let a = self.subst(&args[0], map);
                         self.option_of(a)
@@ -497,6 +505,12 @@ impl<'a> Checker<'a> {
                 binds.entry(n.clone()).or_insert_with(|| a.clone());
             }
             (Ty::Array(p), Ty::Array(a)) => self.unify(p, a, binds),
+            (Ty::Fn(p), Ty::Fn(a)) if p.params.len() == a.params.len() => {
+                for (x, y) in p.params.iter().zip(&a.params) {
+                    self.unify(x, y, binds);
+                }
+                self.unify(&p.ret, &a.ret, binds);
+            }
             (Ty::Map(pk, pv), Ty::Map(ak, av)) => {
                 self.unify(pk, ak, binds);
                 self.unify(pv, av, binds);
@@ -687,6 +701,7 @@ impl<'a> Checker<'a> {
         match t {
             Ty::Param(_) => true,
             Ty::Array(e) => self.mentions_param_pattern(e),
+            Ty::Fn(f) => f.params.iter().any(|p| self.mentions_param_pattern(p)) || self.mentions_param_pattern(&f.ret),
             Ty::Map(k, v) => self.mentions_param_pattern(k) || self.mentions_param_pattern(v),
             Ty::Struct(id) => {
                 self.struct_inst.get(id).is_some_and(|(_, a)| a.iter().any(|t| self.mentions_param_pattern(t)))
@@ -795,7 +810,7 @@ impl<'a> Checker<'a> {
 
     /// Checks the bodies of the instances asked for so far (which may ask for more), each in the
     /// module its generic lives in; returns them in FuncId order.
-    pub(super) fn run_pending(&mut self, srcs: &[&'a SourceFile]) -> Vec<Func> {
+    pub(super) fn run_pending(&mut self, srcs: &[&'a SourceFile]) -> Vec<(FuncId, Func)> {
         let mut out = Vec::new();
         while !self.pending.is_empty() {
             let p = self.pending.remove(0);
@@ -849,7 +864,7 @@ impl<'a> Checker<'a> {
                     self.empty_func(d, home)
                 }
             };
-            out.push(f);
+            out.push((p.id, f));
         }
         out
     }
@@ -871,6 +886,7 @@ impl<'a> Checker<'a> {
             result_local: None,
             locals: Vec::new(),
             body: Vec::new(),
+            captures: None,
         }
     }
 

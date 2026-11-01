@@ -53,6 +53,9 @@ struct Gen {
     /// Variables in scope: (name, type).
     vars: Vec<(String, T)>,
     fns: Vec<Sig>,
+    /// Function values in scope: (name, parameter type, result type). Literals among them
+    /// capture the variables their bodies read.
+    closures: Vec<(String, T, T)>,
     next: usize,
     /// Whether the function being written may draw random numbers (main may; helpers are pure),
     /// and whether it has.
@@ -259,9 +262,16 @@ impl Gen {
         }
     }
 
-    /// A call to an earlier helper returning `t`, with its arguments named when it has several.
+    /// A call to an earlier helper returning `t`, with its arguments named when it has several,
+    /// or to a function value in scope.
     fn call(&mut self, t: T, d: u32) -> Option<String> {
         let candidates: Vec<usize> = (0..self.fns.len()).filter(|i| self.fns[*i].ret == t).collect();
+        let values: Vec<usize> = (0..self.closures.len()).filter(|i| self.closures[*i].2 == t).collect();
+        if !values.is_empty() && (candidates.is_empty() || self.rng.below(2) == 0) {
+            let i = *self.pick(&values);
+            let (name, pt, _) = self.closures[i].clone();
+            return Some(format!("{name}({})", self.expr(pt, d)));
+        }
         if candidates.is_empty() {
             return None;
         }
@@ -319,6 +329,7 @@ impl Gen {
                     out.push_str(&format!("{indent}{v}.push({});\n", self.expr(T::I, 2)));
                     self.vars.push((v, T::Ai));
                 }
+                3 => self.function_value(out, indent, t),
                 _ => {
                     let v = self.fresh("v");
                     out.push_str(&format!("{indent}let {v}: {} = {};\n", t.name(), self.expr(t, 3)));
@@ -326,6 +337,34 @@ impl Gen {
                 }
             }
         }
+    }
+
+    /// `let v: fn(P) -> R = ...;`: a helper with one parameter, or a literal whose body reads
+    /// (so captures) the variables in scope. Its body draws no random numbers.
+    fn function_value(&mut self, out: &mut String, indent: &str, ret: T) {
+        let v = self.fresh("v");
+        let helpers: Vec<usize> = (0..self.fns.len()).filter(|i| self.fns[*i].params.len() == 1).collect();
+        if !helpers.is_empty() && self.rng.below(3) == 0 {
+            let f = *self.pick(&helpers);
+            let (name, pt, rt) = (self.fns[f].name.clone(), self.fns[f].params[0].1, self.fns[f].ret);
+            out.push_str(&format!("{indent}let {v}: fn({}) -> {} = {name};\n", pt.name(), rt.name()));
+            self.closures.push((v, pt, rt));
+            return;
+        }
+        let p = self.fresh("p");
+        let pt = *self.pick(&ALL);
+        let random = std::mem::replace(&mut self.random, false);
+        self.vars.push((p.clone(), pt));
+        let body = self.expr(ret, 3);
+        self.vars.retain(|(n, _)| *n != p);
+        self.random = random;
+        let ty = format!("fn({}) -> {}", pt.name(), ret.name());
+        out.push_str(&format!(
+            "{indent}let {v}: {ty} = fn({p}: {}) -> {} {{\n{indent}    return {body};\n{indent}}};\n",
+            pt.name(),
+            ret.name()
+        ));
+        self.closures.push((v, pt, ret));
     }
 
     fn program(&mut self) -> String {
@@ -338,6 +377,7 @@ impl Gen {
             let list: Vec<String> = params.iter().map(|(p, t)| format!("{p}: {}", t.name())).collect();
             out.push_str(&format!("\nfn {name}({}) -> {} {{\n", list.join(", "), ret.name()));
             self.vars = params.clone();
+            self.closures.clear();
             let n = self.rng.below(3);
             self.statements(&mut out, "    ", n);
             let value = self.expr(ret, 3);
@@ -345,10 +385,18 @@ impl Gen {
             self.fns.push(Sig { name, params, ret });
         }
         self.vars.clear();
+        self.closures.clear();
         self.random = true;
         let mut body = String::new();
         let n = 3 + self.rng.below(5);
         self.statements(&mut body, "    ", n);
+        // Every function value is called once more, and what it gives is printed below.
+        for (f, pt, rt) in self.closures.clone() {
+            let x = self.fresh("x");
+            let arg = self.leaf(pt);
+            body.push_str(&format!("    let {x}: {} = {f}({arg});\n", rt.name()));
+            self.vars.push((x, rt));
+        }
         let uses = if self.used_random { "io, random" } else { "io" };
         out.push_str(&format!("\nfn main() uses {uses} {{\n{body}"));
         for (v, t) in self.vars.clone() {
@@ -372,6 +420,7 @@ pub fn program_for(seed: u64) -> String {
         rng: Rng::new(seed.wrapping_mul(0x2545_f491_4f6c_dd1d) ^ 0x5eed),
         vars: Vec::new(),
         fns: Vec::new(),
+        closures: Vec::new(),
         next: 0,
         random: false,
         used_random: false,
@@ -451,6 +500,12 @@ fn check_one(text: &str, seed: u64) -> (&'static str, String) {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn some_programs_make_function_values() {
+        let n = (1..=50).filter(|s| super::program_for(*s).contains("= fn(")).count();
+        assert!(n >= 10, "only {n} of 50 fuzz programs make function literals");
+    }
+
     #[test]
     fn some_programs_draw_random_numbers() {
         let n = (1..=50).filter(|s| super::program_for(*s).contains("random_")).count();

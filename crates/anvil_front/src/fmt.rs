@@ -10,6 +10,7 @@ use crate::ast::*;
 use crate::diag::{Diagnostic, FixKind};
 use crate::lexer;
 use crate::span::{SourceFile, Span};
+use std::cell::RefCell;
 
 const INDENT: &str = "    ";
 /// Lines longer than this split a statement's list value, one element per line, and keep a
@@ -55,13 +56,13 @@ pub fn format_file(src: &SourceFile, file: &File) -> Result<String, Diagnostic> 
     let mut p = Printer {
         text: &src.text,
         comments: lexer::comments(&src.text),
-        used: Vec::new(),
+        used: RefCell::new(Vec::new()),
         out: String::new(),
         depth: 0,
     };
-    p.used = vec![false; p.comments.len()];
+    p.used = RefCell::new(vec![false; p.comments.len()]);
     p.items(&file.items);
-    if let Some(i) = p.used.iter().position(|u| !u) {
+    if let Some(i) = p.used.borrow().iter().position(|u| !u) {
         let span = p.comments[i];
         return Err(Diagnostic::new(
             "E0111",
@@ -76,7 +77,8 @@ pub fn format_file(src: &SourceFile, file: &File) -> Result<String, Diagnostic> 
 struct Printer<'a> {
     text: &'a str,
     comments: Vec<Span>,
-    used: Vec<bool>,
+    /// Which comments are printed; shared with the printers of function literals' bodies.
+    used: RefCell<Vec<bool>>,
     out: String,
     depth: usize,
 }
@@ -119,7 +121,7 @@ impl Printer<'_> {
         let mut first = first;
         for i in 0..self.comments.len() {
             let c = self.comments[i];
-            if self.used[i] || c.start < from || c.start >= to {
+            if self.used.borrow()[i] || c.start < from || c.start >= to {
                 continue;
             }
             if !first && self.blank_between(prev, c.start) {
@@ -127,7 +129,7 @@ impl Printer<'_> {
             }
             let t = self.comment_text(i).to_string();
             self.line(&t);
-            self.used[i] = true;
+            self.used.borrow_mut()[i] = true;
             prev = c.end;
             first = false;
         }
@@ -139,13 +141,13 @@ impl Printer<'_> {
         let line_end = self.text[end..].find('\n').map_or(self.text.len(), |n| end + n);
         for i in 0..self.comments.len() {
             let c = self.comments[i];
-            if !self.used[i] && c.start >= end && c.start < line_end {
+            if !self.used.borrow()[i] && c.start >= end && c.start < line_end {
                 let t = self.comment_text(i).to_string();
                 self.out.pop();
                 self.out.push(' ');
                 self.out.push_str(&t);
                 self.out.push('\n');
-                self.used[i] = true;
+                self.used.borrow_mut()[i] = true;
                 return c.end;
             }
         }
@@ -170,8 +172,11 @@ impl Printer<'_> {
             if forced {
                 self.blank();
             }
-            let had_comments =
-                self.comments.iter().zip(&self.used).any(|(c, u)| !u && c.start >= prev && c.start < start);
+            let had_comments = self
+                .comments
+                .iter()
+                .zip(self.used.borrow().iter())
+                .any(|(c, u)| !u && c.start >= prev && c.start < start);
             let after = self.own_line_comments(prev, start, n == 0 && !forced);
             if n > 0 && !forced && !had_comments && self.blank_between(prev, start) {
                 self.blank();
@@ -300,7 +305,7 @@ impl Printer<'_> {
             params.join(", ")
         );
         if let Some(r) = &f.ret {
-            head.push_str(&format!(" -> {}", self.ty(r)));
+            head.push_str(&format!(" -> {}", self.ret_ty(r)));
         }
         head.push_str(&uses(&f.uses));
         if f.noalloc.is_some() {
@@ -350,7 +355,8 @@ impl Printer<'_> {
     fn stmt(&mut self, s: &Stmt) {
         if let Some(t) = self.simple(s) {
             match self.wrapped(s) {
-                Some((head, items, close)) if self.depth * INDENT.len() + t.len() > WIDTH => {
+                // A function literal's body already has its lines: the statement is not split.
+                Some((head, items, close)) if self.depth * INDENT.len() + t.len() > WIDTH && !t.contains('\n') => {
                     self.line(&head);
                     self.depth += 1;
                     for i in items {
@@ -493,7 +499,7 @@ impl Printer<'_> {
         if let ([only], false) = (a.body.stmts.as_slice(), self.has_comments(inner.start, inner.end)) {
             if let Some(t) = self.simple(only) {
                 let one = format!("{head} {{ {t} }}");
-                if self.depth * INDENT.len() + one.len() <= WIDTH {
+                if self.depth * INDENT.len() + one.len() <= WIDTH && !one.contains('\n') {
                     self.line(&one);
                     return;
                 }
@@ -535,7 +541,36 @@ impl Printer<'_> {
             ExprKind::Unary(UnOp::Not, x) => format!("!{}", self.expr(x)),
             ExprKind::Binary(op, l, r) => format!("{} {} {}", self.expr(l), op.text(), self.expr(r)),
             ExprKind::Paren(x) => format!("({})", self.expr(x)),
+            ExprKind::Lambda(f) => self.lambda(f),
         }
+    }
+
+    /// `fn(x: i64) -> i64 {`, the body's lines one level deeper than the line it starts on, and
+    /// `}` at that line's level: the text goes on the current line as one expression.
+    fn lambda(&self, f: &FnDecl) -> String {
+        let params: Vec<String> = f.params.iter().map(|p| format!("{}: {}", p.name.name, self.ty(&p.ty))).collect();
+        let mut head = format!("fn({})", params.join(", "));
+        if let Some(r) = &f.ret {
+            head.push_str(&format!(" -> {}", self.ret_ty(r)));
+        }
+        head.push_str(&uses(&f.uses));
+        if f.noalloc.is_some() {
+            head.push_str(" noalloc");
+        }
+        let (open, close) = (f.body.span.start + 1, f.body.span.end - 1);
+        if f.body.stmts.is_empty() && !self.has_comments(open, close) {
+            return format!("{head} {{}}");
+        }
+        let mut inner = Printer {
+            text: self.text,
+            comments: self.comments.clone(),
+            used: RefCell::new(self.used.take()),
+            out: String::new(),
+            depth: self.depth + 1,
+        };
+        inner.entries(&f.body.stmts, open, close, |_, _| false, |p, s| p.stmt(s));
+        self.used.replace(inner.used.into_inner());
+        format!("{head} {{\n{}{}}}", inner.out, INDENT.repeat(self.depth))
     }
 
     fn args(&self, args: &[Arg]) -> String {
@@ -555,8 +590,29 @@ impl Printer<'_> {
             .collect()
     }
 
+    /// A return type: a function type there is in parentheses, so `uses` after it is the outer
+    /// function's.
+    fn ret_ty(&self, t: &TypeExpr) -> String {
+        match &t.kind {
+            TypeKind::Fn { .. } => format!("({})", self.ty(t)),
+            _ => self.ty(t),
+        }
+    }
+
     fn ty(&self, t: &TypeExpr) -> String {
         match &t.kind {
+            TypeKind::Fn { params, ret, uses: effects, noalloc } => {
+                let ps: Vec<String> = params.iter().map(|p| self.ty(p)).collect();
+                let mut s = format!("fn({})", ps.join(", "));
+                if let Some(r) = ret {
+                    s.push_str(&format!(" -> {}", self.ret_ty(r)));
+                }
+                s.push_str(&uses(effects));
+                if noalloc.is_some() {
+                    s.push_str(" noalloc");
+                }
+                s
+            }
             TypeKind::Array(inner) => format!("[{}]", self.ty(inner)),
             TypeKind::Named { name, args, .. } if !args.is_empty() => {
                 let a: Vec<String> = args.iter().map(|a| self.ty(a)).collect();

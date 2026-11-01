@@ -24,11 +24,34 @@ pub enum Ty {
     /// `Map[K, V]`: keys (i64 or str) in ascending order, each with one value; a value like arrays.
     Map(Box<Ty>, Box<Ty>),
     Enum(EnumId),
+    /// A function value: a named function or a function literal with what it captured.
+    Fn(Box<FnTy>),
     /// A type parameter (`T`) while a generic body is checked against its constraints. Only
     /// concrete instantiations reach the backends.
     Param(String),
     /// Produced after an error so one mistake does not cascade; never reaches a backend.
     Error,
+}
+
+/// The type of a function value: what it takes and gives, what it may do, and whether it
+/// promises not to allocate.
+#[derive(Clone, Debug, PartialEq)]
+pub struct FnTy {
+    pub params: Vec<Ty>,
+    pub ret: Ty,
+    pub effects: Effects,
+    pub noalloc: bool,
+}
+
+impl FnTy {
+    /// Whether a value of this type can stand where `want` is expected: the same parameters and
+    /// result, no effect `want` does not allow, and noalloc when `want` is.
+    pub fn fits(&self, want: &FnTy) -> bool {
+        self.params == want.params
+            && self.ret == want.ret
+            && self.effects.within(want.effects)
+            && (self.noalloc || !want.noalloc)
+    }
 }
 
 /// The effects a function or test may have, declared with `uses` (see SPEC, Effects).
@@ -78,6 +101,10 @@ impl Effects {
     }
     pub fn is_pure(self) -> bool {
         self.0 == 0
+    }
+    /// Whether every effect here is also in `other`.
+    pub fn within(self, other: Effects) -> bool {
+        self.0 & !other.0 == 0
     }
     pub fn iter(self) -> impl Iterator<Item = Effect> {
         ALL_EFFECTS.into_iter().filter(move |e| self.has(*e))
@@ -169,6 +196,9 @@ pub struct Func {
     pub result_local: Option<LocalId>,
     pub locals: Vec<Local>,
     pub body: Vec<Stmt>,
+    /// A function literal: its first n params are the values it captured, given when the
+    /// closure is made; the rest are its own. None for a declared function.
+    pub captures: Option<usize>,
 }
 
 #[derive(Clone, Debug)]
@@ -358,6 +388,16 @@ pub enum ExprKind {
     Local(LocalId),
     Field(Box<Expr>, usize),
     Call(FuncId, Vec<Expr>),
+    /// A declared function as a value.
+    FnRef(FuncId),
+    /// A function literal as a value: `func` with the captured values, in the order of its
+    /// first params.
+    Closure {
+        func: FuncId,
+        captures: Vec<Expr>,
+    },
+    /// Calls a function value with arguments in parameter order (the value is evaluated first).
+    CallValue(Box<Expr>, Vec<Expr>),
     StructLit(StructId, Vec<Expr>),
     ArrayLit(Vec<Expr>),
     /// Construct `variant` of an enum; `fields` are that variant's fields in order.
@@ -674,6 +714,24 @@ impl fmt::Display for TyDisplay<'_> {
                 TyDisplay { ty: v, structs: self.structs, enums: self.enums }
             ),
             Ty::Enum(id) => write!(f, "{}", self.enums[*id].name),
+            Ty::Fn(t) => {
+                let shown = |ty| TyDisplay { ty, structs: self.structs, enums: self.enums }.to_string();
+                let params: Vec<String> = t.params.iter().map(shown).collect();
+                write!(f, "fn({})", params.join(", "))?;
+                match &t.ret {
+                    Ty::Void => {}
+                    Ty::Fn(_) => write!(f, " -> ({})", shown(&t.ret))?,
+                    r => write!(f, " -> {}", shown(r))?,
+                }
+                let effects: Vec<&str> = t.effects.iter().map(Effect::name).collect();
+                if !effects.is_empty() {
+                    write!(f, " uses {}", effects.join(", "))?;
+                }
+                if t.noalloc {
+                    write!(f, " noalloc")?;
+                }
+                Ok(())
+            }
             Ty::Param(name) => write!(f, "{name}"),
             Ty::Error => write!(f, "<error>"),
         }

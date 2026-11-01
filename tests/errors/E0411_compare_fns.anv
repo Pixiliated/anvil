@@ -1,0 +1,10 @@
+// expect: E0411
+fn one() -> i64 {
+    return 1;
+}
+
+fn main() uses io {
+    let f: fn() -> i64 = one;
+    let g: fn() -> i64 = one;
+    print(f == g);
+}
