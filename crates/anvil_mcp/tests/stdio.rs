@@ -109,6 +109,18 @@ fn tools_answer_over_stdio() {
     assert!(err, "{v}");
     assert!(v["stopped"].as_str().unwrap().contains("step limit"), "{v}");
 
+    // A program's stdin comes from a file and its arguments from a list; without them it has neither.
+    let input = "tests/programs/data/scores.txt";
+    let (err, v) = c.call("run", json!({ "file": "tests/programs/panic_read_line.anv", "input": input }));
+    assert!(!err, "{v}");
+    assert_eq!(v["stdout"], "read [12]\nread [40]\nread [7]\n");
+    let (err, v) = c.call("run", json!({ "file": "tests/programs/panic_read_line.anv" }));
+    assert!(!err && v["stdout"] == "", "{v}");
+    let (err, v) = c.call("trace", json!({ "file": "tests/programs/input.anv", "args": ["a"], "input": input }));
+    assert!(!err, "{v}");
+    let prints: Vec<&str> = v["events"].as_array().unwrap().iter().filter_map(|e| e["print"].as_str()).collect();
+    assert_eq!(prints[..3], ["1 argument(s)", "[a]", "sum 59, 0 not a number"], "{v}");
+
     let (err, v) = c.call("test", json!({ "file": "tests/test_blocks.anv" }));
     assert!(err, "a failing test is a tool error: {v}");
     assert_eq!(v["passed"], 2);

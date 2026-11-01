@@ -155,7 +155,8 @@ pub fn golden_approve(root: &Path, file: &str, max_steps: Option<u64>) -> Report
     if program.main.is_none() {
         return Report::usage(format!("{rel} has no main, so it has no output to approve"));
     }
-    let out = match golden::interpret(program, max_steps) {
+    let input = try_or_usage!(golden::read_input(&project, &rel));
+    let out = match golden::interpret(program, max_steps, &project.root, &input) {
         Ok((o, _)) => o,
         Err(m) => return failed(json!({ "ok": false, "stopped": m }), format!("error: {m}\n")),
     };
@@ -220,6 +221,7 @@ fn verify_file(
     let generic_fns = program.generic_fns.clone();
     let program_main = program.main;
     let p2 = program.clone();
+    let root2 = project.root.clone();
     let mut ffi = match crate::c_functions(&program) {
         Ok(f) => f,
         Err(e) => {
@@ -230,7 +232,8 @@ fn verify_file(
     let (results, mut ran) = anvil_interp::run_on_big_stack(move || {
         let mut ran = vec![false; p2.funcs.len()];
         let mut rec = Recorder::new(&p2);
-        let results = crate::testing::run_all(&p2, crate::PROPERTY_CASES, 0, max_steps, Some(&mut rec), &mut ffi);
+        let results =
+            crate::testing::run_all(&p2, crate::PROPERTY_CASES, 0, max_steps, Some(&mut rec), &mut ffi, &root2);
         mark_ran(&mut ran, &Counts::of(&rec));
         (results, ran)
     });

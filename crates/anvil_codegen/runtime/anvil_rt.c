@@ -18,13 +18,21 @@
 #include <stdlib.h>
 #include <string.h>
 #include <math.h>
+#include <errno.h>
 #ifdef _WIN32
 #include <io.h>
 #include <fcntl.h>
+#include <wchar.h>
 __declspec(dllimport) int __stdcall QueryPerformanceCounter(int64_t *count);
 __declspec(dllimport) int __stdcall QueryPerformanceFrequency(int64_t *frequency);
+__declspec(dllimport) int __stdcall MultiByteToWideChar(unsigned int code_page, unsigned long flags, const char *s,
+                                                         int n, wchar_t *w, int wn);
+__declspec(dllimport) int __stdcall WideCharToMultiByte(unsigned int code_page, unsigned long flags, const wchar_t *w,
+                                                         int wn, char *s, int n, const char *fallback, int *used);
+__declspec(dllimport) unsigned long __stdcall GetFileAttributesW(const wchar_t *path);
 #else
 #include <time.h>
+#include <sys/stat.h>
 #endif
 
 #define ANVIL_PANIC_EXIT 101
@@ -524,12 +532,16 @@ extern void anvil_program(void);
 static int saved_argc = 0;
 static char **saved_argv = NULL;
 
+/* Test executables leave args() empty: their one argument picks the test. */
+static int test_mode = 0;
+
 /* Test executables: `exe N` runs test N. */
 int64_t anvil_test_index(void) {
     if (saved_argc != 2) runtime_error("a test executable takes one argument, the index of the test to run");
     char *end;
     long long v = strtoll(saved_argv[1], &end, 10);
     if (*saved_argv[1] == 0 || *end != 0 || v < 0) runtime_error("the test index must be a whole number");
+    test_mode = 1;
     return (int64_t)v;
 }
 
@@ -539,12 +551,383 @@ void anvil_no_test(int64_t index) {
     runtime_error(buf);
 }
 
+/* ---- input and files (docs/SPEC.md, Input and files) ---- */
+
+/* Whether `s` is UTF-8 as Rust's from_utf8 accepts it: no overlong forms, no surrogates,
+ * nothing above U+10FFFF. */
+static int utf8_valid(const unsigned char *s, int64_t len) {
+    int64_t i = 0;
+    while (i < len) {
+        unsigned c = s[i];
+        if (c < 0x80) {
+            i++;
+            continue;
+        }
+        int n;
+        unsigned lo = 0x80, hi = 0xBF;
+        if (c >= 0xC2 && c <= 0xDF) n = 1;
+        else if (c == 0xE0) n = 2, lo = 0xA0;
+        else if (c >= 0xE1 && c <= 0xEC) n = 2;
+        else if (c == 0xED) n = 2, hi = 0x9F;
+        else if (c >= 0xEE && c <= 0xEF) n = 2;
+        else if (c == 0xF0) n = 3, lo = 0x90;
+        else if (c >= 0xF1 && c <= 0xF3) n = 3;
+        else if (c == 0xF4) n = 3, hi = 0x8F;
+        else return 0;
+        if (i + n >= len) return 0;
+        for (int k = 1; k <= n; k++) {
+            unsigned b = s[i + k];
+            if (b < (k == 1 ? lo : 0x80) || b > (k == 1 ? hi : 0xBF)) return 0;
+        }
+        i += n + 1;
+    }
+    return 1;
+}
+
+AnvArr *anvil_args(const AnvTypeInfo *ti) {
+    int64_t n = test_mode || saved_argc < 1 ? 0 : saved_argc - 1;
+    AnvArr *out = anvil_arr_new(ti, n);
+    for (int64_t i = 1; i <= n; i++) {
+        const char *a = saved_argv[i];
+        int64_t len = (int64_t)strlen(a);
+        if (!utf8_valid((const unsigned char *)a, len)) {
+            char buf[64];
+            int m = snprintf(buf, sizeof buf, "argument %lld is not UTF-8 text", (long long)i);
+            panic_bytes(buf, m);
+        }
+        *(AnvStr **)anvil_arr_push_slot(out) = str_from(a, len);
+    }
+    return out;
+}
+
+/* The next line of stdin without "\n" or "\r\n"; NULL at the end. Mirrors the interpreter. */
+AnvStr *anvil_read_line(const AnvStr *message) {
+    static int ready = 0;
+    if (!ready) {
+        ready = 1;
 #ifdef _WIN32
-/* The linker gives the main thread 64 MiB of stack (/STACK). */
-int main(int argc, char **argv) {
+        _setmode(_fileno(stdin), _O_BINARY);
+#endif
+    }
+    init_stdout();
+    fflush(stdout); /* a prompt shows before the program waits */
+    size_t cap = 128, len = 0;
+    char *buf = xmalloc(cap);
+    int c;
+    while ((c = getc(stdin)) != EOF) {
+        if (len == cap) {
+            cap *= 2;
+            char *grown = realloc(buf, cap);
+            if (!grown) runtime_error("out of memory");
+            buf = grown;
+        }
+        buf[len++] = (char)c;
+        if (c == '\n') break;
+    }
+    if (len == 0) {
+        free(buf);
+        return NULL;
+    }
+    if (buf[len - 1] == '\n') {
+        len--;
+        if (len > 0 && buf[len - 1] == '\r') len--;
+    }
+    if (!utf8_valid((const unsigned char *)buf, (int64_t)len)) {
+        free(buf);
+        anvil_panic(message);
+    }
+    AnvStr *s = str_from(buf, (int64_t)len);
+    free(buf);
+    return s;
+}
+
+/* With ANVIL_FS=memory (tests and goldens set it) writes are kept here for the run and read back
+ * by the same path, as in the interpreter; the disk is only read. */
+typedef struct {
+    char *key;
+    char *text;
+    int64_t len;
+} MemFile;
+
+static int fs_memory = 0;
+static MemFile *mem_files = NULL;
+static int64_t mem_count = 0, mem_cap = 0;
+
+/* The FileError variant of the last failed read_file or write_file (ir::FILE_ERRORS). */
+enum { FILE_NOT_FOUND = 0, FILE_IS_DIRECTORY = 1, FILE_DENIED = 2, FILE_NOT_TEXT = 3, FILE_FAILED = 4 };
+static int64_t last_file_error = 0;
+
+int64_t anvil_file_error(void) { return last_file_error; }
+
+static void init_files(void) {
+    const char *mode = getenv("ANVIL_FS");
+    if (mode && strcmp(mode, "memory") != 0) runtime_error("ANVIL_FS must be unset or \"memory\"");
+    fs_memory = mode != NULL;
+}
+
+/* A NUL-terminated copy of the path; `\` read as `/` when `key` (ir::memory_file_key). */
+static char *path_copy(const AnvStr *p, int key) {
+    char *s = xmalloc((size_t)p->len + 1);
+    for (int64_t i = 0; i < p->len; i++) s[i] = key && p->bytes[i] == '\\' ? '/' : p->bytes[i];
+    s[p->len] = 0;
+    return s;
+}
+
+static MemFile *mem_find(const char *key, int64_t key_len) {
+    for (int64_t i = 0; i < mem_count; i++)
+        if ((int64_t)strlen(mem_files[i].key) == key_len && memcmp(mem_files[i].key, key, (size_t)key_len) == 0)
+            return &mem_files[i];
+    return NULL;
+}
+
+#ifdef _WIN32
+/* Paths are UTF-8 in Anvil and UTF-16 to Windows. */
+static wchar_t *wide(const char *s) {
+    int n = MultiByteToWideChar(65001 /* CP_UTF8 */, 0, s, -1, NULL, 0);
+    wchar_t *w = xmalloc(sizeof(wchar_t) * (size_t)(n > 0 ? n : 1));
+    if (n <= 0 || MultiByteToWideChar(65001, 0, s, -1, w, n) <= 0) w[0] = 0;
+    return w;
+}
+#endif
+
+static int is_directory(const char *path, int64_t len) {
+    if ((int64_t)strlen(path) != len) return 0; /* a NUL in the path names nothing */
+#ifdef _WIN32
+    wchar_t *w = wide(path);
+    unsigned long attrs = GetFileAttributesW(w);
+    free(w);
+    return attrs != 0xFFFFFFFFul && (attrs & 0x10 /* FILE_ATTRIBUTE_DIRECTORY */) != 0;
+#else
+    struct stat st;
+    return stat(path, &st) == 0 && S_ISDIR(st.st_mode);
+#endif
+}
+
+static FILE *open_file(const char *path, int64_t len, int write) {
+    if ((int64_t)strlen(path) != len) {
+        errno = EINVAL;
+        return NULL;
+    }
+#ifdef _WIN32
+    wchar_t *w = wide(path);
+    FILE *f = _wfopen(w, write ? L"wb" : L"rb");
+    free(w);
+    return f;
+#else
+    return fopen(path, write ? "wb" : "rb");
+#endif
+}
+
+static int64_t errno_file_error(void) {
+    if (errno == ENOENT) return FILE_NOT_FOUND;
+    if (errno == EACCES || errno == EPERM) return FILE_DENIED;
+    return FILE_FAILED;
+}
+
+/* The whole file as a str; NULL with last_file_error set when it fails. */
+AnvStr *anvil_read_file(const AnvStr *path) {
+    if (path->len == 0) {
+        last_file_error = FILE_NOT_FOUND;
+        return NULL;
+    }
+    if (fs_memory) {
+        char *key = path_copy(path, 1);
+        MemFile *m = mem_find(key, path->len);
+        free(key);
+        if (m) return str_from(m->text, m->len);
+    }
+    char *p = path_copy(path, 0);
+    if (is_directory(p, path->len)) {
+        free(p);
+        last_file_error = FILE_IS_DIRECTORY;
+        return NULL;
+    }
+    FILE *f = open_file(p, path->len, 0);
+    free(p);
+    if (!f) {
+        last_file_error = errno_file_error();
+        return NULL;
+    }
+    size_t cap = 4096, len = 0;
+    char *buf = xmalloc(cap);
+    for (;;) {
+        if (len == cap) {
+            cap *= 2;
+            char *grown = realloc(buf, cap);
+            if (!grown) runtime_error("out of memory");
+            buf = grown;
+        }
+        size_t got = fread(buf + len, 1, cap - len, f);
+        len += got;
+        if (got == 0) break;
+    }
+    int failed = ferror(f);
+    fclose(f);
+    AnvStr *s = NULL;
+    if (failed) last_file_error = FILE_FAILED;
+    else if (!utf8_valid((const unsigned char *)buf, (int64_t)len)) last_file_error = FILE_NOT_TEXT;
+    else s = str_from(buf, (int64_t)len);
+    free(buf);
+    return s;
+}
+
+/* Whether the directory a path goes in exists (a path without one goes in the working directory). */
+static int parent_exists(const char *path, int64_t len) {
+    int64_t cut = -1;
+    for (int64_t i = 0; i < len; i++) {
+        if (path[i] == '/') cut = i;
+#ifdef _WIN32
+        if (path[i] == '\\') cut = i;
+#endif
+    }
+    if (cut < 0) return 1;
+    if (cut == 0) return 1; /* the root */
+    char *dir = xmalloc((size_t)cut + 1);
+    memcpy(dir, path, (size_t)cut);
+    dir[cut] = 0;
+    int yes = is_directory(dir, cut);
+    free(dir);
+    return yes;
+}
+
+/* Replaces the file's contents: the bytes written, or -1 with last_file_error set. */
+int64_t anvil_write_file(const AnvStr *path, const AnvStr *text) {
+    if (path->len == 0) {
+        last_file_error = FILE_NOT_FOUND;
+        return -1;
+    }
+    char *p = path_copy(path, 0);
+    if (is_directory(p, path->len)) {
+        free(p);
+        last_file_error = FILE_IS_DIRECTORY;
+        return -1;
+    }
+    if (fs_memory) {
+        int there = parent_exists(p, path->len);
+        free(p);
+        if (!there) {
+            last_file_error = FILE_NOT_FOUND;
+            return -1;
+        }
+        char *key = path_copy(path, 1);
+        char *copy = xmalloc((size_t)text->len + 1);
+        memcpy(copy, text->bytes, (size_t)text->len);
+        MemFile *m = mem_find(key, path->len);
+        if (m) {
+            free(key);
+            free(m->text);
+        } else {
+            if (mem_count == mem_cap) {
+                mem_cap = mem_cap ? mem_cap * 2 : 8;
+                MemFile *grown = realloc(mem_files, sizeof(MemFile) * (size_t)mem_cap);
+                if (!grown) runtime_error("out of memory");
+                mem_files = grown;
+            }
+            m = &mem_files[mem_count++];
+            m->key = key;
+        }
+        m->text = copy;
+        m->len = text->len;
+        return text->len;
+    }
+    FILE *f = open_file(p, path->len, 1);
+    free(p);
+    if (!f) {
+        last_file_error = errno_file_error();
+        return -1;
+    }
+    size_t put = fwrite(text->bytes, 1, (size_t)text->len, f);
+    int closed = fclose(f);
+    if (put != (size_t)text->len || closed != 0) {
+        last_file_error = FILE_FAILED;
+        return -1;
+    }
+    return text->len;
+}
+
+/* ---- trim and parsing (ir::trim_text, parse_i64_text, parse_f64_text) ---- */
+
+static int trimmed(char c) { return c == ' ' || c == '\t' || c == '\r' || c == '\n'; }
+
+AnvStr *anvil_str_trim(const AnvStr *s) {
+    int64_t a = 0, b = s->len;
+    while (a < b && trimmed(s->bytes[a])) a++;
+    while (b > a && trimmed(s->bytes[b - 1])) b--;
+    return str_from(s->bytes + a, b - a);
+}
+
+/* Whether the last parse succeeded. */
+static int64_t parse_ok = 0;
+
+int64_t anvil_parse_ok(void) { return parse_ok; }
+
+int64_t anvil_str_parse_i64(const AnvStr *s) {
+    parse_ok = 0;
+    int64_t i = 0;
+    int neg = i < s->len && s->bytes[i] == '-';
+    if (neg) i++;
+    if (i == s->len) return 0;
+    uint64_t limit = neg ? 9223372036854775808ull : 9223372036854775807ull;
+    uint64_t v = 0;
+    for (; i < s->len; i++) {
+        char c = s->bytes[i];
+        if (c < '0' || c > '9') return 0;
+        uint64_t d = (uint64_t)(c - '0');
+        if (v > (limit - d) / 10) return 0;
+        v = v * 10 + d;
+    }
+    parse_ok = 1;
+    return neg ? (int64_t)(0 - v) : (int64_t)v;
+}
+
+static int64_t digits_at(const AnvStr *s, int64_t i) {
+    int64_t start = i;
+    while (i < s->len && s->bytes[i] >= '0' && s->bytes[i] <= '9') i++;
+    return i - start;
+}
+
+double anvil_str_parse_f64(const AnvStr *s) {
+    parse_ok = 0;
+    int64_t i = s->len > 0 && s->bytes[0] == '-' ? 1 : 0;
+    int64_t n = digits_at(s, i);
+    if (n == 0) return 0.0;
+    i += n;
+    if (i < s->len && s->bytes[i] == '.') {
+        n = digits_at(s, i + 1);
+        if (n == 0) return 0.0;
+        i += 1 + n;
+    }
+    if (i < s->len && (s->bytes[i] == 'e' || s->bytes[i] == 'E')) {
+        i++;
+        if (i < s->len && (s->bytes[i] == '+' || s->bytes[i] == '-')) i++;
+        n = digits_at(s, i);
+        if (n == 0) return 0.0;
+        i += n;
+    }
+    if (i != s->len) return 0.0;
+    char *text = path_copy(s, 0);
+    double v = strtod(text, NULL);
+    free(text);
+    if (!isfinite(v)) return 0.0;
+    parse_ok = 1;
+    return v;
+}
+
+#ifdef _WIN32
+/* The linker gives the main thread 64 MiB of stack (/STACK). wmain: arguments arrive as UTF-16
+ * and are kept as UTF-8. */
+int wmain(int argc, wchar_t **wargv) {
+    char **argv = xmalloc(sizeof(char *) * ((size_t)argc + 1));
+    for (int i = 0; i < argc; i++) {
+        int n = WideCharToMultiByte(65001 /* CP_UTF8 */, 0, wargv[i], -1, NULL, 0, NULL, NULL);
+        argv[i] = xmalloc((size_t)(n > 0 ? n : 1));
+        if (n <= 0 || WideCharToMultiByte(65001, 0, wargv[i], -1, argv[i], n, NULL, NULL) <= 0) argv[i][0] = 0;
+    }
+    argv[argc] = NULL;
     saved_argc = argc;
     saved_argv = argv;
     init_clock();
+    init_files();
     anvil_program();
     return 0;
 }
@@ -563,6 +946,7 @@ int main(int argc, char **argv) {
     saved_argc = argc;
     saved_argv = argv;
     init_clock();
+    init_files();
     pthread_attr_t attr;
     pthread_t thread;
     if (pthread_attr_init(&attr) != 0 || pthread_attr_setstacksize(&attr, (size_t)64 << 20) != 0 ||

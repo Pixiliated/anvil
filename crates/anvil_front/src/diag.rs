@@ -256,15 +256,16 @@ pub fn explain(code: &str) -> Option<&'static str> {
                     does (a function that never reads the clock gives the same answer every time)."
         }
         "E0332" => {
-            "Unknown effect. The effects are io, clock and random. Allocation is not an effect: \
+            "Unknown effect. The effects are io, fs, clock and random. Allocation is not an effect: \
                     write noalloc after the signature to promise that a function never allocates."
         }
         "E0333" => {
             "Allocation in a noalloc function. noalloc promises that the function never allocates, \
                     so it can run where allocation is too slow or must not fail. Interpolation, joining \
-                    strings, array and map literals, slices, split, keys, values, push, pop, set, remove \
-                    and assigning to an array element may allocate; arithmetic, comparisons, fields, \
-                    indexing, len, the str searches, get, has, print and the other built-ins never do. \
+                    strings, array and map literals, slices, split, trim, keys, values, push, pop, set, remove, \
+                    args, read_line, read_file and assigning to an array element may allocate; \
+                    arithmetic, comparisons, fields, indexing, len, the str searches, parse_i64, \
+                    parse_f64, get, has, print, write_file and the other built-ins never do. \
                     Move the allocation out (build the array before, pass it in), or drop the promise."
         }
         "E0334" => {
@@ -362,10 +363,12 @@ pub fn explain(code: &str) -> Option<&'static str> {
                     comes from the C runtime (libm's cos, say)."
         }
         "E0802" => {
-            "An extern function declared to perform io. C writes past Anvil's output, which tests, \
-                    goldens and tools capture, so its output would be lost or interleaved wrongly. Return \
-                    the values to Anvil and print them there. Externs may declare uses clock and uses \
-                    random, but Anvil's virtual clock and seed do not reach into C."
+            "An extern function declared to perform io or use files. C writes past Anvil's output, \
+                    which tests, goldens and tools capture, so its output would be lost or interleaved \
+                    wrongly, and C writes to the disk where tests and goldens keep writes in memory. \
+                    Return the values to Anvil and print them, or read and write the files, there. \
+                    Externs may declare uses clock and uses random, but Anvil's virtual clock and seed \
+                    do not reach into C."
         }
         "E0803" => {
             "An extern name the runtime reserves. The C runtime defines main and every symbol \

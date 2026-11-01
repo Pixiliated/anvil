@@ -28,7 +28,8 @@ Anvil is a compiled language designed to be written by AI agents. The compiler i
    If the fix is a guess, use `changes_meaning`; if a wrong guess would compile, offer no fix.
 4. **Loud, never silent.** No warnings, no silent defaults, no implicit conversions.
 5. **Deterministic.** Same source, same executable bytes, same output. Randomness is the
-   one seeded sequence; tests and goldens read the virtual clock.
+   one seeded sequence; tests and goldens read the virtual clock, and keep file writes in
+   memory. A golden that needs arguments or stdin gets them from `golden/<file>.in`.
 6. **Goldens are reviewed, not just approved.** This repo is an Anvil project (`anvil.toml`);
    `anvil golden approve FILE` stores a program's output in `golden/`. Read the output it prints
    and check it by hand first. `anvil golden check --native` must pass.

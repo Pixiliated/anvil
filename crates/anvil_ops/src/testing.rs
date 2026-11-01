@@ -44,6 +44,7 @@ pub(crate) fn run_all(
     max_steps: Option<u64>,
     mut rec: Option<&mut anvil_interp::Recorder>,
     ffi: &mut Option<crate::Ffi>,
+    root: &Path,
 ) -> Vec<Ran> {
     let mut out = Vec::new();
     for (i, t) in program.tests.iter().enumerate() {
@@ -59,7 +60,7 @@ pub(crate) fn run_all(
         };
         if t.inputs.is_empty() {
             let mut buf = Vec::new();
-            let host = crate::virtual_host(ffi);
+            let host = crate::checked_host(ffi, root, &[], None);
             match anvil_interp::run_test_with(program, i, &[], &mut buf, max_steps, rec.as_deref_mut(), host) {
                 Ok(()) => {}
                 Err(TestFail::Panic(m)) => ran.failure = Some(m),
@@ -67,7 +68,7 @@ pub(crate) fn run_all(
             }
             ran.output = String::from_utf8_lossy(&buf).into_owned();
         } else {
-            let host = crate::virtual_host(ffi);
+            let host = crate::checked_host(ffi, root, &[], None);
             match anvil_interp::run_property(program, i, cases, seed, max_steps, rec.as_deref_mut(), host) {
                 Property::Passed { .. } => {}
                 Property::Stopped(m) => (ran.failure, ran.stopped) = (Some(m), true),
@@ -93,9 +94,9 @@ pub(crate) fn run_all(
     out
 }
 
-/// What the native executable did for one test.
-fn native_result(exe: &Path, index: usize) -> Result<golden::Output, String> {
-    golden::run_native(exe, &[&index.to_string()])
+/// What the native executable did for one test, run in `root` without input.
+fn native_result(exe: &Path, index: usize, root: &Path) -> Result<golden::Output, String> {
+    golden::run_native(exe, &[&index.to_string()], root, &[])
 }
 
 pub fn test(
@@ -117,7 +118,8 @@ pub fn test(
         Ok(f) => f,
         Err(e) => return Report::failed(json!({ "ok": false, "error": e }), format!("error: {e}\n"), EXIT_FAILED),
     };
-    let ran = anvil_interp::run_on_big_stack(move || run_all(&p2, cases, seed, max_steps, None, &mut ffi));
+    let root2 = root.to_path_buf();
+    let ran = anvil_interp::run_on_big_stack(move || run_all(&p2, cases, seed, max_steps, None, &mut ffi, &root2));
 
     // Natively: the plain tests, in one executable, compared with the interpreter.
     let mut native_notes: Vec<Option<String>> = vec![None; ran.len()];
@@ -140,7 +142,7 @@ pub fn test(
                         native_notes[i] = Some("skipped: the interpreter reached the step limit".into());
                         continue;
                     }
-                    match native_result(&exe, i) {
+                    match native_result(&exe, i, root) {
                         Err(e) => {
                             native_notes[i] = Some(format!("error: {e}"));
                             disagree[i] = Some(format!("native {e}"));

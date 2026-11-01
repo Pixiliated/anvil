@@ -238,3 +238,34 @@ Short records of choices that are not obvious from the code. Newest last.
   editors' unsaved text and `check` see them, and compiled in their own directory so no path
   reaches the object and executables stay byte-identical.
 - **`outline` reports `effects`, `noalloc` and `extern`** in place of `uses_io`.
+
+## M13 (v0.14)
+
+- **Input before publishing.** A program could not read anything, so the language was not yet
+  general-purpose; the user chose this milestone ahead of publishing, which became M14.
+- **Arguments and stdin are io; files are a new effect, `fs`.** io is the program's terminal,
+  both ways. Files outlive the run and are shared with everything else, so a signature says
+  when a function touches them. The order is io, fs, clock, random.
+- **Checked runs read the disk and write to memory.** Tests, goldens, traces and profiles read
+  files under the root they run in (fixtures in the repository work) and keep writes for the
+  run, so they are deterministic and never change the disk. A write in memory fails where the
+  disk would fail it (a missing directory, a directory), so a passing test means a passing run.
+  Executables do the same with `ANVIL_FS=memory`, which golden and test runs set.
+- **Errors are an enum, not text.** `FileError` has five variants the program matches
+  exhaustively; operating-system messages differ by platform and would break goldens. The
+  checks that decide the variant (is it a directory, is it UTF-8, is the path empty) come
+  first and are made the same way in both backends.
+- **A golden's input is a file a person writes**, `golden/<file>.in`, in the `.out` style (a
+  header, `---`, bytes), so goldens stay one approval of observed output. Over MCP there is no
+  terminal, so `run` reads stdin only from `input`.
+- **Program arguments come after `--`**, so they never clash with Anvil's options; over MCP
+  they are a list. A positional ending in `*` in `COMMANDS` is this list, so the parity test
+  covers it.
+- **`write_file` names its arguments.** Two str parameters are exactly the swap named
+  arguments prevent; built-ins with one parameter stay positional.
+- **Parsing is specified, then delegated.** `parse_i64` and `parse_f64` check one strict
+  syntax themselves (no `+`, `_`, spaces, `inf` or hex) and only then call Rust's parser or
+  `strtod`, both correctly rounded; a sweep of 20,000 random floats reads back exactly on
+  both backends. Not-a-number and infinities are not text a program parses.
+- **Windows executables start at `wmain`**, so arguments arrive as UTF-16 and reach the
+  program as UTF-8; paths go back to UTF-16 for the file calls.

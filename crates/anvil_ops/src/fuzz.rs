@@ -431,12 +431,14 @@ fn check_one(text: &str, seed: u64) -> (&'static str, String) {
         Err(d) => return ("invalid", format!("{} error(s), first: {}", d.len(), d[0].message)),
     };
     let native_program = program.clone();
-    let interp = match golden::interpret(program, Some(1_000_000)) {
+    // Fuzzed programs read no files; they run in the scratch directory all the same.
+    let scratch = std::env::temp_dir().join(format!("anvil_fuzz_{}_{}", std::process::id(), unique()));
+    let none = golden::Input::default();
+    let interp = match golden::interpret(program, Some(1_000_000), &std::env::temp_dir(), &none) {
         Ok((o, _)) => o,
         Err(m) => return ("stopped", m),
     };
-    let scratch = std::env::temp_dir().join(format!("anvil_fuzz_{}_{}", std::process::id(), unique()));
-    let native = golden::native(&native_program, &scratch, &format!("fuzz{seed}"));
+    let native = golden::native(&native_program, &scratch, &format!("fuzz{seed}"), &std::env::temp_dir(), &none);
     let _ = std::fs::remove_dir_all(&scratch);
     match native {
         Err(e) => ("error", format!("native: {e}")),

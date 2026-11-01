@@ -3,7 +3,8 @@
 //! the same answer on every machine. They run main, or one test named with `test`. A panic or the
 //! step limit ends the run but is not a failure of the command: it is part of what was observed.
 
-use crate::{compile, Report};
+use crate::golden::Input;
+use crate::{compile, ProgramInput, Report};
 use anvil_front::check::closest;
 use anvil_front::ir::Program;
 use anvil_interp::{show, Event, Outcome, Recorder};
@@ -68,6 +69,15 @@ fn target(program: &Program, file: &str, test: Option<&str>) -> Result<Option<us
     }
 }
 
+/// main's input for a trace or profile; tests run without one.
+fn given(root: &Path, which: Option<usize>, input: &ProgramInput) -> Result<Input, Report> {
+    if which.is_some() && input.given() {
+        return Err(Report::usage("arguments and --input are for main; tests run without them"));
+    }
+    let stdin = input.file_bytes(root)?.unwrap_or_default();
+    Ok(Input { args: input.args.clone(), stdin })
+}
+
 fn run_name(program: &Program, which: Option<usize>) -> String {
     match which {
         None => "main".into(),
@@ -77,18 +87,23 @@ fn run_name(program: &Program, which: Option<usize>) -> String {
 
 /// Runs main or a test with the recorder `make` builds, then hands the program, the recorder and
 /// how the run ended to `read`, all on the interpreter's big-stack thread (values are not Send).
+#[allow(clippy::too_many_arguments)]
 fn observe<T: Send + 'static>(
     program: Program,
     which: Option<usize>,
     max_steps: Option<u64>,
+    root: &Path,
+    input: Input,
     make: impl FnOnce(&Program) -> Recorder + Send + 'static,
     read: impl FnOnce(&Program, &Recorder, Ended) -> T + Send + 'static,
 ) -> Result<T, String> {
     let mut ffi = crate::c_functions(&program)?;
+    let root = root.to_path_buf();
     Ok(anvil_interp::run_on_big_stack(move || {
         let mut rec = make(&program);
         let mut sink = Vec::new();
-        let host = crate::virtual_host(&mut ffi);
+        let mut stdin = std::io::Cursor::new(input.stdin.as_slice());
+        let host = crate::checked_host(&mut ffi, &root, &input.args, Some(&mut stdin));
         let ended = match which {
             None => match anvil_interp::run_main_recorded(&program, &mut sink, max_steps, Some(&mut rec), host) {
                 Outcome::Exit(code) => Ended::Exit(code),
@@ -113,9 +128,11 @@ pub fn trace(
     only: Option<&str>,
     limit: Option<u64>,
     max_steps: Option<u64>,
+    input: &ProgramInput,
 ) -> Report {
     let (_, program) = try_report!(compile(root, file));
     let which = try_report!(target(&program, file, test));
+    let given = try_report!(given(root, which, input));
     let limit = limit.unwrap_or(TRACE_LIMIT);
     if limit == 0 {
         return Report::usage("the trace limit must be at least 1");
@@ -145,6 +162,8 @@ pub fn trace(
         program,
         which,
         max_steps,
+        root,
+        given,
         move |p| Recorder::tracing(p, only, limit as usize),
         |p, rec, ended| {
             let t = rec.trace.as_ref().unwrap();
@@ -199,11 +218,12 @@ fn event(p: &Program, e: &Event) -> (Value, usize, String) {
     }
 }
 
-pub fn profile(root: &Path, file: &str, test: Option<&str>, max_steps: Option<u64>) -> Report {
+pub fn profile(root: &Path, file: &str, test: Option<&str>, max_steps: Option<u64>, input: &ProgramInput) -> Report {
     let (_, program) = try_report!(compile(root, file));
     let which = try_report!(target(&program, file, test));
+    let given = try_report!(given(root, which, input));
     let run = run_name(&program, which);
-    let observed = observe(program, which, max_steps, Recorder::new, |p, rec, ended| {
+    let observed = observe(program, which, max_steps, root, given, Recorder::new, |p, rec, ended| {
         let mut ran: Vec<(String, u64, u64, u64)> = Vec::new();
         let mut not_run = Vec::new();
         for (f, s) in p.funcs.iter().zip(&rec.funcs) {

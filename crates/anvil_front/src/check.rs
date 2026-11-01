@@ -13,13 +13,27 @@ use generic::{Constraint, Generic, GenericKind, Pending, Scope};
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 
-pub const BUILTINS: &[&str] =
-    &["print", "assert", "sqrt", "abs", "to_f64", "to_i64", "clock_ns", "random_below", "random_f64", "random_seed"];
+pub const BUILTINS: &[&str] = &[
+    "print",
+    "assert",
+    "sqrt",
+    "abs",
+    "to_f64",
+    "to_i64",
+    "clock_ns",
+    "random_below",
+    "random_f64",
+    "random_seed",
+    "args",
+    "read_line",
+    "read_file",
+    "write_file",
+];
 /// The effects `uses` can list, in the order it lists them.
-pub const EFFECTS: &[&str] = &["io", "clock", "random"];
+pub const EFFECTS: &[&str] = &["io", "fs", "clock", "random"];
 /// Constructors of the built-in Option and Result enums, usable without a type prefix.
 pub const CONSTRUCTORS: &[&str] = &["Some", "None", "Ok", "Err"];
-pub const TYPE_NAMES: &[&str] = &["i64", "f64", "bool", "str", "Option", "Result", "Map"];
+pub const TYPE_NAMES: &[&str] = &["i64", "f64", "bool", "str", "Option", "Result", "Map", "FileError"];
 
 /// How completion shows each built-in function and constructor (same order as BUILTINS, then
 /// CONSTRUCTORS; a test keeps them in step).
@@ -34,6 +48,10 @@ pub const BUILTIN_SIGNATURES: &[(&str, &str)] = &[
     ("random_below", "random_below(n: i64) -> i64 uses random: uniform in 0..n"),
     ("random_f64", "random_f64() -> f64 uses random: uniform in [0, 1)"),
     ("random_seed", "random_seed(seed: i64) uses random: restarts the sequence"),
+    ("args", "args() -> [str] uses io: the command-line arguments"),
+    ("read_line", "read_line() -> Option[str] uses io: the next line of stdin, None at the end"),
+    ("read_file", "read_file(path: str) -> Result[str, FileError] uses fs: the whole file"),
+    ("write_file", "write_file(path: str, text: str) -> Result[i64, FileError] uses fs: replaces the file"),
     ("Some", "Some(value) -> Option[T]"),
     ("None", "None: Option[T]"),
     ("Ok", "Ok(value) -> Result[T, E]"),
@@ -49,6 +67,9 @@ pub const METHODS: &[(&str, &str, &str)] = &[
     ("str", "ends_with", "ends_with(t: str) -> bool"),
     ("str", "find", "find(t: str) -> Option[i64]"),
     ("str", "split", "split(sep: str) -> [str]"),
+    ("str", "trim", "trim() -> str"),
+    ("str", "parse_i64", "parse_i64() -> Option[i64]"),
+    ("str", "parse_f64", "parse_f64() -> Option[f64]"),
     ("array", "len", "len() -> i64"),
     ("array", "push", "push(x: T)"),
     ("array", "pop", "pop() -> T"),
@@ -222,6 +243,8 @@ pub struct Checker<'a> {
     /// Instantiations of Option/Result, by their type arguments (names alone could clash
     /// between modules).
     builtin_enums: HashMap<String, EnumId>,
+    /// The built-in `FileError`, which every module sees.
+    file_error: EnumId,
     sigs: Vec<FuncSig>,
     func_index: HashMap<String, FuncId>,
 }
@@ -323,8 +346,14 @@ pub fn analyze_modules<'a>(modules: &[Module<'a>], order: &[usize]) -> Analysis 
         enums: Vec::new(),
         enum_index: HashMap::new(),
         builtin_enums: HashMap::new(),
+        file_error: 0,
         sigs: Vec::new(),
         func_index: HashMap::new(),
+    };
+    let variants = FILE_ERRORS.iter().map(|v| VariantDef { name: v.to_string(), fields: Vec::new() }).collect();
+    c.file_error = match c.builtin_enum("FileError".into(), "FileError".into(), variants, Vec::new()) {
+        Ty::Enum(id) => id,
+        _ => unreachable!(),
     };
     let mut funcs = Vec::new();
     let mut tests = Vec::new();
@@ -986,6 +1015,7 @@ impl<'a> Checker<'a> {
             "i64" => Ty::I64,
             "bool" => Ty::Bool,
             "str" => Ty::Str,
+            "FileError" => Ty::Enum(self.file_error),
             "f64" => match unit {
                 None => Ty::F64(Unit::dimensionless()),
                 Some(u) => self.unit_expr(u).map(Ty::F64).unwrap_or(Ty::Error),
@@ -1070,10 +1100,10 @@ impl<'a> Checker<'a> {
         self.builtin_enum(key, name, variants, vec![t, e])
     }
 
-    /// "Option" or "Result" for instantiations of the built-in enums.
+    /// "Option" or "Result" for instantiations of the built-in enums (FileError is a plain enum).
     fn builtin_kind(&self, id: EnumId) -> Option<&'static str> {
         let name = &self.enums[id].name;
-        if self.enum_owner[id].is_some() {
+        if self.enum_owner[id].is_some() || id == self.file_error {
             None
         } else if name.starts_with("Option[") {
             Some("Option")
@@ -1217,7 +1247,7 @@ impl<'a> Checker<'a> {
                     let mut d = Diagnostic::new(
                         "E0332",
                         u.span,
-                        format!("unknown effect `{}`; the effects are io, clock and random", u.name),
+                        format!("unknown effect `{}`; the effects are io, fs, clock and random", u.name),
                     );
                     let names: Vec<String> = EFFECTS.iter().map(|e| e.to_string()).collect();
                     if u.name == "alloc" || u.name == "noalloc" {
@@ -1520,6 +1550,12 @@ impl<'a> Checker<'a> {
             self.err(
                 Diagnostic::new("E0802", io.span, "an extern function cannot perform io")
                     .note("C writes past Anvil's output, which tests, goldens and tools capture; return the values and print them in Anvil", None),
+            );
+        }
+        if let Some(fs) = d.uses.iter().find(|u| u.name == "fs") {
+            self.err(
+                Diagnostic::new("E0802", fs.span, "an extern function cannot read or write files")
+                    .note("C would write to the disk where tests and goldens keep writes in memory; read and write the files in Anvil and pass the values", None),
             );
         }
         let name = &d.name.name;
@@ -2980,7 +3016,7 @@ impl<'a> Checker<'a> {
         } else {
             format!("this function does not declare uses {}", e.name())
         };
-        // The effect goes where the formatter puts it: a clause lists io, clock, random.
+        // The effect goes where the formatter puts it: a clause lists io, fs, clock, random.
         let rank = |n: &str| EFFECTS.iter().position(|x| *x == n).unwrap_or(EFFECTS.len());
         let later = b.uses_list.iter().find(|u| rank(&u.name) > rank(e.name()));
         let (at, text) = match (b.uses_span, later) {
@@ -3203,6 +3239,9 @@ impl<'a> Checker<'a> {
 
     fn builtin(&mut self, b: &mut Body, e: &ast::Expr, callee: &ast::Ident, args: &[ast::Arg]) -> Expr {
         let name = callee.name.as_str();
+        if name == "write_file" {
+            return self.write_file(b, e, callee, args);
+        }
         for a in args {
             if let Some(n) = &a.name {
                 self.err(
@@ -3222,7 +3261,12 @@ impl<'a> Checker<'a> {
             "random_below" | "random_f64" | "random_seed" => {
                 self.note_effect(b, Effect::Random, callee.span, &format!("`{name}`"))
             }
+            "args" | "read_line" => self.note_effect(b, Effect::Io, callee.span, &format!("`{name}`")),
+            "read_file" => self.note_effect(b, Effect::Fs, callee.span, "`read_file`"),
             _ => {}
+        }
+        if matches!(name, "args" | "read_line" | "read_file") {
+            self.note_alloc(b, callee.span, &format!("`{name}`"));
         }
         let vals: Vec<Expr> = args.iter().map(|a| self.expr(b, &a.value)).collect();
         if vals.iter().any(|v| v.ty == Ty::Error) {
@@ -3260,7 +3304,7 @@ impl<'a> Checker<'a> {
             }
             return Expr { kind: ExprKind::Builtin(Builtin::Print, vals), ty: Ty::Void };
         }
-        if name == "clock_ns" || name == "random_f64" {
+        if name == "clock_ns" || name == "random_f64" || name == "args" || name == "read_line" {
             if !vals.is_empty() {
                 self.err(Diagnostic::new(
                     "E0303",
@@ -3269,8 +3313,14 @@ impl<'a> Checker<'a> {
                 ));
                 return Self::err_expr();
             }
+            let site = self.site(e.span);
             return match name {
                 "clock_ns" => Expr { kind: ExprKind::Builtin(Builtin::ClockNs, vals), ty: Ty::I64 },
+                "args" => Expr { kind: ExprKind::Builtin(Builtin::Args, vals), ty: Ty::Array(Box::new(Ty::Str)) },
+                "read_line" => Expr {
+                    kind: ExprKind::Builtin(Builtin::ReadLine { message: read_line_message(&site) }, vals),
+                    ty: self.option_of(Ty::Str),
+                },
                 _ => Expr { kind: ExprKind::Builtin(Builtin::RandomF64, vals), ty: Ty::F64(Unit::dimensionless()) },
             };
         }
@@ -3355,8 +3405,33 @@ impl<'a> Checker<'a> {
                 }
                 Expr { kind: ExprKind::Builtin(Builtin::RandomSeed, vec![x]), ty: Ty::Void }
             }
+            "read_file" => {
+                if t != Ty::Str {
+                    return bad(self, "a str path");
+                }
+                let ty = self.result_of(Ty::Str, Ty::Enum(self.file_error));
+                Expr { kind: ExprKind::Builtin(Builtin::ReadFile, vec![x]), ty }
+            }
             _ => unreachable!("builtin {name}"),
         }
+    }
+
+    /// `write_file(path: p, text: t)`: two parameters, so named like any call with two.
+    fn write_file(&mut self, b: &mut Body, e: &ast::Expr, callee: &ast::Ident, args: &[ast::Arg]) -> Expr {
+        self.note_effect(b, Effect::Fs, callee.span, "`write_file`");
+        let params = vec![("path".to_string(), Ty::Str), ("text".to_string(), Ty::Str)];
+        let Some(ok) = self.check_args("write_file", e.span, args, &params, None) else {
+            for a in args {
+                self.expr(b, &a.value);
+            }
+            return Self::err_expr();
+        };
+        let vals: Vec<Expr> = args.iter().map(|a| self.expect(b, &a.value, &Ty::Str)).collect();
+        if !ok || vals.iter().any(|v| v.ty == Ty::Error) {
+            return Self::err_expr();
+        }
+        let ty = self.result_of(Ty::I64, Ty::Enum(self.file_error));
+        Expr { kind: ExprKind::Builtin(Builtin::WriteFile, vals), ty }
     }
 }
 
@@ -3406,6 +3481,9 @@ impl<'a> Checker<'a> {
             return None;
         }
         self.touch(&n.name);
+        if n.name == "FileError" {
+            return Some(self.file_error);
+        }
         self.enum_index.get(&n.name).copied()
     }
 
@@ -3630,7 +3708,7 @@ impl<'a> Checker<'a> {
             }
         }
         let want_args = match m {
-            "pop" | "len" | "keys" | "values" => Some(0),
+            "pop" | "len" | "keys" | "values" | "trim" | "parse_i64" | "parse_f64" => Some(0),
             "push" | "remove" | "has" | "get" | "contains" | "find" | "starts_with" | "ends_with" | "split" => Some(1),
             _ => None,
         };
@@ -3665,6 +3743,9 @@ impl<'a> Checker<'a> {
             ("ends_with", Ty::Str) => (Builtin::StrEndsWith, Ty::Bool),
             ("find", Ty::Str) => (Builtin::StrFind, self.option_of(Ty::I64)),
             ("split", Ty::Str) => (Builtin::StrSplit { message: split_message(&site) }, Ty::Array(Box::new(Ty::Str))),
+            ("trim", Ty::Str) => (Builtin::StrTrim, Ty::Str),
+            ("parse_i64", Ty::Str) => (Builtin::StrParseI64, self.option_of(Ty::I64)),
+            ("parse_f64", Ty::Str) => (Builtin::StrParseF64, self.option_of(Ty::F64(Unit::dimensionless()))),
             ("has", Ty::Map(..)) => (Builtin::MapHas, Ty::Bool),
             ("get", Ty::Map(_, v)) => (Builtin::MapGet, self.option_of(*v)),
             ("keys", Ty::Map(k, _)) => (Builtin::MapKeys, Ty::Array(k)),
@@ -3676,7 +3757,9 @@ impl<'a> Checker<'a> {
                 let t = self.show(&x.ty);
                 let have = match x.ty {
                     Ty::Array(_) => "arrays have len, push and pop",
-                    Ty::Str => "str has len, contains, find, starts_with, ends_with and split",
+                    Ty::Str => {
+                        "str has len, contains, find, starts_with, ends_with, split, trim, parse_i64 and parse_f64"
+                    }
                     Ty::Map(..) => "maps have len, has, get, set, remove, keys and values",
                     _ => "only arrays, str and maps have methods; write a function that takes the value",
                 };
@@ -3684,7 +3767,7 @@ impl<'a> Checker<'a> {
                 return Self::err_expr();
             }
         };
-        if matches!(builtin, Builtin::StrSplit { .. } | Builtin::MapKeys | Builtin::MapValues) {
+        if matches!(builtin, Builtin::StrSplit { .. } | Builtin::StrTrim | Builtin::MapKeys | Builtin::MapValues) {
             self.note_alloc(b, e.span, &format!("`{m}`"));
         }
         let arg_ty = match &x.ty {

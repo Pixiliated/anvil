@@ -73,6 +73,8 @@ fn msvc(obj: &Path, rt: &Path, out: &Path) -> Result<(Command, String), String> 
     cmd.arg("/NOLOGO")
         .arg(format!("/OUT:{}", out.display()))
         .arg("/SUBSYSTEM:CONSOLE")
+        // The runtime's wmain takes the arguments as UTF-16; the linker only looks for main itself.
+        .arg("/ENTRY:wmainCRTStartup")
         .arg("/INCREMENTAL:NO")
         .arg("/DEBUG:NONE")
         // Reproducible output: no timestamps, so the same source gives byte-identical executables.

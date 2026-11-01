@@ -102,6 +102,15 @@ const RUNTIME: &[(&str, &[Type], &[Type])] = &[
     ("anvil_random_below", &[I, I], &[I]),
     ("anvil_random_f64", &[], &[types::F64]),
     ("anvil_random_seed", &[I], &[]),
+    ("anvil_args", &[I], &[I]),
+    ("anvil_read_line", &[I], &[I]),
+    ("anvil_read_file", &[I], &[I]),
+    ("anvil_write_file", &[I, I], &[I]),
+    ("anvil_file_error", &[], &[I]),
+    ("anvil_str_trim", &[I], &[I]),
+    ("anvil_str_parse_i64", &[I], &[I]),
+    ("anvil_str_parse_f64", &[I], &[types::F64]),
+    ("anvil_parse_ok", &[], &[I]),
     ("anvil_panic", &[I], &[]),
     ("anvil_panic_index", &[I, I, I], &[]),
     ("anvil_arr_new", &[I, I], &[I]),
@@ -1386,20 +1395,33 @@ impl<'a, 'b> Gen<'a, 'b> {
 
     /// `Some(some())` when `found`, otherwise `None`, as values of Option enum `eid`.
     fn option(&mut self, eid: EnumId, found: Value, some: impl FnOnce(&mut Self) -> Vec<Value>) -> Vec<Value> {
+        self.either(eid, found, (OPTION_SOME, some), (OPTION_NONE, |_: &mut Self| Vec::new()))
+    }
+
+    /// Variant `yes` of enum `eid` when `cond` holds, else variant `no`; each closure gives its
+    /// variant's fields, computed in its own branch.
+    fn either(
+        &mut self,
+        eid: EnumId,
+        cond: Value,
+        (yes_variant, yes_fields): (usize, impl FnOnce(&mut Self) -> Vec<Value>),
+        (no_variant, no_fields): (usize, impl FnOnce(&mut Self) -> Vec<Value>),
+    ) -> Vec<Value> {
         let lay = self.layout(&Ty::Enum(eid));
         let yes = self.b.create_block();
         let no = self.b.create_block();
         let merge = self.b.create_block();
         let out: Vec<Value> = lay.iter().map(|s| self.b.append_block_param(merge, s.ty)).collect();
-        self.b.ins().brif(found, yes, &[], no, &[]);
+        self.b.ins().brif(cond, yes, &[], no, &[]);
         self.b.switch_to_block(yes);
         self.b.seal_block(yes);
-        let vals = some(self);
-        let v = self.enum_value(eid, OPTION_SOME, &vals);
+        let vals = yes_fields(self);
+        let v = self.enum_value(eid, yes_variant, &vals);
         self.b.ins().jump(merge, &args(&v));
         self.b.switch_to_block(no);
         self.b.seal_block(no);
-        let v = self.enum_value(eid, OPTION_NONE, &[]);
+        let vals = no_fields(self);
+        let v = self.enum_value(eid, no_variant, &vals);
         self.b.ins().jump(merge, &args(&v));
         self.b.switch_to_block(merge);
         self.b.seal_block(merge);
@@ -1705,6 +1727,57 @@ impl<'a, 'b> Gen<'a, 'b> {
                 }
                 return Vec::new();
             }
+            Builtin::Args => {
+                let info = self.be.type_info(self.program, &Ty::Str);
+                let ti = self.data_ptr(info);
+                return vec![self.call_rt("anvil_args", &[ti]).unwrap()];
+            }
+            Builtin::ReadLine { message } => {
+                let Ty::Enum(eid) = ty else { unreachable!() };
+                let m = self.str_obj(message);
+                let line = self.call_rt("anvil_read_line", &[m]).unwrap();
+                let got = self.b.ins().icmp_imm_s(IntCC::NotEqual, line, 0);
+                return self.option(*eid, got, |_| vec![line]);
+            }
+            Builtin::ReadFile | Builtin::WriteFile => {
+                // The runtime answers a str (null on failure) or the bytes written (-1); the
+                // FileError variant of a failure is asked for after.
+                let Ty::Enum(eid) = ty else { unreachable!() };
+                let path = self.expr(&bargs[0])[0];
+                let (r, ok) = if let Builtin::ReadFile = bi {
+                    let r = self.call_rt("anvil_read_file", &[path]).unwrap();
+                    (r, self.b.ins().icmp_imm_s(IntCC::NotEqual, r, 0))
+                } else {
+                    let text = self.expr(&bargs[1])[0];
+                    let r = self.call_rt("anvil_write_file", &[path, text]).unwrap();
+                    self.call_rt("anvil_release", &[text]);
+                    (r, self.b.ins().icmp_imm_s(IntCC::SignedGreaterThanOrEqual, r, 0))
+                };
+                self.call_rt("anvil_release", &[path]);
+                return self.either(
+                    *eid,
+                    ok,
+                    (RESULT_OK, |_: &mut Self| vec![r]),
+                    (RESULT_ERR, |g: &mut Self| vec![g.call_rt("anvil_file_error", &[]).unwrap()]),
+                );
+            }
+            Builtin::StrTrim | Builtin::StrParseI64 | Builtin::StrParseF64 => {
+                let s = self.expr(&bargs[0])[0];
+                let out = match bi {
+                    Builtin::StrTrim => vec![self.call_rt("anvil_str_trim", &[s]).unwrap()],
+                    _ => {
+                        let Ty::Enum(eid) = ty else { unreachable!() };
+                        let name =
+                            if let Builtin::StrParseI64 = bi { "anvil_str_parse_i64" } else { "anvil_str_parse_f64" };
+                        let v = self.call_rt(name, &[s]).unwrap();
+                        let ok = self.call_rt("anvil_parse_ok", &[]).unwrap();
+                        let ok = self.b.ins().icmp_imm_s(IntCC::NotEqual, ok, 0);
+                        self.option(*eid, ok, |_| vec![v])
+                    }
+                };
+                self.call_rt("anvil_release", &[s]);
+                return out;
+            }
             Builtin::ClockNs => return vec![self.call_rt("anvil_clock_ns", &[]).unwrap()],
             Builtin::RandomF64 => return vec![self.call_rt("anvil_random_f64", &[]).unwrap()],
             Builtin::Len => {
@@ -1732,7 +1805,14 @@ impl<'a, 'b> Gen<'a, 'b> {
             | Builtin::MapKeys
             | Builtin::MapValues
             | Builtin::ClockNs
-            | Builtin::RandomF64 => unreachable!(),
+            | Builtin::RandomF64
+            | Builtin::Args
+            | Builtin::ReadLine { .. }
+            | Builtin::ReadFile
+            | Builtin::WriteFile
+            | Builtin::StrTrim
+            | Builtin::StrParseI64
+            | Builtin::StrParseF64 => unreachable!(),
             Builtin::RandomBelow { site } => {
                 let site = self.str_obj(site);
                 vec![self.call_rt("anvil_random_below", &[x, site]).unwrap()]

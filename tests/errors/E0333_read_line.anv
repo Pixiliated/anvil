@@ -1,0 +1,11 @@
+// expect: E0333
+fn first_line() -> Option[str] uses io noalloc {
+    return read_line();
+}
+
+fn main() uses io {
+    match first_line() {
+        Some(value: line) => { print(line); }
+        None => { print("empty"); }
+    }
+}

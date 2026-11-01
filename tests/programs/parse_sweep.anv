@@ -1,0 +1,47 @@
+// parse_f64 reads every float's text back to the same float, and parse_i64 every integer's, on
+// both backends: the native runtime parses with strtod, the interpreter with Rust.
+fn powers() -> [f64] {
+    var up: [f64] = [];
+    var p: f64 = 1.0;
+    for _i in 0..301 {
+        up.push(p);
+        p = p * 10.0;
+    }
+    return up;
+}
+
+fn main() uses io, random {
+    let up: [f64] = powers();
+    var floats: i64 = 0;
+    var ints: i64 = 0;
+    for _i in 0..20000 {
+        let e: i64 = random_below(301);
+        var x: f64 = random_f64() * up[e];
+        if random_below(2) == 0 {
+            x = x / up[300];
+        }
+        if random_below(2) == 0 {
+            x = -x;
+        }
+        match "{x}".parse_f64() {
+            Some(value: back) => {
+                if back == x {
+                    floats = floats + 1;
+                } else {
+                    print("{x} read back as {back}");
+                }
+            }
+            None => { print("{x} did not parse"); }
+        }
+        let n: i64 = random_below(4_611_686_018_427_387_904) * 2 - random_below(4_611_686_018_427_387_904) * 2;
+        match "{n}".parse_i64() {
+            Some(value: m) => {
+                if m == n {
+                    ints = ints + 1;
+                }
+            }
+            None => { print("{n} did not parse"); }
+        }
+    }
+    print("{floats} floats and {ints} integers read back");
+}

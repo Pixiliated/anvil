@@ -1,0 +1,50 @@
+exit: 0
+---
+2 argument(s)
+[--verbose]
+[two words]
+sum 32, 1 not a number
+after the end: true
+best score 40
+read tests/programs/data: a directory
+read tests/programs/data/missing.txt: not found
+read tests/programs/data/latin1.txt: not UTF-8 text
+read : not found
+wrote 6 bytes to tests/programs/data/written.txt
+read tests/programs/data/written.txt: [sum 32]
+read tests\programs\data\written.txt: [sum 32]
+wrote 8 bytes to tests/programs/data/written.txt
+read tests/programs/data/written.txt: [replaced]
+write tests/programs/nowhere/x.txt: not found
+write tests/programs/data: a directory
+trim [in the middle]
+parse_i64 [42] = 42
+parse_i64 [-9223372036854775808] = -9223372036854775808
+parse_i64 [9223372036854775807] = 9223372036854775807
+parse_i64 [9223372036854775808] = None
+parse_i64 [-] = None
+parse_i64 [] = None
+parse_i64 [1_000] = None
+parse_i64 [007] = 7
+parse_i64 [+5] = None
+parse_i64 [ 1] = None
+parse_i64 [1.0] = None
+parse_f64 [1] = 1.0
+parse_f64 [-2.5] = -2.5
+parse_f64 [1e3] = 1000.0
+parse_f64 [1E-3] = 0.001
+parse_f64 [0.1] = 0.1
+parse_f64 [1.] = None
+parse_f64 [.5] = None
+parse_f64 [+1] = None
+parse_f64 [1e400] = None
+parse_f64 [-0] = -0.0
+parse_f64 [2.2250738585072014e-308] = 2.2250738585072014e-308
+parse_f64 [4.9e-324] = 5.0e-324
+parse_f64 [1e-400] = 0.0
+parse_f64 [nan] = None
+parse_f64 [inf] = None
+parse_f64 [ 7] = None
+parse_f64 [0x10] = None
+parse_f64 [1.5e+2] = 150.0
+parse_f64 [123456789012345678901234567890] = 1.2345678901234568e29

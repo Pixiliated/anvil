@@ -1,0 +1,11 @@
+// expect: E0330
+fn config() -> Result[str, FileError] {
+    return read_file("settings.txt");
+}
+
+fn main() uses io {
+    match config() {
+        Ok(value: text) => { print(text); }
+        Err(error: _) => { print("no settings"); }
+    }
+}

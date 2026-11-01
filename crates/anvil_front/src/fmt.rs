@@ -630,7 +630,7 @@ fn uses(names: &[Ident]) -> String {
     if names.is_empty() {
         return String::new();
     }
-    // Effects in one order (io, clock, random); names that are not effects keep theirs, last.
+    // Effects in one order (io, fs, clock, random); names that are not effects keep theirs, last.
     let mut n: Vec<&str> = names.iter().map(|u| u.name.as_str()).collect();
     n.sort_by_key(|u| crate::check::EFFECTS.iter().position(|e| e == u).unwrap_or(crate::check::EFFECTS.len()));
     format!(" uses {}", n.join(", "))

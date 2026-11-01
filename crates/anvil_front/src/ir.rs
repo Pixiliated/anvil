@@ -35,17 +35,19 @@ pub enum Ty {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Effect {
     Io,
+    Fs,
     Clock,
     Random,
 }
 
 /// Every effect, in the order `uses` lists them.
-pub const ALL_EFFECTS: [Effect; 3] = [Effect::Io, Effect::Clock, Effect::Random];
+pub const ALL_EFFECTS: [Effect; 4] = [Effect::Io, Effect::Fs, Effect::Clock, Effect::Random];
 
 impl Effect {
     pub fn name(self) -> &'static str {
         match self {
             Effect::Io => "io",
+            Effect::Fs => "fs",
             Effect::Clock => "clock",
             Effect::Random => "random",
         }
@@ -57,6 +59,7 @@ impl Effect {
     pub fn doing(self) -> &'static str {
         match self {
             Effect::Io => "performs io",
+            Effect::Fs => "reads or writes files",
             Effect::Clock => "reads the clock",
             Effect::Random => "draws random numbers",
         }
@@ -122,6 +125,14 @@ pub const OPTION_SOME: usize = 0;
 pub const OPTION_NONE: usize = 1;
 pub const RESULT_OK: usize = 0;
 pub const RESULT_ERR: usize = 1;
+
+/// The variants of the built-in `FileError`, in order (see SPEC, Input and files).
+pub const FILE_ERRORS: [&str; 5] = ["NotFound", "IsDirectory", "Denied", "NotText", "Failed"];
+pub const FILE_NOT_FOUND: usize = 0;
+pub const FILE_IS_DIRECTORY: usize = 1;
+pub const FILE_DENIED: usize = 2;
+pub const FILE_NOT_TEXT: usize = 3;
+pub const FILE_FAILED: usize = 4;
 
 #[derive(Clone, Debug)]
 pub struct Local {
@@ -313,6 +324,23 @@ pub enum Builtin {
     RandomF64,
     /// Restarts the random sequence from a seed.
     RandomSeed,
+    /// The program's command-line arguments as `[str]`.
+    Args,
+    /// The next line of stdin without its line ending: Option[str]; panics with `message` on
+    /// text that is not UTF-8.
+    ReadLine {
+        message: String,
+    },
+    /// The whole file as text: Result[str, FileError]. Args: the path.
+    ReadFile,
+    /// Replaces a file's contents: Result[i64, FileError], Ok of the bytes written. Args: the
+    /// path and the text.
+    WriteFile,
+    /// The str without leading and trailing spaces, tabs, `\r` and `\n` (`trim_text`).
+    StrTrim,
+    /// `parse_i64_text` and `parse_f64_text` as an Option.
+    StrParseI64,
+    StrParseF64,
 }
 
 #[derive(Clone, Debug)]
@@ -446,6 +474,72 @@ pub fn split_message(site: &str) -> String {
 pub fn duplicate_key_message(site: &str) -> String {
     format!("duplicate key in the map literal at {site}")
 }
+/// Mirrors anvil_read_line in the C runtime.
+pub fn read_line_message(site: &str) -> String {
+    format!("read_line read text that is not UTF-8 at {site}")
+}
+
+/// What `trim` removes from both ends: space, tab, `\r` and `\n`. Mirrors anvil_str_trim.
+pub fn trim_text(s: &str) -> &str {
+    s.trim_matches(|c| matches!(c, ' ' | '\t' | '\r' | '\n'))
+}
+
+/// `parse_i64`: an optional `-` and one or more ASCII digits, nothing else, in range. Mirrors
+/// anvil_str_parse_i64.
+pub fn parse_i64_text(s: &str) -> Option<i64> {
+    let digits = s.strip_prefix('-').unwrap_or(s);
+    if digits.is_empty() || !digits.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    s.parse().ok()
+}
+
+/// `parse_f64`: an optional `-`, digits, optionally `.` and digits, optionally `e` or `E`, an
+/// optional sign and digits; the nearest double, which must be finite. Mirrors
+/// anvil_str_parse_f64 (strtod, also correctly rounded).
+pub fn parse_f64_text(s: &str) -> Option<f64> {
+    if !float_syntax(s.as_bytes()) {
+        return None;
+    }
+    s.parse::<f64>().ok().filter(|v| v.is_finite())
+}
+
+fn float_syntax(b: &[u8]) -> bool {
+    let mut i = usize::from(b.first() == Some(&b'-'));
+    let digits = |i: &mut usize| {
+        let start = *i;
+        while *i < b.len() && b[*i].is_ascii_digit() {
+            *i += 1;
+        }
+        *i > start
+    };
+    if !digits(&mut i) {
+        return false;
+    }
+    if i < b.len() && b[i] == b'.' {
+        i += 1;
+        if !digits(&mut i) {
+            return false;
+        }
+    }
+    if i < b.len() && (b[i] == b'e' || b[i] == b'E') {
+        i += 1;
+        if i < b.len() && (b[i] == b'+' || b[i] == b'-') {
+            i += 1;
+        }
+        if !digits(&mut i) {
+            return false;
+        }
+    }
+    i == b.len()
+}
+
+/// The key under which a run that keeps writes in memory stores a file: the path as written,
+/// with `\` read as `/`. Mirrors fs_key in the C runtime.
+pub fn memory_file_key(path: &str) -> String {
+    path.replace('\\', "/")
+}
+
 /// Mirrors anvil_random_below in the C runtime.
 pub fn random_below_message(n: i64, site: &str) -> String {
     format!("random_below({n}) needs a bound above 0 at {site}")

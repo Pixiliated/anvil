@@ -27,13 +27,14 @@ use anvil_front::ir::{Program, PANIC_EXIT_CODE};
 use anvil_front::span::{SourceFile, Span};
 use serde_json::{json, Value};
 use std::collections::HashMap;
-use std::io::Write;
+use std::io::{BufRead, Write};
 use std::path::{Path, PathBuf};
 
 /// One command: `anvil NAME positionals... [--options]`; over MCP the tool NAME with `-` as `_`.
 pub struct Command {
     pub name: &'static str,
-    /// Positional arguments in order; a trailing `?` marks an optional one.
+    /// Positional arguments in order; a trailing `?` marks an optional one, and a trailing `*`
+    /// the program's own arguments, any number of them after `--`.
     pub positionals: &'static [&'static str],
     /// Options: (name, value placeholder or "" for a flag, help).
     pub options: &'static [(&'static str, &'static str, &'static str)],
@@ -53,9 +54,12 @@ pub const COMMANDS: &[Command] = &[
     Command { name: "check", positionals: &["file"], options: &[], summary: "type-check a file" },
     Command {
         name: "run",
-        positionals: &["file"],
-        options: &[("max-steps", "N", "stop after N statements and loop iterations")],
-        summary: "interpret main (the reference semantics)",
+        positionals: &["file", "args*"],
+        options: &[
+            ("max-steps", "N", "stop after N statements and loop iterations"),
+            ("input", "FILE", "the program's stdin (default: this command's own; empty over MCP)"),
+        ],
+        summary: "interpret main (the reference semantics); `-- ARGS` are the program's",
     },
     Command {
         name: "build",
@@ -123,12 +127,13 @@ pub const COMMANDS: &[Command] = &[
     Command { name: "spec", positionals: &[], options: &[], summary: "the language specification" },
     Command {
         name: "trace",
-        positionals: &["file"],
+        positionals: &["file", "args*"],
         options: &[
             ("test", "NAME", "trace this test instead of main"),
             ("only", "NAMES", "keep the calls of these functions only (comma-separated); prints are always kept"),
             ("limit", "N", "keep at most N events (default 1000)"),
             STEPS,
+            INPUT,
         ],
         summary: "a timeline of calls, arguments, returns and prints",
     },
@@ -143,8 +148,8 @@ pub const COMMANDS: &[Command] = &[
     },
     Command {
         name: "profile",
-        positionals: &["file"],
-        options: &[("test", "NAME", "profile this test instead of main"), STEPS],
+        positionals: &["file", "args*"],
+        options: &[("test", "NAME", "profile this test instead of main"), STEPS, INPUT],
         summary: "calls and steps per function",
     },
     // Project commands: they find anvil.toml in the current directory or above.
@@ -219,6 +224,33 @@ pub const COMMANDS: &[Command] = &[
 
 const STEPS: (&str, &str, &str) = ("max-steps", "N", "stop each run after N statements and loop iterations");
 const NATIVE: (&str, &str, &str) = ("native", "", "also build and run each program natively");
+const INPUT: (&str, &str, &str) = ("input", "FILE", "main's stdin (default: empty)");
+
+/// What main is given: its command-line arguments and its standard input.
+#[derive(Clone, Debug, Default)]
+pub struct ProgramInput {
+    pub args: Vec<String>,
+    /// A file, relative to the root, read as stdin.
+    pub file: Option<String>,
+    /// Without a file, read this process's own stdin (`anvil run` in a terminal); else it is empty.
+    pub own_stdin: bool,
+}
+
+impl ProgramInput {
+    fn given(&self) -> bool {
+        !self.args.is_empty() || self.file.is_some()
+    }
+
+    /// The bytes of the input file, if there is one.
+    fn file_bytes(&self, root: &Path) -> Result<Option<Vec<u8>>, Report> {
+        match &self.file {
+            None => Ok(None),
+            Some(f) => std::fs::read(root.join(f))
+                .map(Some)
+                .map_err(|e| Report::usage(format!("cannot read --input {f}: {e}"))),
+        }
+    }
+}
 
 pub const SPEC: &str = include_str!("../../../docs/SPEC.md");
 
@@ -366,9 +398,16 @@ pub fn check_in(files: Files, file: &str) -> Report {
 }
 
 /// Interprets main, writing its output to `out` as it runs. The report's JSON holds the exit
-/// code and, if it stopped early, the panic or the step limit.
-pub fn run(root: &Path, file: &str, max_steps: Option<u64>, out: &mut (dyn Write + Send)) -> Report {
+/// code and, if it stopped early, the panic or the step limit. Files are real, relative to `root`.
+pub fn run(
+    root: &Path,
+    file: &str,
+    max_steps: Option<u64>,
+    input: &ProgramInput,
+    out: &mut (dyn Write + Send),
+) -> Report {
     let (_, program) = try_report!(with_main(root, file));
+    let bytes = try_report!(input.file_bytes(root));
     let mut ffi = match c_functions(&program) {
         Ok(f) => f,
         Err(e) => return Report::failed(json!({ "ok": false, "error": e }), format!("error: {e}\n"), EXIT_FAILED),
@@ -378,7 +417,14 @@ pub fn run(root: &Path, file: &str, max_steps: Option<u64>, out: &mut (dyn Write
         std::thread::Builder::new()
             .stack_size(1 << 30)
             .spawn_scoped(s, || {
-                anvil_interp::run_main(&program, out, max_steps, host(anvil_interp::Clock::Real, &mut ffi))
+                let mut stdin: Box<dyn BufRead> = match (&bytes, input.own_stdin) {
+                    (Some(b), _) => Box::new(std::io::Cursor::new(b.as_slice())),
+                    (None, true) => Box::new(std::io::BufReader::new(std::io::stdin())),
+                    (None, false) => Box::new(std::io::empty()),
+                };
+                let files = anvil_interp::Files { root, memory: false };
+                let host = host(anvil_interp::Clock::Real, &mut ffi, &input.args, Some(&mut *stdin), files);
+                anvil_interp::run_main(&program, out, max_steps, host)
             })
             .expect("cannot spawn interpreter thread")
             .join()
@@ -441,13 +487,26 @@ pub(crate) fn c_functions(program: &Program) -> Result<Option<Ffi>, String> {
     Ok(anvil_codegen::ffi::load(program, &dir)?.map(Ffi))
 }
 
-/// The host of every run but `anvil run`: the virtual clock, and the program's C functions.
-pub(crate) fn virtual_host(ffi: &mut Option<Ffi>) -> anvil_interp::Host<'_> {
-    host(anvil_interp::Clock::Virtual, ffi)
+/// The host of every checked run (tests, goldens, traces, profiles): the virtual clock, files
+/// read from under `root` with writes kept in memory, and the program's C functions.
+pub(crate) fn checked_host<'h>(
+    ffi: &'h mut Option<Ffi>,
+    root: &'h Path,
+    args: &'h [String],
+    stdin: Option<&'h mut dyn BufRead>,
+) -> anvil_interp::Host<'h> {
+    host(anvil_interp::Clock::Virtual, ffi, args, stdin, anvil_interp::Files { root, memory: true })
 }
 
-pub(crate) fn host(clock: anvil_interp::Clock, ffi: &mut Option<Ffi>) -> anvil_interp::Host<'_> {
-    anvil_interp::Host { clock, foreign: ffi.as_mut().map(|f| f as &mut dyn anvil_interp::Foreign) }
+pub(crate) fn host<'h>(
+    clock: anvil_interp::Clock,
+    ffi: &'h mut Option<Ffi>,
+    args: &'h [String],
+    stdin: Option<&'h mut dyn BufRead>,
+    files: anvil_interp::Files<'h>,
+) -> anvil_interp::Host<'h> {
+    let foreign = ffi.as_mut().map(|f| f as &mut dyn anvil_interp::Foreign);
+    anvil_interp::Host { clock, foreign, args, stdin, files }
 }
 
 /// Distinct per call within this process, for scratch directories (the MCP server builds many times).

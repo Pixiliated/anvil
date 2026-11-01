@@ -1,0 +1,6 @@
+// expect: E0802
+extern fn remove(path: i64) -> i64 uses fs;
+
+fn main() -> i64 uses fs {
+    return remove(0);
+}

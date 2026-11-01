@@ -11,14 +11,68 @@
 //! ---
 //! everything the program printed, byte for byte
 //! ```
+//!
+//! A program that reads its arguments or stdin is given them by `<golden dir>/<file>.in`, which a
+//! person writes; without one it runs with neither. Runs read files under the project root and
+//! keep their writes in memory.
+//!
+//! ```text
+//! arg: --verbose
+//! arg: two words
+//! ---
+//! the program's stdin, byte for byte
+//! ```
 
 use crate::project::Project;
 use anvil_front::ir::{Program, PANIC_EXIT_CODE};
 use anvil_front::span::SourceFile;
 use anvil_interp::{FuncStats, Recorder};
 use serde_json::{json, Value};
+use std::io::Write as _;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
+
+/// What a golden run is given: its arguments and its stdin.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Input {
+    pub args: Vec<String>,
+    pub stdin: Vec<u8>,
+}
+
+impl Input {
+    pub fn parse(bytes: &[u8]) -> Result<Input, String> {
+        let mut args = Vec::new();
+        let mut rest = bytes;
+        loop {
+            let end =
+                rest.iter().position(|&b| b == b'\n').ok_or("no `---` line separating the arguments from the input")?;
+            let line = std::str::from_utf8(&rest[..end]).map_err(|_| "a line before `---` is not UTF-8")?;
+            rest = &rest[end + 1..];
+            if line == "---" {
+                return Ok(Input { args, stdin: rest.to_vec() });
+            }
+            match line.strip_prefix("arg: ") {
+                Some(a) => args.push(a.to_string()),
+                None => return Err(format!("unknown line `{line}`; expected `arg: ` or `---`")),
+            }
+        }
+    }
+}
+
+/// Where a program's input lives: `<golden dir>/<file>.in`.
+pub fn input_path(project: &Project, file: &str) -> PathBuf {
+    project.root.join(&project.golden_dir).join(format!("{file}.in"))
+}
+
+/// The program's input, or none when it has no `.in` file.
+pub fn read_input(project: &Project, file: &str) -> Result<Input, String> {
+    let p = input_path(project, file);
+    match std::fs::read(&p) {
+        Ok(b) => Input::parse(&b).map_err(|e| format!("{}: {e}", p.display())),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Input::default()),
+        Err(e) => Err(format!("cannot read {}: {e}", p.display())),
+    }
+}
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct Output {
@@ -100,13 +154,21 @@ impl Counts {
     }
 }
 
-/// Runs main in the interpreter; Err when the step limit stops it.
-pub fn interpret(program: Program, max_steps: Option<u64>) -> Result<(Output, Counts), String> {
+/// Runs main in the interpreter, given `input`, with files under `root`; Err when the step limit
+/// stops it.
+pub fn interpret(
+    program: Program,
+    max_steps: Option<u64>,
+    root: &Path,
+    input: &Input,
+) -> Result<(Output, Counts), String> {
     let mut ffi = crate::c_functions(&program)?;
+    let (root, input) = (root.to_path_buf(), input.clone());
     let (outcome, bytes, counts) = anvil_interp::run_on_big_stack(move || {
         let mut buf = Vec::new();
         let mut rec = Recorder::new(&program);
-        let host = crate::virtual_host(&mut ffi);
+        let mut stdin = std::io::Cursor::new(input.stdin.as_slice());
+        let host = crate::checked_host(&mut ffi, &root, &input.args, Some(&mut stdin));
         let o = anvil_interp::run_main_recorded(&program, &mut buf, max_steps, Some(&mut rec), host);
         (o, buf, Counts::of(&rec))
     });
@@ -207,26 +269,44 @@ pub fn clear_actual(project: &Project, file: &str) {
     }
 }
 
-/// Builds and runs main natively with the leak check on; Err for a build failure or a runtime
-/// error (a leak or a refcount fault, which are bugs in Anvil, not in the program).
-pub fn native(program: &Program, scratch: &Path, name: &str) -> Result<Output, String> {
+/// Builds and runs main natively with the leak check on, given `input`, in `root`; Err for a
+/// build failure or a runtime error (a leak or a refcount fault, which are bugs in Anvil, not in
+/// the program).
+pub fn native(program: &Program, scratch: &Path, name: &str, root: &Path, input: &Input) -> Result<Output, String> {
     std::fs::create_dir_all(scratch).map_err(|e| format!("cannot create {}: {e}", scratch.display()))?;
     let exe = scratch.join(format!("{}{}", name.replace(['/', '\\', '.'], "_"), std::env::consts::EXE_SUFFIX));
     anvil_codegen::build_exe(program, &exe, &scratch.join("work"), false)?;
-    let result = run_native(&exe, &[]);
+    let args: Vec<&str> = input.args.iter().map(String::as_str).collect();
+    let result = run_native(&exe, &args, root, &input.stdin);
     let _ = std::fs::remove_file(&exe);
     result
 }
 
-/// Runs a built executable with the leak check on and reads what it did. Err for a runtime
-/// error (a leak or refcount fault: a bug in Anvil, not in the program) or odd stderr.
-pub(crate) fn run_native(exe: &Path, args: &[&str]) -> Result<Output, String> {
-    let out = Command::new(exe)
+/// Runs a built executable as a checked run (the leak check on, the virtual clock, writes kept in
+/// memory) in `cwd` with `stdin`, and reads what it did. Err for a runtime error (a leak or
+/// refcount fault: a bug in Anvil, not in the program) or odd stderr.
+pub(crate) fn run_native(exe: &Path, args: &[&str], cwd: &Path, stdin: &[u8]) -> Result<Output, String> {
+    let exe = std::path::absolute(exe).map_err(|e| format!("cannot find {}: {e}", exe.display()))?;
+    let mut child = Command::new(&exe)
         .args(args)
+        .current_dir(cwd)
         .env("ANVIL_CHECK_LEAKS", "1")
         .env("ANVIL_CLOCK", "virtual")
-        .output()
+        .env("ANVIL_FS", "memory")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
         .map_err(|e| format!("cannot run {}: {e}", exe.display()))?;
+    // Written from a thread, so a program that prints before it reads cannot block on a full pipe.
+    let mut pipe = child.stdin.take().expect("stdin is piped");
+    let bytes = stdin.to_vec();
+    let writer = std::thread::spawn(move || {
+        // A program may exit without reading it all; that is not an error.
+        let _ = pipe.write_all(&bytes);
+    });
+    let out = child.wait_with_output().map_err(|e| format!("cannot run {}: {e}", exe.display()))?;
+    let _ = writer.join();
     let stderr = String::from_utf8_lossy(&out.stderr);
     let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
     let exit = out.status.code().ok_or("the executable was killed")?;
@@ -306,8 +386,12 @@ pub fn check_file(
         }
         Err(e) => return done("error", Some(e)),
     };
+    let input = match read_input(project, &file) {
+        Ok(i) => i,
+        Err(e) => return done("error", Some(e)),
+    };
     let native_program = native_too.then(|| program.clone());
-    let (got, counts) = match interpret(program, max_steps) {
+    let (got, counts) = match interpret(program, max_steps, &project.root, &input) {
         Ok(o) => o,
         Err(m) => return done("stopped", Some(m)),
     };
@@ -319,7 +403,7 @@ pub fn check_file(
     }
     if let Some(p) = native_program {
         let scratch = std::env::temp_dir().join(format!("anvil_golden_{}_{}", std::process::id(), crate::unique()));
-        let result = native(&p, &scratch, &file);
+        let result = native(&p, &scratch, &file, &project.root, &input);
         let _ = std::fs::remove_dir_all(&scratch);
         match result {
             Ok(n) => {

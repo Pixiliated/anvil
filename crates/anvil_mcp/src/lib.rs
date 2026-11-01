@@ -58,6 +58,10 @@ pub struct RunArgs {
     pub file: String,
     /// Stop after this many statements and loop iterations (default 100000000).
     pub max_steps: Option<u64>,
+    /// A file whose bytes are the program's stdin (default: empty).
+    pub input: Option<String>,
+    /// The program's command-line arguments, what args() returns.
+    pub args: Option<Vec<String>>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -159,6 +163,10 @@ pub struct TraceArgs {
     pub limit: Option<u64>,
     /// Stop the run after this many statements and loop iterations (default 100000000).
     pub max_steps: Option<u64>,
+    /// A file whose bytes are main's stdin (default: empty).
+    pub input: Option<String>,
+    /// main's command-line arguments, what args() returns.
+    pub args: Option<Vec<String>>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -170,6 +178,10 @@ pub struct ProfileArgs {
     pub test: Option<String>,
     /// Stop the run after this many statements and loop iterations (default 100000000).
     pub max_steps: Option<u64>,
+    /// A file whose bytes are main's stdin (default: empty).
+    pub input: Option<String>,
+    /// main's command-line arguments, what args() returns.
+    pub args: Option<Vec<String>>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -277,7 +289,8 @@ impl AnvilServer {
     async fn run(&self, Parameters(a): Parameters<RunArgs>) -> Result<CallToolResult, ErrorData> {
         self.op(move |root| {
             let mut out = Vec::new();
-            let mut report = anvil_ops::run(root, &a.file, Some(steps(a.max_steps)), &mut out);
+            let input = program_input(a.args, a.input);
+            let mut report = anvil_ops::run(root, &a.file, Some(steps(a.max_steps)), &input, &mut out);
             report.json["stdout"] = serde_json::json!(String::from_utf8_lossy(&out));
             report
         })
@@ -353,7 +366,8 @@ impl AnvilServer {
     async fn trace(&self, Parameters(a): Parameters<TraceArgs>) -> Result<CallToolResult, ErrorData> {
         self.op(move |root| {
             let (test, only) = (a.test.as_deref(), a.only.as_deref());
-            anvil_ops::trace(root, &a.file, test, only, a.limit, Some(steps(a.max_steps)))
+            let input = program_input(a.args, a.input);
+            anvil_ops::trace(root, &a.file, test, only, a.limit, Some(steps(a.max_steps)), &input)
         })
         .await
     }
@@ -362,7 +376,11 @@ impl AnvilServer {
         its steps with callees and its own steps; also the functions that never ran. Steps are \
         statements and loop iterations, so the numbers are deterministic.")]
     async fn profile(&self, Parameters(a): Parameters<ProfileArgs>) -> Result<CallToolResult, ErrorData> {
-        self.op(move |root| anvil_ops::profile(root, &a.file, a.test.as_deref(), Some(steps(a.max_steps)))).await
+        self.op(move |root| {
+            let input = program_input(a.args, a.input);
+            anvil_ops::profile(root, &a.file, a.test.as_deref(), Some(steps(a.max_steps)), &input)
+        })
+        .await
     }
 
     #[tool(description = "Explain an error code or a lint, or list every code and lint with its explanation.")]
@@ -441,6 +459,11 @@ impl AnvilServer {
 
 fn steps(given: Option<u64>) -> u64 {
     given.unwrap_or(DEFAULT_MAX_STEPS)
+}
+
+/// Over MCP there is no terminal: without `input`, the program's stdin is empty.
+fn program_input(args: Option<Vec<String>>, input: Option<String>) -> anvil_ops::ProgramInput {
+    anvil_ops::ProgramInput { args: args.unwrap_or_default(), file: input, own_stdin: false }
 }
 
 #[tool_handler]

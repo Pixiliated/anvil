@@ -67,7 +67,7 @@ much of that judgement as possible into the compiler:
 - **Local and explicit.** No operator overloading, macros, implicit conversions, shadowing or
   global state. Every binding states its type. Calls with two or more arguments name them,
   so swapped arguments cannot compile.
-- **Checks built in.** Units of measure (`f64[m/s]`), effects (`uses io, clock, random`), a
+- **Checks built in.** Units of measure (`f64[m/s]`), effects (`uses io, fs, clock, random`), a
   checked promise not to allocate (`noalloc`), contracts (`requires`/`ensures`) and `test`
   blocks are part of the language, not libraries.
 - **Errors as values.** `Option` and `Result` with `?`, and `match` that must handle every
@@ -83,12 +83,12 @@ in full (`anvil spec` prints it).
 
 ## Status
 
-v0.13: programs of one or more files (modules with explicit imports and `pub`), generic
+v0.14: programs of one or more files (modules with explicit imports and `pub`), generic
 functions, structs and enums with built-in constraints, i64, f64 with units, bool, strings with interpolation,
 search and split, growable arrays and slices, maps in key order, structs, enums with
 exhaustive `match`, structural `==`, `Option` and `Result` with `?`,
-contracts, effects (io, a clock, seeded random numbers), `noalloc`, C functions (`extern`) and
-tests. There are two backends:
+contracts, effects (io with arguments and stdin, files, a clock, seeded random numbers),
+`noalloc`, C functions (`extern`) and tests. There are two backends:
 
 - an **interpreter**, which is the reference semantics;
 - a **native compiler**: Cranelift to x86-64, linked with MSVC on Windows. Strings and arrays

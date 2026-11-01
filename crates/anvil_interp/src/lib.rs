@@ -6,7 +6,9 @@ mod show;
 pub use show::{show, SHOWN_BYTES, SHOWN_CHARS, SHOWN_ITEMS};
 
 use anvil_front::ir::*;
-use std::io::Write;
+use std::collections::HashMap;
+use std::io::{BufRead, Write};
+use std::path::Path;
 use std::rc::Rc;
 
 /// Arrays and maps share storage until written (Rc::make_mut), which gives value semantics
@@ -80,16 +82,37 @@ pub trait Foreign {
     fn call(&mut self, func: FuncId, args: &[u64]) -> u64;
 }
 
+/// Where `read_file` and `write_file` find files, and whether writes reach the disk.
+#[derive(Clone, Copy, Debug)]
+pub struct Files<'h> {
+    /// Relative paths are relative to this directory (the run's working directory).
+    pub root: &'h Path,
+    /// Writes are kept in memory for the run and read back from there, so a checked run (a
+    /// test, a golden, a trace or a profile) never changes the disk. `anvil run` writes.
+    pub memory: bool,
+}
+
 /// What a run takes from outside the program.
 pub struct Host<'h> {
     pub clock: Clock,
     /// The program's C functions; None for a program without externs.
     pub foreign: Option<&'h mut dyn Foreign>,
+    /// What `args()` returns.
+    pub args: &'h [String],
+    /// What `read_line` reads; None is an empty input.
+    pub stdin: Option<&'h mut dyn BufRead>,
+    pub files: Files<'h>,
 }
 
 impl Host<'_> {
     pub fn reborrow(&mut self) -> Host<'_> {
-        Host { clock: self.clock, foreign: self.foreign.as_deref_mut().map(|f| f as &mut dyn Foreign) }
+        Host {
+            clock: self.clock,
+            foreign: self.foreign.as_deref_mut().map(|f| f as &mut dyn Foreign),
+            args: self.args,
+            stdin: self.stdin.as_deref_mut().map(|s| s as &mut dyn BufRead),
+            files: self.files,
+        }
     }
 }
 
@@ -101,6 +124,8 @@ pub struct Interp<'p, 'h> {
     clock_reads: i64,
     started: std::time::Instant,
     random: Random,
+    /// Files written in this run when writes are kept in memory, by `memory_file_key`.
+    written: HashMap<String, Rc<str>>,
     depth: usize,
     /// Statements and loop iterations left before the run stops; None is unlimited.
     steps_left: Option<u64>,
@@ -251,6 +276,7 @@ impl<'p, 'h> Interp<'p, 'h> {
             clock_reads: 0,
             started: std::time::Instant::now(),
             random: Random::default(),
+            written: HashMap::new(),
             depth: 0,
             steps_left: max_steps,
             taken: 0,
@@ -882,11 +908,24 @@ impl<'p, 'h> Interp<'p, 'h> {
                 return Ok(Value::I64(ns));
             }
             Builtin::RandomF64 => return Ok(Value::F64(self.random.unit_f64())),
+            Builtin::Args => {
+                let all = self.host.args.iter().map(|a| Value::Str(a.as_str().into())).collect();
+                return Ok(Value::Array(Rc::new(all)));
+            }
+            Builtin::ReadLine { message } => return self.read_line(message),
             _ => {}
         }
         let x = self.eval(&args[0], frame)?;
         Ok(match b {
-            Builtin::ClockNs | Builtin::RandomF64 => unreachable!(),
+            Builtin::ClockNs | Builtin::RandomF64 | Builtin::Args | Builtin::ReadLine { .. } => unreachable!(),
+            Builtin::ReadFile => file_result(self.read_file(x.as_str()).map(Value::Str)),
+            Builtin::WriteFile => {
+                let text = self.eval(&args[1], frame)?;
+                file_result(self.write_file(x.as_str(), text.as_str()))
+            }
+            Builtin::StrTrim => Value::Str(trim_text(x.as_str()).into()),
+            Builtin::StrParseI64 => option(parse_i64_text(x.as_str()).map(Value::I64)),
+            Builtin::StrParseF64 => option(parse_f64_text(x.as_str()).map(Value::F64)),
             Builtin::RandomBelow { site } => {
                 let n = x.as_i64();
                 if n <= 0 {
@@ -971,6 +1010,90 @@ impl<'p, 'h> Interp<'p, 'h> {
                 Value::Array(Rc::new(parts))
             }
         })
+    }
+}
+
+impl Interp<'_, '_> {
+    fn read_line(&mut self, message: &str) -> R<Value> {
+        let Some(input) = self.host.stdin.as_deref_mut() else {
+            return Ok(option(None));
+        };
+        let mut line = Vec::new();
+        if input.read_until(b'\n', &mut line).expect("stdin read failed") == 0 {
+            return Ok(option(None));
+        }
+        if line.last() == Some(&b'\n') {
+            line.pop();
+            if line.last() == Some(&b'\r') {
+                line.pop();
+            }
+        }
+        match String::from_utf8(line) {
+            Ok(s) => Ok(option(Some(Value::Str(s.into())))),
+            Err(_) => panic(message),
+        }
+    }
+
+    fn read_file(&mut self, path: &str) -> Result<Rc<str>, usize> {
+        // An empty path names no file, on every platform.
+        if path.is_empty() {
+            return Err(FILE_NOT_FOUND);
+        }
+        if self.host.files.memory {
+            if let Some(text) = self.written.get(&memory_file_key(path)) {
+                return Ok(text.clone());
+            }
+        }
+        let p = self.host.files.root.join(path);
+        if p.is_dir() {
+            return Err(FILE_IS_DIRECTORY);
+        }
+        let bytes = std::fs::read(&p).map_err(file_error)?;
+        String::from_utf8(bytes).map(Rc::from).map_err(|_| FILE_NOT_TEXT)
+    }
+
+    /// Ok of the bytes written.
+    fn write_file(&mut self, path: &str, text: &str) -> Result<Value, usize> {
+        if path.is_empty() {
+            return Err(FILE_NOT_FOUND);
+        }
+        let p = self.host.files.root.join(path);
+        if p.is_dir() {
+            return Err(FILE_IS_DIRECTORY);
+        }
+        if self.host.files.memory {
+            // As the disk would answer: the directory it goes in must exist.
+            if p.parent().is_some_and(|d| !d.as_os_str().is_empty() && !d.is_dir()) {
+                return Err(FILE_NOT_FOUND);
+            }
+            self.written.insert(memory_file_key(path), text.into());
+        } else {
+            std::fs::write(&p, text).map_err(file_error)?;
+        }
+        Ok(Value::I64(text.len() as i64))
+    }
+}
+
+/// The FileError variant for an error from the operating system (a directory is caught first).
+fn file_error(e: std::io::Error) -> usize {
+    match e.kind() {
+        std::io::ErrorKind::NotFound => FILE_NOT_FOUND,
+        std::io::ErrorKind::PermissionDenied => FILE_DENIED,
+        _ => FILE_FAILED,
+    }
+}
+
+fn file_result(r: Result<Value, usize>) -> Value {
+    match r {
+        Ok(v) => Value::Enum(RESULT_OK, vec![v]),
+        Err(variant) => Value::Enum(RESULT_ERR, vec![Value::Enum(variant, Vec::new())]),
+    }
+}
+
+fn option(v: Option<Value>) -> Value {
+    match v {
+        Some(v) => Value::Enum(OPTION_SOME, vec![v]),
+        None => Value::Enum(OPTION_NONE, Vec::new()),
     }
 }
 

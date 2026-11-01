@@ -1,0 +1,10 @@
+// read_line panics on input that is not UTF-8 (golden/tests/programs/panic_read_line.anv.in).
+fn main() uses io {
+    var more: bool = true;
+    while more {
+        match read_line() {
+            Some(value: line) => { print("read [{line}]"); }
+            None => { more = false; }
+        }
+    }
+}

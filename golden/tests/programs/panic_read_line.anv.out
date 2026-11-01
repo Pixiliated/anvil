@@ -1,0 +1,4 @@
+exit: 101
+panic: read_line read text that is not UTF-8 at tests/programs/panic_read_line.anv:5:15
+---
+read [fine]

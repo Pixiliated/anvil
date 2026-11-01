@@ -1,0 +1,129 @@
+// Input: arguments, stdin and files. The golden gives main two arguments and five lines of stdin
+// (golden/tests/programs/input.anv.in); under golden check and tests, writes stay in memory.
+struct Tally {
+    sum: i64,
+    bad: i64,
+}
+
+fn add_line(t: Tally, line: str) -> Tally {
+    var out: Tally = t;
+    match line.trim().parse_i64() {
+        Some(value: n) => { out.sum = out.sum + n; }
+        None => { out.bad = out.bad + 1; }
+    }
+    return out;
+}
+
+fn describe(e: FileError) -> str {
+    var s: str = "";
+    match e {
+        NotFound => { s = "not found"; }
+        IsDirectory => { s = "a directory"; }
+        Denied => { s = "denied"; }
+        NotText => { s = "not UTF-8 text"; }
+        Failed => { s = "failed"; }
+    }
+    return s;
+}
+
+fn show_read(path: str) uses io, fs {
+    match read_file(path) {
+        Ok(value: text) => { print("read {path}: [{text}]"); }
+        Err(error) => { print("read {path}: {describe(error)}"); }
+    }
+}
+
+fn show_write(path: str, text: str) uses io, fs {
+    match write_file(path: path, text: text) {
+        Ok(value: n) => { print("wrote {n} bytes to {path}"); }
+        Err(error) => { print("write {path}: {describe(error)}"); }
+    }
+}
+
+fn best(text: str) -> i64 {
+    var top: i64 = 0;
+    for line in text.split("\n") {
+        match line.parse_i64() {
+            Some(value: v) => {
+                if v > top {
+                    top = v;
+                }
+            }
+            None => {}
+        }
+    }
+    return top;
+}
+
+fn show_i64(s: str) uses io {
+    match s.parse_i64() {
+        Some(value: v) => { print("parse_i64 [{s}] = {v}"); }
+        None => { print("parse_i64 [{s}] = None"); }
+    }
+}
+
+fn show_f64(s: str) uses io {
+    match s.parse_f64() {
+        Some(value: v) => { print("parse_f64 [{s}] = {v}"); }
+        None => { print("parse_f64 [{s}] = None"); }
+    }
+}
+
+fn main() uses io, fs {
+    let given: [str] = args();
+    print("{given.len()} argument(s)");
+    for a in given {
+        print("[{a}]");
+    }
+    var t: Tally = Tally { sum: 0, bad: 0 };
+    var more: bool = true;
+    while more {
+        match read_line() {
+            Some(value: line) => { t = add_line(t: t, line: line); }
+            None => { more = false; }
+        }
+    }
+    print("sum {t.sum}, {t.bad} not a number");
+    print("after the end: {read_line() == None}");
+
+    match read_file("tests/programs/data/scores.txt") {
+        Ok(value: text) => { print("best score {best(text)}"); }
+        Err(error) => { print("scores: {describe(error)}"); }
+    }
+    show_read("tests/programs/data");
+    show_read("tests/programs/data/missing.txt");
+    show_read("tests/programs/data/latin1.txt");
+    show_read("");
+    show_write(path: "tests/programs/data/written.txt", text: "sum {t.sum}");
+    show_read("tests/programs/data/written.txt");
+    show_read("tests\\programs\\data\\written.txt");
+    show_write(path: "tests/programs/data/written.txt", text: "replaced");
+    show_read("tests/programs/data/written.txt");
+    show_write(path: "tests/programs/nowhere/x.txt", text: "x");
+    show_write(path: "tests/programs/data", text: "x");
+
+    print("trim [{"  in the middle \t\n".trim()}]");
+    for i in ["42", "-9223372036854775808", "9223372036854775807", "9223372036854775808", "-", "", "1_000", "007", "+5", " 1", "1.0"] {
+        show_i64(i);
+    }
+    for f in ["1", "-2.5", "1e3", "1E-3", "0.1", "1.", ".5", "+1", "1e400", "-0", "2.2250738585072014e-308", "4.9e-324", "1e-400", "nan", "inf", " 7", "0x10", "1.5e+2", "123456789012345678901234567890"] {
+        show_f64(f);
+    }
+}
+
+test "files written in a test stay in memory" uses fs {
+    let w: Result[i64, FileError] = write_file(
+        path: "tests/programs/data/test_only.txt",
+        text: "hello",
+    );
+    assert(w == Ok(5));
+    match read_file("tests/programs/data/test_only.txt") {
+        Ok(value: text) => { assert(text == "hello"); }
+        Err(error: _) => { assert(false); }
+    }
+}
+
+test "tests have no arguments and no input" uses io {
+    assert(args().len() == 0);
+    assert(read_line() == None);
+}

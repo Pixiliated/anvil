@@ -8,8 +8,9 @@
 //! every mechanical fix must give a program that checks cleanly.
 
 use std::collections::BTreeSet;
+use std::io::Write as _;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Output};
+use std::process::{Command, Output, Stdio};
 
 fn root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../..").canonicalize().unwrap()
@@ -1084,6 +1085,111 @@ fn c_functions_are_traced_and_their_failures_are_loud() {
     assert!(String::from_utf8_lossy(&out.stderr).contains("ANVIL_CLOCK must be unset"), "{out:?}");
     let out = Command::new(&exe).output().unwrap();
     assert_eq!(String::from_utf8_lossy(&out.stdout), "42\n");
+}
+
+const ECHO: &str = "fn main() -> i64 uses io, fs {
+    for a in args() {
+        print(\"arg [{a}]\");
+    }
+    var n: i64 = 0;
+    var more: bool = true;
+    while more {
+        match read_line() {
+            Some(value: line) => {
+                print(\"line [{line}]\");
+                n = n + 1;
+            }
+            None => { more = false; }
+        }
+    }
+    match write_file(path: \"out.txt\", text: \"{n} lines\") {
+        Ok(value: _) => {}
+        Err(error: _) => { return 1; }
+    }
+    match read_file(\"out.txt\") {
+        Ok(value: t) => { print(\"file [{t}]\"); }
+        Err(error: _) => { return 2; }
+    }
+    return 0;
+}
+
+test \"t\" {
+    assert(true);
+}
+";
+
+/// Runs `program` in `dir` with `stdin` and `env`, and returns what it did.
+fn run_with(program: &Path, args: &[&str], dir: &Path, stdin: &[u8], env: &[(&str, &str)]) -> Output {
+    let mut child = Command::new(program)
+        .args(args)
+        .current_dir(dir)
+        .envs(env.iter().copied())
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    child.stdin.take().unwrap().write_all(stdin).unwrap();
+    child.wait_with_output().unwrap()
+}
+
+#[test]
+fn programs_take_arguments_stdin_and_files() {
+    let p = Scratch::new("input");
+    p.write("src/echo.anv", ECHO);
+    let written = p.0.join("out.txt");
+    let take_written = || {
+        let text = std::fs::read_to_string(&written).ok();
+        let _ = std::fs::remove_file(&written);
+        text
+    };
+
+    // `anvil run`: the arguments after `--`, its own stdin ("\r\n" ends a line too), real files.
+    let anvil_exe = Path::new(env!("CARGO_BIN_EXE_anvil"));
+    let out = run_with(anvil_exe, &["run", "src/echo.anv", "--", "h\u{e9}llo", "a b"], &p.0, b"one\r\ntwo", &[]);
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert_eq!(text, "arg [h\u{e9}llo]\narg [a b]\nline [one]\nline [two]\nfile [2 lines]\n", "{out:?}");
+    assert_eq!(take_written().as_deref(), Some("2 lines"));
+    p.write("in.txt", "x\n");
+    let out = p.anvil(&["run", "src/echo.anv", "--input", "in.txt"]);
+    assert_eq!(String::from_utf8_lossy(&out.stdout), "line [x]\nfile [1 lines]\n");
+    assert_eq!(take_written().as_deref(), Some("1 lines"));
+
+    // Checked runs never write to the disk: a trace keeps its writes in memory.
+    // `--json` goes before `--`: everything after it is the program's.
+    let v = json_of(&p.anvil(&["trace", "src/echo.anv", "--input", "in.txt", "--json", "--", "z"]));
+    let prints: Vec<&str> = v["events"].as_array().unwrap().iter().filter_map(|e| e["print"].as_str()).collect();
+    assert_eq!(prints, ["arg [z]", "line [x]", "file [1 lines]"], "{v}");
+    assert_eq!(take_written(), None);
+    let out = p.anvil(&["trace", "src/echo.anv", "--test", "t", "--", "z"]);
+    assert!(String::from_utf8_lossy(&out.stderr).contains("tests run without them"), "{out:?}");
+
+    // An executable: real arguments (UTF-16 on Windows, kept as UTF-8), stdin and files.
+    let exe = p.0.join(format!("echo{}", std::env::consts::EXE_SUFFIX));
+    assert!(p.anvil(&["build", "src/echo.anv", "-o", exe.to_str().unwrap()]).status.success());
+    let out = run_with(&exe, &["h\u{e9}llo", ""], &p.0, b"three\n", &[]);
+    assert_eq!(String::from_utf8_lossy(&out.stdout), "arg [h\u{e9}llo]\narg []\nline [three]\nfile [1 lines]\n");
+    assert_eq!(take_written().as_deref(), Some("1 lines"));
+    // ANVIL_FS=memory keeps writes off the disk, as in goldens; any other value is loud.
+    let out = run_with(&exe, &[], &p.0, b"", &[("ANVIL_FS", "memory")]);
+    assert_eq!(String::from_utf8_lossy(&out.stdout), "file [0 lines]\n");
+    assert_eq!(take_written(), None);
+    let out = run_with(&exe, &[], &p.0, b"", &[("ANVIL_FS", "disk")]);
+    assert_eq!(out.status.code(), Some(70));
+    assert!(String::from_utf8_lossy(&out.stderr).contains("ANVIL_FS must be unset"), "{out:?}");
+
+    // A golden's input file gives it arguments and stdin, on both backends.
+    p.write("anvil.toml", "[project]\nname = \"io\"\nfiles = [\"src/*.anv\"]\n");
+    std::fs::create_dir_all(p.0.join("golden/src")).unwrap();
+    p.write("golden/src/echo.anv.in", "arg: g\n---\nl1\n");
+    let v = p.json(&["golden", "approve", "src/echo.anv"]);
+    assert_eq!(v["stdout"], "arg [g]\nline [l1]\nfile [1 lines]\n", "{v}");
+    let v = p.json(&["golden", "check", "--native"]);
+    assert_eq!(v["results"][0]["status"], "ok", "{v}");
+    assert_eq!(take_written(), None);
+    p.write("golden/src/echo.anv.in", "arg g\n---\n");
+    let v = p.json(&["golden", "check"]);
+    assert!(v["results"][0]["detail"].as_str().unwrap().contains("unknown line `arg g`"), "{v}");
 }
 
 #[test]

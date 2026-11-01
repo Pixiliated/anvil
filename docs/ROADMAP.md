@@ -82,5 +82,12 @@ green and the interpreter and native backend agreeing on every program in `tests
 - [x] C FFI with declared effects: `extern` functions from the C runtime or a C file, on both
   backends
 
-## M13: Publishing
+## M13: Programs that take input (v0.14)
+- [x] Arguments and standard input: `args()`, `read_line()`, given by `anvil run -- ARGS`,
+  `--input FILE` and a golden's `.in` file
+- [x] Files under a new `fs` effect: `read_file`, `write_file` and the `FileError` enum; checked
+  runs read the disk and keep their writes in memory, on both backends
+- [x] Reading values from text: `trim`, `parse_i64`, `parse_f64`
+
+## M14: Publishing
 - [ ] crates.io as `anvil-lang` (`anvil` is taken), docs site, contribution guide

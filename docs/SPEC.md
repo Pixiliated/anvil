@@ -1,4 +1,4 @@
-# Anvil language specification (v0.13)
+# Anvil language specification (v0.14)
 
 Anvil is a small, compiled, general-purpose language designed to be written mostly by AI agents
 and read by humans. Its rules aim at three things: one obvious way to write each thing, code
@@ -170,11 +170,12 @@ fn area(width: f64[m], height: f64[m]) -> f64[m^2] {
 ### Effects
 
 Functions are pure unless they declare their effects, so a signature says everything a call can
-do. There are three:
+do. There are four:
 
 | Effect | Performed by |
 |---|---|
-| `io` | `print` |
+| `io` | `print`, `args`, `read_line` |
+| `fs` | `read_file`, `write_file` |
 | `clock` | `clock_ns` |
 | `random` | `random_below`, `random_f64`, `random_seed` |
 
@@ -196,9 +197,10 @@ effects gives the same result for the same arguments. `uses` lists them in the o
 
 **`noalloc`** after the effects promises that a function never allocates, so it can run where
 allocation is too slow or must not fail. The checker holds it to that (E0333): interpolation,
-joining strings, array and map literals, slices, `split`, `keys`, `values`, `push`, `pop`, `set`,
-`remove` and assigning to an array element may allocate; arithmetic, comparisons, struct fields,
-indexing, `len`, the str searches, `get`, `has`, `print` and the other built-ins never do. A
+joining strings, array and map literals, slices, `split`, `trim`, `keys`, `values`, `push`,
+`pop`, `set`, `remove`, `args`, `read_line`, `read_file` and assigning to an array element may
+allocate; arithmetic, comparisons, struct fields, indexing, `len`, the str searches,
+`parse_i64`, `parse_f64`, `get`, `has`, `print`, `write_file` and the other built-ins never do. A
 noalloc function may only call functions that are noalloc too (E0334). Allocation is not an
 effect: most functions allocate, so it is the promise not to that a signature carries.
 
@@ -232,8 +234,9 @@ extern "c/geo.c" fn gcd(a: i64, b: i64) -> i64 noalloc;  // from a C file next t
   wrap one in an Anvil function that checks its arguments.
 - Anvil cannot see inside C, so an extern's effects and `noalloc` are what its declaration says,
   and the declaration is trusted. It may declare `uses clock` and `uses random`, but the virtual
-  clock and the seed do not reach into C. It may not declare `uses io` (E0802): C's output would
-  bypass Anvil's, which tests, goldens and tools capture.
+  clock and the seed do not reach into C. It may not declare `uses io` or `uses fs` (E0802): C's
+  output would bypass Anvil's, which tests, goldens and tools capture, and its writes would reach
+  the disk where checked runs keep theirs in memory.
 - They are called like any function (named arguments when there are two or more) and appear in
   traces and profiles. The C file is compiled with the platform's C compiler (MSVC's `cl.exe`, or
   `cc`) for `build`, and into a library the interpreter loads for `run`, `test` and goldens, with
@@ -292,6 +295,9 @@ either bound falls inside a character (`"héllo"[0..2]`).
 | `s.starts_with(t)`, `s.ends_with(t)` | `bool` |
 | `s.find(t)` | `Option[i64]`: the byte offset of the first `t` (`Some(0)` for `""`) |
 | `s.split(sep)` | `[str]`: the pieces between occurrences of `sep`, left to right; `"a,,b"` gives `["a", "", "b"]`, `""` gives `[""]`; an empty `sep` panics |
+| `s.trim()` | `str` without the spaces, tabs, `\r` and `\n` at either end |
+| `s.parse_i64()` | `Option[i64]`: `Some` for an optional `-` and one or more ASCII digits in range (`"007"` is 7); nothing else, so no `+`, `_` or spaces |
+| `s.parse_f64()` | `Option[f64]`: `Some` for an optional `-`, digits, optionally `.` and digits, and optionally `e` or `E`, a sign and digits (`"-2.5e3"`), read as the nearest double, which must be finite; not `.5`, `1.`, `inf` or `nan`. Every float's text reads back as that float |
 
 **Interpolation** is the one way to build text from values: `"{name} is {age} years old"`.
 Each `{...}` holds one expression of type `i64`, `f64`, `bool` or `str` and inserts its text
@@ -453,8 +459,13 @@ target's bounds are checked.
 | `random_below(n)` | uniform `i64` in `0..n`, panics unless `n > 0`; needs `uses random` |
 | `random_f64()` | uniform `f64` in [0, 1); needs `uses random` |
 | `random_seed(n)` | restarts the random sequence from seed `n`; needs `uses random` |
+| `args()` | `[str]`: the program's command-line arguments, without its own name; needs `uses io` |
+| `read_line()` | `Option[str]`: the next line of standard input without its `\n` or `\r\n`, `None` at the end; panics on text that is not UTF-8; needs `uses io` |
+| `read_file(path)` | `Result[str, FileError]`: the whole file; needs `uses fs` |
+| `write_file(path: p, text: t)` | `Result[i64, FileError]`: replaces the file's contents with `t`, creating it, `Ok` of the bytes written; needs `uses fs` |
 
-Built-ins take positional arguments. To print several values, interpolate:
+Built-ins take positional arguments, except `write_file`: it has two parameters, so its
+arguments are named like any call's. To print several values, interpolate:
 `print("{a} and {b}")`.
 
 ### Text of values
@@ -466,6 +477,38 @@ Built-ins take positional arguments. To print several values, interpolate:
 - A float with a unit is followed by a space and its canonical unit: `9.81 m/s^2`. Aliases
   print expanded (`kg*m/s^2`).
 
+## Input and files
+
+```
+fn main() uses io, fs {
+    for name in args() {
+        match read_file(name) {
+            Ok(value: text) => { print("{name}: {text.len()} bytes"); }
+            Err(error: _) => { print("{name}: cannot read it"); }
+        }
+    }
+}
+```
+
+- A program reads its **arguments** with `args()` and its **standard input** a line at a time
+  with `read_line()`. Both are io: a run of a program gives it both.
+- `read_file` and `write_file` take a path relative to the **working directory** (or absolute);
+  `/` separates directories on every platform. Text is UTF-8 both ways and written byte for byte.
+- A failure is a `FileError`, a built-in enum whose variants are, in order, `NotFound` (no such
+  file, or no such directory to write it in), `IsDirectory`, `Denied`, `NotText` (the file is
+  not UTF-8) and `Failed` (anything else). An empty path is `NotFound`.
+- **Checked runs** (tests, goldens, `trace` and `profile`) stay deterministic and never change
+  the disk: the working directory is the root the command runs in (the project's root), files
+  are read from it, and writes are kept in memory for the run, where later reads of the same
+  path (with `\` read as `/`) find them. A write still fails as the disk would make it fail: the
+  directory it goes in must exist, and a directory cannot be overwritten. Tests have no
+  arguments and an empty stdin. Executables keep their writes in memory too when
+  `ANVIL_FS=memory` is set (any other value is an error).
+- `anvil run file.anv -- a b` gives main the arguments `a` and `b`; stdin is the command's own,
+  or a file with `--input FILE` (over MCP: `args` and `input`, and stdin is empty without it).
+  `trace` and `profile` take the same, with stdin empty unless `--input` is given. A golden's
+  arguments and stdin are in `golden/<file>.in` (see Projects).
+
 ## Programs, panics and exit codes
 
 `main` takes no parameters and returns nothing or `i64`. Its `i64` result is the exit code and
@@ -474,13 +517,15 @@ Panic messages name the source location: `index 3 out of bounds for length 3 at
 main.anv:12:9`.
 
 Output is byte-identical on every platform (`\n` line endings) and every run of a program
-without `uses clock`: random numbers are seeded (see Effects) and Anvil has no environment access.
+without `uses clock` that is given the same arguments, input and files: random numbers are
+seeded (see Effects) and nothing else comes from the environment.
 
 ## Tests
 
 `test "name" { ... }` blocks run with `anvil test file.anv`. A test passes if it finishes and
 fails if it panics (`assert`, a contract, overflow, a bad index). Tests may declare effects; each
-starts with the random sequence at seed 0 and the virtual clock at 0.
+starts with the random sequence at seed 0, the virtual clock at 0, no arguments, an empty stdin
+and no files written (see Input and files).
 
 A **property test** names inputs after `for all` and runs on generated values of their types:
 
@@ -504,7 +549,8 @@ backends disagree". Property tests run in the interpreter, the reference.
 
 ```
 anvil check   file.anv                 type-check
-anvil run     file.anv [--max-steps N] interpret (the reference semantics)
+anvil run     file.anv [--max-steps N] [--input FILE] [-- ARGS...]
+                                       interpret (the reference semantics)
 anvil build   file.anv [-o out] [--asm]
                                        native executable via Cranelift, for the host:
                                        Windows x64 (MSVC), Linux or macOS (x86-64, ARM64)
@@ -514,9 +560,10 @@ anvil fmt     [file.anv] [--check]     put the file (or every project file) in c
                                        layout; --check changes nothing
 anvil fix     file.anv                 apply every mechanical fix until none is left
 anvil fuzz    [--seed N] [--count N]   random programs on both backends (see below)
-anvil trace   file.anv [--test NAME] [--only F,G] [--limit N]
+anvil trace   file.anv [--test NAME] [--only F,G] [--limit N] [--input FILE] [-- ARGS...]
                                        a run as a timeline: calls, returns, prints
-anvil profile file.anv [--test NAME]   calls and steps per function
+anvil profile file.anv [--test NAME] [--input FILE] [-- ARGS...]
+                                       calls and steps per function
 anvil outline file.anv                 items and signatures, without reading the whole file
 anvil type-at file.anv LINE COL        type and declaration at a position
 anvil refs    file.anv NAME            declaration and uses of NAME (fn, type, unit,
@@ -594,7 +641,9 @@ anvil watch [--native] [--runs N]           verify, and again after every change
 ```
 
 A **golden** (`golden/<file>.out`) is a program's approved output: its exit code, its panic
-message if any, and every byte it printed. `golden check --native` also builds each program and
+message if any, and every byte it printed. A program that reads arguments or stdin is given them
+by `golden/<file>.in`, written by hand: a line `arg: VALUE` per argument, then `---`, then the
+stdin byte for byte. Without one, it runs with neither. `golden check --native` also builds each program and
 requires the executable to match and to free every object. Only `golden approve` writes one,
 after the output has been read. The **record** (`anvil_record.db`, not checked in) keeps
 milestones, decisions, and every problem `verify` finds, with when it was first seen and when it

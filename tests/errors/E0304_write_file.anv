@@ -1,0 +1,8 @@
+// expect: E0304
+// resolve: mechanical
+fn main() -> i64 uses fs {
+    match write_file("notes.txt", "hello") {
+        Ok(value: _) => { return 0; }
+        Err(error: _) => { return 1; }
+    }
+}

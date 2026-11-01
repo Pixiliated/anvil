@@ -35,10 +35,11 @@ fn every_cli_command_has_an_mcp_tool_and_back() {
             .map(|a| a.iter().map(|v| v.as_str().unwrap().to_string()).collect())
             .unwrap_or_default();
 
-        let mut want: BTreeSet<String> = c.positionals.iter().map(|p| snake(p.trim_end_matches('?'))).collect();
+        // `args*` is the program's arguments after `--` in the CLI, a list parameter over MCP.
+        let mut want: BTreeSet<String> = c.positionals.iter().map(|p| snake(p.trim_end_matches(['?', '*']))).collect();
         want.extend(c.options.iter().filter(|(n, _, _)| !CLI_ONLY_OPTIONS.contains(n)).map(|(n, _, _)| snake(n)));
         let want_required: BTreeSet<String> =
-            c.positionals.iter().filter(|p| !p.ends_with('?')).map(|p| snake(p)).collect();
+            c.positionals.iter().filter(|p| !p.ends_with(['?', '*'])).map(|p| snake(p)).collect();
         if props != want {
             problems.push(format!("{}: tool parameters {props:?}, CLI arguments {want:?}", c.name));
         }

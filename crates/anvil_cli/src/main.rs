@@ -3,7 +3,7 @@
 //! one summary line), `--json` for tools. Exit codes: 0 success, 1 compile errors or failures,
 //! 2 usage errors; `run` passes through the program's own exit code, 101 on panic.
 
-use anvil_ops::{Command, Report, COMMANDS};
+use anvil_ops::{Command, ProgramInput, Report, COMMANDS};
 use std::collections::HashMap;
 use std::io::Write;
 use std::path::Path;
@@ -13,7 +13,7 @@ fn usage() -> String {
     let mut s = String::from("usage: anvil <command> [args] [--json]\n\n");
     for c in COMMANDS {
         let mut line = format!("  {}", c.name);
-        for p in c.positionals {
+        for p in c.positionals.iter().filter(|p| !p.ends_with('*')) {
             match p.strip_suffix('?') {
                 Some(opt) => line.push_str(&format!(" [{}]", opt.to_uppercase())),
                 None => line.push_str(&format!(" <{}>", p.to_uppercase())),
@@ -26,6 +26,9 @@ fn usage() -> String {
                 line.push_str(&format!(" [--{name} {value}]"));
             }
         }
+        if let Some(rest) = c.positionals.iter().find_map(|p| p.strip_suffix('*')) {
+            line.push_str(&format!(" [-- {}...]", rest.to_uppercase()));
+        }
         s.push_str(&format!("{line:<48} {}\n", c.summary));
     }
     s.push_str("\n  -o is short for --out. --json prints the result as JSON (for run, on stderr).");
@@ -36,6 +39,8 @@ fn usage() -> String {
 struct Parsed {
     command: &'static Command,
     positionals: Vec<String>,
+    /// Everything after `--`: the program's own arguments.
+    rest: Vec<String>,
     options: HashMap<&'static str, Option<String>>,
     json: bool,
 }
@@ -61,9 +66,15 @@ fn parse_args() -> Result<Parsed, String> {
         },
     };
     let name = command.name;
-    let mut p = Parsed { command, positionals: Vec::new(), options: HashMap::new(), json: false };
+    let mut p = Parsed { command, positionals: Vec::new(), rest: Vec::new(), options: HashMap::new(), json: false };
+    let takes_rest = command.positionals.iter().any(|p| p.ends_with('*'));
     while let Some(arg) = it.next() {
         let long = match arg.as_str() {
+            "--" if takes_rest => {
+                p.rest = it.by_ref().collect();
+                break;
+            }
+            "--" => return Err(format!("`{name}` takes no program arguments after `--`")),
             "--json" => {
                 p.json = true;
                 continue;
@@ -86,12 +97,14 @@ fn parse_args() -> Result<Parsed, String> {
         let v = if value.is_empty() { None } else { Some(it.next().ok_or(format!("--{opt} needs a value"))?) };
         p.options.insert(opt, v);
     }
-    let required = command.positionals.iter().filter(|p| !p.ends_with('?')).count();
-    if p.positionals.len() < required || p.positionals.len() > command.positionals.len() {
-        let names: Vec<&str> = command.positionals.iter().map(|p| p.trim_end_matches('?')).collect();
+    let named: Vec<&str> = command.positionals.iter().copied().filter(|p| !p.ends_with('*')).collect();
+    let required = named.iter().filter(|p| !p.ends_with('?')).count();
+    if p.positionals.len() < required || p.positionals.len() > named.len() {
+        let names: Vec<&str> = named.iter().map(|p| p.trim_end_matches('?')).collect();
+        let after = if takes_rest { "; the program's own arguments go after `--`" } else { "" };
         return Err(format!(
-            "`{name}` takes {} ({}), found {} argument(s)",
-            command.positionals.len(),
+            "`{name}` takes {} ({}), found {} argument(s){after}",
+            named.len(),
             names.join(", "),
             p.positionals.len()
         ));
@@ -116,9 +129,11 @@ fn dispatch(p: &Parsed) -> Result<Report, String> {
     let count = |name: &str| -> Result<Option<u64>, String> {
         text(name).map(|v| number::<u64>(&format!("--{name}"), v)).transpose()
     };
+    let input =
+        |own_stdin: bool| ProgramInput { args: p.rest.clone(), file: text("input").map(String::from), own_stdin };
     Ok(match p.command.name {
         "check" => anvil_ops::check(root, file),
-        "run" => anvil_ops::run(root, file, steps, &mut std::io::stdout()),
+        "run" => anvil_ops::run(root, file, steps, &input(true), &mut std::io::stdout()),
         "build" => {
             let out = p.options.get("out").and_then(|v| v.as_deref());
             anvil_ops::build(root, file, out, p.options.contains_key("asm"))
@@ -135,8 +150,8 @@ fn dispatch(p: &Parsed) -> Result<Report, String> {
         "lsp" => anvil_ops::lsp(&mut std::io::stdin().lock(), &mut std::io::stdout()),
         "explain" => anvil_ops::explain(pos(0)),
         "spec" => anvil_ops::spec(),
-        "trace" => anvil_ops::trace(root, file, text("test"), text("only"), count("limit")?, steps),
-        "profile" => anvil_ops::profile(root, file, text("test"), steps),
+        "trace" => anvil_ops::trace(root, file, text("test"), text("only"), count("limit")?, steps, &input(false)),
+        "profile" => anvil_ops::profile(root, file, text("test"), steps, &input(false)),
         "fuzz" => anvil_ops::fuzz(root, count("seed")?, count("count")?),
         "list" => anvil_ops::list(root),
         "verify" => anvil_ops::verify(root, native, steps),
