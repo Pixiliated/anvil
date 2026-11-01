@@ -6,23 +6,27 @@
 mod fuzz;
 pub mod golden;
 mod inspect;
+mod lsp;
 mod proj;
 pub mod project;
+mod query;
 mod testing;
 
 pub use fuzz::{fuzz, program_for};
 pub use inspect::{profile, trace, TRACE_LIMIT};
+pub use lsp::lsp;
 pub use proj::{
     fmt, golden_approve, golden_check, list, record_decide, record_export, record_import_roadmap, record_query,
     record_status, review, verify, watch,
 };
+pub use query::{complete_in, refs_in, type_at_in};
 pub use testing::{test, PROPERTY_CASES};
 
-use anvil_front::check::{Analysis, Def};
 use anvil_front::diag::{self, Diagnostic, FixKind};
 use anvil_front::ir::{Program, PANIC_EXIT_CODE};
 use anvil_front::span::{SourceFile, Span};
 use serde_json::{json, Value};
+use std::collections::HashMap;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
@@ -40,8 +44,10 @@ pub struct Command {
 pub const CLI_ONLY_OPTIONS: &[&str] = &["json"];
 
 /// Commands with no MCP tool, and why.
-pub const CLI_ONLY_COMMANDS: &[(&str, &str)] =
-    &[("watch", "it runs until stopped; an MCP client calls verify after each change instead")];
+pub const CLI_ONLY_COMMANDS: &[(&str, &str)] = &[
+    ("watch", "it runs until stopped; an MCP client calls verify after each change instead"),
+    ("lsp", "it is a server for editors; an MCP client has the same answers as tools"),
+];
 
 pub const COMMANDS: &[Command] = &[
     Command { name: "check", positionals: &["file"], options: &[], summary: "type-check a file" },
@@ -99,7 +105,14 @@ pub const COMMANDS: &[Command] = &[
         name: "refs",
         positionals: &["file", "name"],
         options: &[],
-        summary: "where a function, type, field (Type.field), variant (Enum.Variant) or unit is declared and used",
+        summary: "where a function, type, field (Type.field), variant (Enum.Variant) or unit is declared and used; \
+                  LINE:COL instead of a name for whatever is declared or used there, locals too",
+    },
+    Command {
+        name: "complete",
+        positionals: &["file", "line", "col"],
+        options: &[],
+        summary: "what can be written at a position: fields and methods after `.`, else every name in scope",
     },
     Command {
         name: "explain",
@@ -196,6 +209,12 @@ pub const COMMANDS: &[Command] = &[
         options: &[NATIVE, STEPS, ("runs", "N", "stop after N verify passes")],
         summary: "verify, and again after every change (CLI only)",
     },
+    Command {
+        name: "lsp",
+        positionals: &[],
+        options: &[],
+        summary: "a language server on stdio for editors, answering from these commands (CLI only)",
+    },
 ];
 
 const STEPS: (&str, &str, &str) = ("max-steps", "N", "stop each run after N statements and loop iterations");
@@ -242,10 +261,40 @@ impl Report {
 
 /// A source file named as the user gave it (diagnostics cite this name), read relative to `root`.
 pub fn load(root: &Path, file: &str) -> Result<SourceFile, Report> {
-    let path = root.join(file);
-    match std::fs::read_to_string(&path) {
-        Ok(text) => Ok(SourceFile::new(file.replace('\\', "/"), text)),
-        Err(e) => Err(Report::usage(format!("cannot read {file}: {e}"))),
+    Files::disk(root).load(file)
+}
+
+/// Where source files come from: the disk under `root`, except files an editor has open, whose
+/// unsaved text is read instead. `open` is keyed by file name relative to `root`, with `/`.
+#[derive(Clone, Copy)]
+pub struct Files<'a> {
+    pub root: &'a Path,
+    pub open: Option<&'a HashMap<String, String>>,
+}
+
+impl<'a> Files<'a> {
+    pub fn disk(root: &'a Path) -> Files<'a> {
+        Files { root, open: None }
+    }
+
+    pub fn read(&self, name: &str) -> Result<String, String> {
+        let name = name.replace('\\', "/");
+        if let Some(text) = self.open.and_then(|o| o.get(&name)) {
+            return Ok(text.clone());
+        }
+        std::fs::read_to_string(self.root.join(&name)).map_err(|e| e.to_string())
+    }
+
+    pub fn load(&self, file: &str) -> Result<SourceFile, Report> {
+        match self.read(file) {
+            Ok(text) => Ok(SourceFile::new(file.replace('\\', "/"), text)),
+            Err(e) => Err(Report::usage(format!("cannot read {file}: {e}"))),
+        }
+    }
+
+    /// Reads a program's modules, whose names are relative to `root` like the root file's.
+    pub fn loader(self) -> impl Fn(&str) -> Result<String, String> + 'a {
+        move |name: &str| self.read(name)
     }
 }
 
@@ -256,7 +305,7 @@ fn pos(src: &SourceFile, offset: usize) -> Value {
 
 /// Reads a program's modules from under `root`, where every file name is relative to it.
 pub(crate) fn loader(root: &Path) -> impl Fn(&str) -> Result<String, String> + '_ {
-    move |name: &str| std::fs::read_to_string(root.join(name)).map_err(|e| e.to_string())
+    Files::disk(root).loader()
 }
 
 /// Compile errors as a failed report; `sources` are the program's files, which each
@@ -300,8 +349,15 @@ macro_rules! try_report {
 }
 
 pub fn check(root: &Path, file: &str) -> Report {
-    try_report!(compile(root, file));
-    Report::ok(json!({ "ok": true, "diagnostics": [] }), String::new())
+    check_in(Files::disk(root), file)
+}
+
+pub fn check_in(files: Files, file: &str) -> Report {
+    let src = try_report!(files.load(file));
+    match anvil_front::compile_with(&src, &files.loader()) {
+        (_, Ok(_)) => Report::ok(json!({ "ok": true, "diagnostics": [] }), String::new()),
+        (sources, Err(d)) => diagnostics(&sources, &d),
+    }
 }
 
 /// Interprets main, writing its output to `out` as it runs. The report's JSON holds the exit
@@ -425,8 +481,12 @@ fn one_line(s: &str) -> String {
 }
 
 pub fn outline(root: &Path, file: &str) -> Report {
+    outline_in(Files::disk(root), file)
+}
+
+pub fn outline_in(files: Files, file: &str) -> Report {
     use anvil_front::ast::Item;
-    let src = try_report!(load(root, file));
+    let src = try_report!(files.load(file));
     let ast = match anvil_front::parse(&src) {
         Ok(f) => f,
         Err(d) => return diagnostics(std::slice::from_ref(&src), &d),
@@ -485,99 +545,26 @@ pub fn outline(root: &Path, file: &str) -> Report {
     Report::ok(json!({ "ok": true, "file": src.name, "items": items }), human)
 }
 
-/// The innermost entry whose span contains `offset` (ends inclusive, so the end of a name counts).
-fn innermost<T>(entries: impl Iterator<Item = (Span, T)>, offset: usize) -> Option<(Span, T)> {
-    entries.filter(|(s, _)| s.start <= offset && offset <= s.end).min_by_key(|(s, _)| s.end - s.start)
-}
-
-fn def_json(src: &SourceFile, d: &Def) -> Value {
-    json!({ "name": d.name, "kind": d.kind, "detail": d.detail, "defined_at": pos(src, d.span.start) })
-}
-
-/// Checker facts, or the syntax error that prevented them.
-fn analyze(root: &Path, file: &str) -> Result<(SourceFile, Analysis), Report> {
-    let src = load(root, file)?;
-    let (sources, a) = anvil_front::analyze_with(&src, &loader(root));
-    if a.facts.defs.is_empty() && !a.diags.is_empty() {
-        // A syntax error stops before checking, so there is nothing to answer from.
-        return Err(diagnostics(&sources, &a.diags));
-    }
-    Ok((src, a))
-}
-
 pub fn type_at(root: &Path, file: &str, line: usize, col: usize) -> Report {
-    let (src, a) = try_report!(analyze(root, file));
-    let Some(offset) = src.offset_of(line, col) else {
-        return Report::usage(format!("{file} has no line {line}, column {col}"));
-    };
-    let f = &a.facts;
-    let expr = innermost(f.exprs.iter().map(|(s, t)| (*s, t.clone())), offset);
-    // A name at the position: a declaration itself, or a use pointing at one.
-    let named = innermost(f.defs.iter().map(|d| (d.span, d.span)), offset)
-        .or_else(|| innermost(f.uses.iter().map(|(u, d)| (*u, *d)), offset));
-    let def = named.and_then(|(_, def_span)| f.defs.iter().find(|d| d.span == def_span));
-    if expr.is_none() && def.is_none() {
-        let m = format!("no expression or name at {line}:{col}");
-        return Report::failed(json!({ "ok": false, "error": m }), format!("error: {m}\n"), EXIT_FAILED);
-    }
-    let mut v = json!({ "ok": true, "line": line, "col": col, "errors_in_file": a.diags.len() });
-    let mut human = String::new();
-    if let Some((span, ty)) = &expr {
-        v["text"] = json!(src.slice(*span));
-        v["type"] = json!(ty);
-        human.push_str(&format!("{}: {ty}\n", src.slice(*span)));
-    }
-    if let Some(d) = def {
-        v["declaration"] = def_json(&src, d);
-        let (l, c) = src.line_col(d.span.start);
-        human.push_str(&format!("{} {} declared at {}:{l}:{c}: {}\n", d.kind, d.name, src.name, d.detail));
-    }
-    if !a.diags.is_empty() {
-        human.push_str(&format!("(the file has {} error(s); answers may be incomplete)\n", a.diags.len()));
-    }
-    Report::ok(v, human)
+    type_at_in(Files::disk(root), file, line, col)
 }
 
 pub fn refs(root: &Path, file: &str, name: &str) -> Report {
-    let (src, a) = try_report!(analyze(root, file));
-    let f = &a.facts;
-    let defs: Vec<&Def> = f.defs.iter().filter(|d| d.name == name && !matches!(d.kind, "param" | "local")).collect();
-    if defs.is_empty() {
-        let mut names: Vec<&str> =
-            f.defs.iter().filter(|d| !matches!(d.kind, "param" | "local")).map(|d| d.name.as_str()).collect();
-        names.sort();
-        names.dedup();
-        let owned: Vec<String> = names.iter().map(|n| n.to_string()).collect();
-        let suggestion = anvil_front::check::closest(name, owned.iter());
-        let mut m = format!("nothing called `{name}` is declared in {file}");
-        if let Some(s) = &suggestion {
-            m.push_str(&format!("; did you mean `{s}`?"));
-        }
-        let json = json!({ "ok": false, "error": m, "suggestion": suggestion, "declared": names });
-        return Report::failed(json, format!("error: {m}\ndeclared: {}\n", names.join(", ")), EXIT_FAILED);
+    refs_in(Files::disk(root), file, name)
+}
+
+pub fn complete(root: &Path, file: &str, line: usize, col: usize) -> Report {
+    complete_in(Files::disk(root), file, line, col)
+}
+
+/// The file in canonical layout, without writing it: `{ok, text}`, or the error that stops
+/// formatting.
+pub fn formatted_in(files: Files, file: &str) -> Report {
+    let src = try_report!(files.load(file));
+    match anvil_front::fmt::format(&src) {
+        Ok(text) => Report::ok(json!({ "ok": true, "changed": text != src.text, "text": text }), String::new()),
+        Err(d) => diagnostics(std::slice::from_ref(&src), &[d]),
     }
-    let mut out = Vec::new();
-    let mut human = String::new();
-    for d in defs {
-        let mut uses: Vec<Span> = f.uses.iter().filter(|(_, def)| *def == d.span).map(|(u, _)| *u).collect();
-        uses.sort_by_key(|s| s.start);
-        uses.dedup();
-        let (l, c) = src.line_col(d.span.start);
-        human.push_str(&format!("{} {} declared at {}:{l}:{c}: {}\n", d.kind, d.name, src.name, d.detail));
-        let list: Vec<_> = uses
-            .iter()
-            .map(|u| {
-                let (ul, uc) = src.line_col(u.start);
-                human.push_str(&format!("  {}:{ul}:{uc}  {}\n", src.name, src.line_text(ul).trim()));
-                json!({ "line": ul, "col": uc, "source": src.line_text(ul).trim() })
-            })
-            .collect();
-        human.push_str(&format!("  {} use(s)\n", list.len()));
-        let mut v = def_json(&src, d);
-        v["uses"] = json!(list);
-        out.push(v);
-    }
-    Report::ok(json!({ "ok": true, "declarations": out, "errors_in_file": a.diags.len() }), human)
 }
 
 /// One error code or lint, or every code followed by every lint.

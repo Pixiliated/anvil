@@ -155,7 +155,13 @@ pub struct Token {
     pub span: Span,
 }
 
-fn keyword(s: &str) -> Option<Tok> {
+/// Every keyword, for completion (a test checks each is one).
+pub const KEYWORDS: &[&str] = &[
+    "allow", "import", "pub", "fn", "enum", "match", "let", "var", "if", "else", "while", "for", "in", "return",
+    "break", "continue", "struct", "unit", "test", "requires", "ensures", "uses", "true", "false", "result",
+];
+
+pub(crate) fn keyword(s: &str) -> Option<Tok> {
     Some(match s {
         "allow" => Tok::Allow,
         "import" => Tok::Import,

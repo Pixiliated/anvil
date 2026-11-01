@@ -81,7 +81,7 @@ in full (`anvil spec` prints it).
 
 ## Status
 
-v0.11: programs of one or more files (modules with explicit imports and `pub`), generic
+v0.12: programs of one or more files (modules with explicit imports and `pub`), generic
 functions, structs and enums with built-in constraints, i64, f64 with units, bool, strings with interpolation,
 search and split, growable arrays and slices, maps in key order, structs, enums with
 exhaustive `match`, structural `==`, `Option` and `Result` with `?`,
@@ -94,8 +94,8 @@ contracts, effects and tests. There are two backends:
 The test suite runs every program through both and requires identical stdout, panic messages
 and exit codes, on a corpus, on every test (`anvil test --native`) and on random programs
 (`anvil fuzz`). Property tests (`test "name" for all xs: [i64] { ... }`) run on seeded,
-generated inputs and shrink failures. Other platforms and a language server are on the
-[roadmap](docs/ROADMAP.md).
+generated inputs and shrink failures. Editors get a language server (`anvil lsp`) that answers
+from the same commands. More platforms and effects are on the [roadmap](docs/ROADMAP.md).
 
 ## Using it
 
@@ -127,7 +127,9 @@ target/release/anvil build examples/orders.anv -o orders.exe
 | `anvil fix f.anv` | apply every mechanical fix until none is left |
 | `anvil outline f.anv` | list items and signatures |
 | `anvil type-at f.anv LINE COL` | type and declaration at a position |
-| `anvil refs f.anv NAME` | where a function, type, field, variant or unit is declared and used |
+| `anvil refs f.anv NAME` | where a function, type, field, variant or unit is declared and used (or `LINE:COL`) |
+| `anvil complete f.anv LINE COL` | what can be written at a position: fields and methods after `.`, names in scope elsewhere |
+| `anvil lsp` | a language server on stdio, for editors |
 | `anvil trace f.anv [--test NAME] [--only F,G]` | a run as a timeline: calls with their arguments, returns, prints |
 | `anvil profile f.anv [--test NAME]` | calls and steps per function |
 | `anvil explain [CODE]` | explain an error code or a lint |
@@ -159,9 +161,22 @@ leaves its actual output and a diff in `out/golden/`.
 This repository is itself an Anvil project: `anvil golden check --native` runs its whole parity
 corpus.
 
+## In an editor
+
+`anvil lsp` is a language server on stdio: errors as you type (with their fixes as quick fixes),
+hover types, go to definition (into imported modules), references, completion, formatting and
+an outline. Point any LSP client at the command `anvil lsp` for `*.anv` files; in Neovim:
+
+```lua
+vim.lsp.config("anvil", { cmd = { "anvil", "lsp" }, filetypes = { "anvil" }, root_markers = { "anvil.toml" } })
+vim.lsp.enable("anvil")
+```
+
+Its answers are the commands' answers, so an editor, the CLI and an agent see the same thing.
+
 ## For agents: the MCP server
 
-`anvil-mcp` serves every command above except `watch` as an MCP tool over stdio, with the same
+`anvil-mcp` serves every command above except `watch` and `lsp` as an MCP tool over stdio, with the same
 arguments and the same JSON (a test keeps the two in step). A failing check is a tool error. To add it to
 Claude Code:
 
@@ -170,7 +185,7 @@ claude mcp add anvil -- target/release/anvil-mcp --root .
 ```
 
 An agent starts with `spec` (the whole language), writes a file, then loops on `check` and
-`fix`; `outline`, `type_at` and `refs` let it navigate a file without reading all of it, and
+`fix`; `outline`, `type_at`, `refs` and `complete` let it navigate a file without reading all of it, and
 `trace` and `profile` show what a run did, counted in steps so the answer never varies.
 
 ## Layout

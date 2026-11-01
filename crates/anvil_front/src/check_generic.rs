@@ -8,7 +8,7 @@
 //! the body for those types, quietly; an error there (the constraints let something through) is
 //! reported in the generic's body with a note naming the instance and where it was used.
 
-use super::{Body, Checker, FuncSig};
+use super::{Body, Checker, Def, FuncSig, Loc};
 use crate::ast;
 use crate::diag::{Diagnostic, FixKind};
 use crate::ir::*;
@@ -89,8 +89,8 @@ pub(super) struct Scope {
     pub struct_index: HashMap<String, StructId>,
     pub enum_index: HashMap<String, EnumId>,
     pub units: HashMap<String, crate::units::Unit>,
-    pub type_spans: HashMap<String, Span>,
-    pub unit_spans: HashMap<String, Span>,
+    pub type_spans: HashMap<String, Loc>,
+    pub unit_spans: HashMap<String, Loc>,
     pub generic_fns: HashMap<String, usize>,
     pub generic_types: HashMap<String, usize>,
     pub imported: HashMap<String, (Span, usize)>,
@@ -237,6 +237,7 @@ impl<'a> Checker<'a> {
             }
         }
         self.generics[g].shape = Shape::Ready;
+        self.generic_member_defs(g);
         for (id, args) in std::mem::take(&mut self.generics[g].unfilled) {
             self.fill(g, id, &args);
         }
@@ -365,8 +366,68 @@ impl<'a> Checker<'a> {
         }
     }
 
+    /// Where generic `g` is declared.
+    pub(super) fn generic_loc(&self, g: usize) -> Loc {
+        let span = match self.generics[g].kind {
+            GenericKind::Fn(d) => d.name.span,
+            GenericKind::Struct(d) => d.name.span,
+            GenericKind::Enum(d) => d.name.span,
+        };
+        Loc { file: self.generics[g].module, span }
+    }
+
+    /// Facts for the fields and variants of generic type `g`, once its shape is known. Shapes
+    /// are resolved once, possibly while another module is checked, so these are recorded here
+    /// with the generic's own file.
+    fn generic_member_defs(&mut self, g: usize) {
+        let file = self.generics[g].module;
+        let name = self.generics[g].name.clone();
+        let mut defs = Vec::new();
+        match self.generics[g].kind {
+            GenericKind::Fn(_) => {}
+            GenericKind::Struct(d) => {
+                for ((f, _), (_, ty)) in d.fields.iter().zip(&self.generics[g].fields) {
+                    defs.push((f.span, format!("{name}.{}", f.name), "field", self.show(ty)));
+                }
+            }
+            GenericKind::Enum(d) => {
+                for (v, def) in d.variants.iter().zip(&self.generics[g].variants) {
+                    let vname = format!("{name}.{}", v.name.name);
+                    let shown: Vec<String> = def.fields.iter().map(|(n, t)| format!("{n}: {}", self.show(t))).collect();
+                    let text =
+                        if shown.is_empty() { def.name.clone() } else { format!("{}({})", def.name, shown.join(", ")) };
+                    defs.push((v.name.span, vname.clone(), "variant", text));
+                    for ((f, _), (_, ty)) in v.fields.iter().zip(&def.fields) {
+                        defs.push((f.span, format!("{vname}.{}", f.name), "field", self.show(ty)));
+                    }
+                }
+            }
+        }
+        for (span, name, kind, detail) in defs {
+            self.facts.defs.push(Def { file, span, name, kind, detail, scope: None });
+        }
+    }
+
     /// Gives instance `id` of generic type `g` its fields or variants for `args`.
     fn fill(&mut self, g: usize, id: usize, args: &[Ty]) {
+        // Uses of an instance's members lead to the generic's declaration of them.
+        let file = self.generics[g].module;
+        match self.generics[g].kind {
+            GenericKind::Fn(_) => {}
+            GenericKind::Struct(d) => {
+                for (i, (f, _)) in d.fields.iter().enumerate() {
+                    self.field_spans.insert((id, i), Loc { file, span: f.span });
+                }
+            }
+            GenericKind::Enum(d) => {
+                for (vi, v) in d.variants.iter().enumerate() {
+                    self.variant_spans.insert((id, vi), Loc { file, span: v.name.span });
+                    for (fi, (f, _)) in v.fields.iter().enumerate() {
+                        self.variant_field_spans.insert((id, vi, fi), Loc { file, span: f.span });
+                    }
+                }
+            }
+        }
         let map = self.binding(g, args);
         self.depth += 1;
         match self.generics[g].kind {
@@ -552,7 +613,7 @@ impl<'a> Checker<'a> {
             _ => unreachable!(),
         };
         let local = self.generics[g].module == self.module;
-        self.note_use(callee.span, local.then_some(decl_span));
+        self.note_use(callee.span, Some(self.generic_loc(g)));
         if uses_io {
             self.note_io(b, callee.span, &format!("calling `{name}`"));
         }

@@ -28,7 +28,8 @@ items can be imported; errors in a module carry that module's file. Generics: \
 layout (E0110 otherwise; its fix is the formatted file); `fmt` formats a file or the whole project, \
 and keeps comments. `outline` lists a file's items \
 and signatures without reading it all; `type_at` gives the type and declaration at a line and \
-column; `refs` finds where a function, type, Type.field, Enum.Variant or unit is declared and used. \
+column; `refs` finds where a function, type, Type.field, Enum.Variant or unit (or, given LINE:COL, \
+whatever is there) is declared and used; `complete` lists what can be written at a position. \
 `run` interprets main and returns its stdout; `test` runs the test blocks; `build` makes a native \
 executable. `trace` shows a run as a timeline of calls with their arguments, returns and prints \
 (narrow it with `only`); `profile` counts calls and steps per function (steps, not time, so the \
@@ -39,7 +40,7 @@ output), `review` (writes out/review.md for a person to sign off) and the record
 (start here in a project: milestones, decisions, findings with history, runs), `record_decide`, \
 `record_status`, `record_import_roadmap`, `record_export`. `verify` also reports functions that no \
 test and no golden-checked main runs (the `untested` lint; `allow untested \"why\"` before a fn \
-switches it off). Every CLI command except `watch` is a tool with the same arguments (the CLI's \
+switches it off). Every CLI command except `watch` and `lsp` is a tool with the same arguments (the CLI's \
 `type-at` is `type_at`, `golden check` is `golden_check`). Failing checks come back as tool errors.";
 
 /// Tool argument structs reject unknown fields, so a misspelt argument is an error, not ignored.
@@ -86,7 +87,8 @@ pub struct TypeAtArgs {
 pub struct RefsArgs {
     /// Path of the .anv file, relative to the server's root or absolute.
     pub file: String,
-    /// A function, type, unit, `Type.field`, `Enum.Variant` or `Enum.Variant.field`.
+    /// A function, type, unit, `Type.field`, `Enum.Variant` or `Enum.Variant.field`; or
+    /// `LINE:COL` for whatever is declared or used there, parameters and locals included.
     pub name: String,
 }
 
@@ -334,6 +336,15 @@ impl AnvilServer {
         is declared and every place it is used, with the source line of each.")]
     async fn refs(&self, Parameters(a): Parameters<RefsArgs>) -> Result<CallToolResult, ErrorData> {
         self.op(move |root| anvil_ops::refs(root, &a.file, &a.name)).await
+    }
+
+    #[tool(description = "What can be written at a line and column (the column the next \
+        character would take): after `.`, the fields and methods of the receiver's type or the \
+        variants of the enum named; elsewhere every local, parameter and item in scope there, \
+        the built-ins, the types and the keywords. Only candidates starting with the name \
+        already typed before the column.")]
+    async fn complete(&self, Parameters(a): Parameters<TypeAtArgs>) -> Result<CallToolResult, ErrorData> {
+        self.op(move |root| anvil_ops::complete(root, &a.file, a.line, a.col)).await
     }
 
     #[tool(description = "Run main (or one test) in the interpreter and return a timeline: each call with \

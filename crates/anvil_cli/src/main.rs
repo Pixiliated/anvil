@@ -129,6 +129,10 @@ fn dispatch(p: &Parsed) -> Result<Report, String> {
         "outline" => anvil_ops::outline(root, file),
         "type-at" => anvil_ops::type_at(root, file, number("line", pos(1).unwrap())?, number("col", pos(2).unwrap())?),
         "refs" => anvil_ops::refs(root, file, pos(1).unwrap()),
+        "complete" => {
+            anvil_ops::complete(root, file, number("line", pos(1).unwrap())?, number("col", pos(2).unwrap())?)
+        }
+        "lsp" => anvil_ops::lsp(&mut std::io::stdin().lock(), &mut std::io::stdout()),
         "explain" => anvil_ops::explain(pos(0)),
         "spec" => anvil_ops::spec(),
         "trace" => anvil_ops::trace(root, file, text("test"), text("only"), count("limit")?, steps),

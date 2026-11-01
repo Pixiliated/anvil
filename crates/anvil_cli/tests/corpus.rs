@@ -307,6 +307,123 @@ fn refs_list_every_use() {
 }
 
 #[test]
+fn queries_follow_imports_into_modules() {
+    let f = "tests/programs/modules.anv";
+    let call = json_of(&anvil(&["type-at", f, "17", &col_of(f, 17, "area("), "--json"]));
+    assert_eq!(call["declaration"]["file"], "tests/programs/lib/geometry.anv", "{call}");
+    assert_eq!(call["declaration"]["detail"], "pub fn area(s: Shape) -> f64[m^2]", "{call}");
+    // An imported name: declared in the module, used here (its import counts).
+    let area = json_of(&anvil(&["refs", f, "area", "--json"]));
+    let lines: Vec<i64> =
+        area["declarations"][0]["uses"].as_array().unwrap().iter().map(|u| u["line"].as_i64().unwrap()).collect();
+    assert_eq!(lines, vec![2, 17], "{area}");
+    let variant = json_of(&anvil(&["type-at", f, "15", &col_of(f, 15, "Circle"), "--json"]));
+    assert_eq!(variant["declaration"]["name"], "Shape.Circle", "{variant}");
+    assert_eq!(variant["declaration"]["file"], "tests/programs/lib/geometry.anv", "{variant}");
+    // By position: a loop variable, which a name alone could not pick out.
+    let sh = json_of(&anvil(&["refs", f, &format!("16:{}", col_of(f, 16, "sh")), "--json"]));
+    assert_eq!(sh["declarations"][0]["kind"], "local", "{sh}");
+    assert_eq!(sh["declarations"][0]["uses"].as_array().unwrap().len(), 4, "{sh}");
+    // Generic types lead to their declaration too.
+    let g = "tests/programs/generics.anv";
+    let text = std::fs::read_to_string(root().join(g)).unwrap();
+    let line = text.lines().position(|l| l.contains("Pair {") && !l.starts_with("struct")).unwrap() + 1;
+    let pair = json_of(&anvil(&["type-at", g, &line.to_string(), &col_of(g, line, "Pair {"), "--json"]));
+    assert_eq!(pair["declaration"]["kind"], "type", "{pair}");
+}
+
+const SHAPES: &str = "struct Point {
+    x: i64,
+    y: i64,
+}
+
+enum Dir {
+    Up,
+    Down,
+}
+
+fn f(p: Point, names: [str], ages: Map[str, i64]) -> i64 {
+    let total: i64 = names.len() + ages.len();
+    return p.
+}
+
+fn g() -> Dir {
+    return Dir.
+}
+
+fn h(s: str) -> bool {
+    return s.st
+}
+";
+
+#[test]
+fn complete_lists_what_fits_at_a_position() {
+    let p = Scratch::new("complete");
+    p.write("src/shapes.anv", SHAPES);
+    let labels = |v: &serde_json::Value| -> Vec<String> {
+        v["items"].as_array().unwrap().iter().map(|i| i["label"].as_str().unwrap().to_string()).collect()
+    };
+    // Three items are half-written; each completes, the others left out.
+    let fields = p.json(&["complete", "src/shapes.anv", "13", "14"]);
+    assert_eq!(fields["context"], "member", "{fields}");
+    assert_eq!(fields["receiver_type"], "Point", "{fields}");
+    assert_eq!(labels(&fields), ["x", "y"], "{fields}");
+    let variants = p.json(&["complete", "src/shapes.anv", "17", "16"]);
+    assert_eq!(variants["context"], "variant", "{variants}");
+    assert_eq!(labels(&variants), ["Down", "Up"], "{variants}");
+    let methods = p.json(&["complete", "src/shapes.anv", "21", "16"]);
+    assert_eq!(methods["prefix"], "st", "{methods}");
+    assert_eq!(labels(&methods), ["starts_with"], "{methods}");
+    // Elsewhere: names in scope first (the local only after its declaration), keywords last.
+    p.write("src/names.anv", &SHAPES.replace("return p.", "return total;"));
+    let names = p.json(&["complete", "src/names.anv", "13", "5"]);
+    let all = labels(&names);
+    assert_eq!(&all[..4], &["total", "ages", "names", "p"], "{names}");
+    assert!(all.contains(&"Point".to_string()) && all.contains(&"print".to_string()), "{names}");
+    assert_eq!(all.last().unwrap(), "while", "{names}");
+    // The two broken items left out, and `p` now unused (E0340).
+    assert_eq!(names["errors_in_file"], 3, "{names}");
+    let before = p.json(&["complete", "src/names.anv", "12", "5"]);
+    assert!(!labels(&before).contains(&"total".to_string()), "{before}");
+    // A typed prefix narrows; a map's methods have its types filled in.
+    p.write("src/maps.anv", "fn f(ages: Map[str, [i64]]) {\n    ages.\n}\n");
+    let map = p.json(&["complete", "src/maps.anv", "2", "10"]);
+    let get = map["items"].as_array().unwrap().iter().find(|i| i["label"] == "get").unwrap().clone();
+    assert_eq!(get["detail"], "get(key: str) -> Option[[i64]]", "{map}");
+    // Where the cursor's own item does not parse, completion fails loudly.
+    p.write("src/broken.anv", "fn f(p: i64) -> i64 {\n    let x: i64 = (p +\n    return x;\n}\n");
+    let broken = p.anvil(&["complete", "src/broken.anv", "3", "5"]);
+    assert_eq!(broken.status.code(), Some(1));
+    assert!(String::from_utf8_lossy(&broken.stderr).contains("fix the syntax error first"));
+}
+
+#[test]
+fn lsp_serves_over_stdio() {
+    use std::io::{Read, Write};
+    let mut child = Command::new(env!("CARGO_BIN_EXE_anvil"))
+        .arg("lsp")
+        .current_dir(root())
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut input = child.stdin.take().unwrap();
+    for body in [
+        r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"capabilities":{}}}"#,
+        r#"{"jsonrpc":"2.0","id":2,"method":"shutdown"}"#,
+        r#"{"jsonrpc":"2.0","method":"exit"}"#,
+    ] {
+        write!(input, "Content-Length: {}\r\n\r\n{body}", body.len()).unwrap();
+    }
+    drop(input);
+    let mut out = String::new();
+    child.stdout.take().unwrap().read_to_string(&mut out).unwrap();
+    assert!(child.wait().unwrap().success(), "{out}");
+    assert!(out.contains(r#""positionEncoding":"utf-16""#), "{out}");
+    assert!(out.contains(r#""id":2,"jsonrpc":"2.0","result":null"#), "{out}");
+}
+
+#[test]
 fn outline_lists_items_without_checking() {
     let v = json_of(&anvil(&["outline", "examples/orders.anv", "--json"]));
     let items = v["items"].as_array().unwrap();

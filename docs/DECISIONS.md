@@ -188,3 +188,23 @@ Short records of choices that are not obvious from the code. Newest last.
 - **Only what ran is ticked.** Windows x64 and Linux x86-64 (in WSL) passed the whole suite,
   every golden on both backends, fuzzing and the release script. ARM64 Linux and macOS have their
   code paths and workflow jobs but have not run, so that roadmap item stays open.
+
+## M11 (v0.12)
+
+- **The language server is a face, like the CLI and MCP.** `anvil lsp` turns each request into
+  a command (`check`, `type-at`, `refs`, `complete`, `outline`, `fmt`) run on the editor's text
+  through `Files`, an overlay of open documents on the disk, so it cannot know anything the
+  commands do not. It lives in `anvil_ops` and needs only `serde_json`.
+- **`complete` is a command too**, so agents get the same candidates over MCP. It inserts a
+  placeholder name (and a `;`) at the cursor when that is what it takes to parse; the item
+  holding the cursor must otherwise parse, and an error says so.
+- **Items with syntax errors are left out, not the whole file.** Canonical layout puts every
+  item at column 1, so a broken item is blanked (offsets kept) and the rest checked; answers
+  count the items left out in `errors_in_file`.
+- **Facts follow imports.** Declarations carry their file, uses point to a file and span, and the
+  items of imported modules are kept, so definition, hover and `refs` reach into modules. Locals
+  carry their scope, so completion offers only those visible at the cursor.
+- **An expression statement that does nothing (E0392) is still checked**, for its facts only: its
+  other errors are dropped, so it reports what it did before.
+- **UTF-32 positions when offered**, since Anvil columns count characters; UTF-16 otherwise.
+  Unknown requests are errors (MethodNotFound), as a silent null would hide a missing feature.

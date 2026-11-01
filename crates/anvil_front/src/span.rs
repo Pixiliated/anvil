@@ -1,5 +1,5 @@
 /// Byte range into a source file.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Default)]
 pub struct Span {
     pub start: usize,
     pub end: usize,

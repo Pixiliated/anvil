@@ -1,4 +1,4 @@
-# Anvil language specification (v0.11)
+# Anvil language specification (v0.12)
 
 Anvil is a small, compiled, general-purpose language designed to be written mostly by AI agents
 and read by humans. Its rules aim at three things: one obvious way to write each thing, code
@@ -460,7 +460,10 @@ anvil profile file.anv [--test NAME]   calls and steps per function
 anvil outline file.anv                 items and signatures, without reading the whole file
 anvil type-at file.anv LINE COL        type and declaration at a position
 anvil refs    file.anv NAME            declaration and uses of NAME (fn, type, unit,
-                                       Type.field, Enum.Variant, Enum.Variant.field)
+                                       Type.field, Enum.Variant, Enum.Variant.field), or
+                                       of whatever is at LINE:COL (locals too)
+anvil complete file.anv LINE COL       what can be written at a position
+anvil lsp                              a language server on stdio for editors
 anvil explain [CODE]                   long explanation of an error code or a lint
 anvil spec                             print this document
 ```
@@ -472,7 +475,23 @@ where one exists, fixes. A fix is `mechanical` (safe to apply without thought) o
 was given; errors in imported modules are reported with their own file. A syntax error stops
 checking, but the parser goes on at the next item (`fn`, `struct`, `enum`, `unit`, `test`,
 `allow`), so one run reports the first syntax error of every item. `type-at` and `refs` answer even for a file with
-type errors. `--max-steps` stops a run after that many statements and loop iterations.
+type errors, and follow imports: a declaration in a module is reported with its own file.
+Where an item of the file has a syntax error, they leave that item out and answer from the rest
+(items start at column 1 in canonical layout). `complete` takes the column the next character
+would occupy: after `.` it lists the fields and methods of the receiver's type (map and array
+methods with their element types filled in) or the variants of the enum named; elsewhere every
+local and parameter in scope there, the file's items and the ones it imports, the built-ins, the
+type names and the keywords, in that order. Only names starting with what is typed before the
+column are listed. The item holding the column must parse up to it; a `.` or a name not yet
+finished is fine. `--max-steps` stops a run after that many statements and loop iterations.
+
+`anvil lsp` serves the Language Server Protocol on stdio. Each answer is the answer of a
+command, on the editor's unsaved text: diagnostics are `check` (published to the file each is
+in, imported modules included), hover and go-to-definition `type-at`, references `refs` at a
+position, completion `complete` (after `.` too), formatting `fmt`, document symbols `outline`,
+and code actions the fixes of the errors in range, mechanical ones preferred. Documents sync
+whole; positions are UTF-32 when the editor offers it, otherwise UTF-16. Requests it does not
+handle get an error, never silence.
 
 `trace` and `profile` run `main`, or one test with `--test`, in the interpreter. A trace lists
 each call with its arguments, each return value and each printed line, with the step and call

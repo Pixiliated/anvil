@@ -13,10 +13,46 @@ use generic::{Constraint, Generic, GenericKind, Pending, Scope};
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 
-const BUILTINS: &[&str] = &["print", "assert", "sqrt", "abs", "to_f64", "to_i64"];
+pub const BUILTINS: &[&str] = &["print", "assert", "sqrt", "abs", "to_f64", "to_i64"];
 /// Constructors of the built-in Option and Result enums, usable without a type prefix.
-const CONSTRUCTORS: &[&str] = &["Some", "None", "Ok", "Err"];
-const TYPE_NAMES: &[&str] = &["i64", "f64", "bool", "str", "Option", "Result", "Map"];
+pub const CONSTRUCTORS: &[&str] = &["Some", "None", "Ok", "Err"];
+pub const TYPE_NAMES: &[&str] = &["i64", "f64", "bool", "str", "Option", "Result", "Map"];
+
+/// How completion shows each built-in function and constructor (same order as BUILTINS, then
+/// CONSTRUCTORS; a test keeps them in step).
+pub const BUILTIN_SIGNATURES: &[(&str, &str)] = &[
+    ("print", "print(x) uses io: writes an i64, f64, bool or str and a newline"),
+    ("assert", "assert(cond: bool)"),
+    ("sqrt", "sqrt(x: f64) -> f64, halving the unit"),
+    ("abs", "abs(x) for i64 or f64"),
+    ("to_f64", "to_f64(i: i64) -> f64"),
+    ("to_i64", "to_i64(x: f64) -> i64, truncating"),
+    ("Some", "Some(value) -> Option[T]"),
+    ("None", "None: Option[T]"),
+    ("Ok", "Ok(value) -> Result[T, E]"),
+    ("Err", "Err(error) -> Result[T, E]"),
+];
+
+/// The methods of the built-in types: (receiver kind, name, signature). `T` is an array's
+/// element type, `K` and `V` a map's key and value types. A test calls every one.
+pub const METHODS: &[(&str, &str, &str)] = &[
+    ("str", "len", "len() -> i64"),
+    ("str", "contains", "contains(t: str) -> bool"),
+    ("str", "starts_with", "starts_with(t: str) -> bool"),
+    ("str", "ends_with", "ends_with(t: str) -> bool"),
+    ("str", "find", "find(t: str) -> Option[i64]"),
+    ("str", "split", "split(sep: str) -> [str]"),
+    ("array", "len", "len() -> i64"),
+    ("array", "push", "push(x: T)"),
+    ("array", "pop", "pop() -> T"),
+    ("map", "len", "len() -> i64"),
+    ("map", "get", "get(key: K) -> Option[V]"),
+    ("map", "has", "has(key: K) -> bool"),
+    ("map", "set", "set(key: K, value: V)"),
+    ("map", "remove", "remove(key: K)"),
+    ("map", "keys", "keys() -> [K]"),
+    ("map", "values", "values() -> [V]"),
+];
 const INDENT: &str = "    ";
 
 fn printable(ty: &Ty) -> bool {
@@ -59,27 +95,46 @@ struct Exports {
     public: HashSet<String>,
 }
 
+/// A place in one of the program's files: `file` indexes the files `analyze_with` returns.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct Loc {
+    pub file: usize,
+    pub span: Span,
+}
+
 /// A declared name: functions, types, fields, variants, units, parameters and locals.
 #[derive(Clone, Debug)]
 pub struct Def {
+    /// The file it is declared in: the root (0), or a module the program imports.
+    pub file: usize,
     /// The span of the name where it is declared; uses point here.
     pub span: Span,
     /// `area`, `Shape`, `Shape.Circle`, `Body.mass`, `Shape.Circle.radius`, or a local's name.
     pub name: String,
-    /// fn, struct, enum, field, variant, unit, param or local.
+    /// fn, type (a generic struct or enum), struct, enum, field, variant, unit, param or local.
     pub kind: &'static str,
     /// The declaration's source text for items; the type for fields, parameters and locals.
     pub detail: String,
+    /// For parameters and locals: where the name can be used, from its declaration to the end
+    /// of its block.
+    pub scope: Option<Span>,
 }
 
-/// What the checker learned about a file, kept even when it has errors: every declaration,
-/// every use of a declared name, and the type of every expression. `anvil type-at` and
-/// `anvil refs` answer from these.
+impl Def {
+    pub fn loc(&self) -> Loc {
+        Loc { file: self.file, span: self.span }
+    }
+}
+
+/// What the checker learned about a file, kept even when it has errors: every declaration in
+/// it and every item declared in the modules it imports, every use of a declared name in it,
+/// and the type of every expression in it. `anvil type-at`, `refs` and `complete` answer from
+/// these.
 #[derive(Clone, Debug, Default)]
 pub struct Facts {
     pub defs: Vec<Def>,
-    /// (span of the use, span of the declaration it names)
-    pub uses: Vec<(Span, Span)>,
+    /// (span of the use, the declaration it names)
+    pub uses: Vec<(Span, Loc)>,
     /// (span of the expression, its type as shown in errors)
     pub exprs: Vec<(Span, String)>,
 }
@@ -136,11 +191,11 @@ pub struct Checker<'a> {
     diags: Vec<Diagnostic>,
     facts: Facts,
     /// Declaration spans of types, struct fields, enum variants and their fields, and units.
-    type_spans: HashMap<String, Span>,
-    field_spans: HashMap<(StructId, usize), Span>,
-    variant_spans: HashMap<(EnumId, usize), Span>,
-    variant_field_spans: HashMap<(EnumId, usize, usize), Span>,
-    unit_spans: HashMap<String, Span>,
+    type_spans: HashMap<String, Loc>,
+    field_spans: HashMap<(StructId, usize), Loc>,
+    variant_spans: HashMap<(EnumId, usize), Loc>,
+    variant_field_spans: HashMap<(EnumId, usize, usize), Loc>,
+    unit_spans: HashMap<String, Loc>,
     units: HashMap<String, Unit>,
     structs: Vec<StructDef>,
     struct_index: HashMap<String, StructId>,
@@ -171,6 +226,8 @@ struct Body {
     meta: Vec<LocalMeta>,
     scopes: Vec<HashMap<String, LocalId>>,
     declared: HashMap<String, Span>,
+    /// The fact recorded for each local, so its scope can be filled in when its block ends.
+    facts: HashMap<LocalId, usize>,
     ret: Ty,
     uses_io: bool,
     used_io: bool,
@@ -337,13 +394,41 @@ impl<'a> Checker<'a> {
         }
     }
 
-    fn def(&mut self, span: Span, name: impl Into<String>, kind: &'static str, detail: impl Into<String>) {
-        if self.module == 0 && self.quiet == 0 {
-            self.facts.defs.push(Def { span, name: name.into(), kind, detail: detail.into() });
+    /// Records a declaration: every one in the root, and the items of imported modules. Returns
+    /// its index in the facts.
+    fn def(
+        &mut self,
+        span: Span,
+        name: impl Into<String>,
+        kind: &'static str,
+        detail: impl Into<String>,
+    ) -> Option<usize> {
+        let item = !matches!(kind, "param" | "local");
+        if self.quiet > 0 || (self.module != 0 && !item) {
+            return None;
+        }
+        let def = Def { file: self.module, span, name: name.into(), kind, detail: detail.into(), scope: None };
+        self.facts.defs.push(def);
+        Some(self.facts.defs.len() - 1)
+    }
+
+    /// A place in the module being checked.
+    fn here(&self, span: Span) -> Loc {
+        Loc { file: self.module, span }
+    }
+
+    /// Ends a scope of `b`: its locals can be used up to `end`.
+    fn close_scope(&mut self, b: &mut Body, end: usize) {
+        let scope = b.scopes.pop().expect("an open scope");
+        for id in scope.values() {
+            if let Some(&i) = b.facts.get(id) {
+                let d = &mut self.facts.defs[i];
+                d.scope = Some(Span::new(d.span.start, end));
+            }
         }
     }
 
-    fn note_use(&mut self, span: Span, def: Option<Span>) {
+    fn note_use(&mut self, span: Span, def: Option<Loc>) {
         if let (Some(def), 0, 0) = (def, self.module, self.quiet) {
             self.facts.uses.push((span, def));
         }
@@ -553,6 +638,22 @@ impl<'a> Checker<'a> {
                 self.err(d);
                 continue;
             }
+            // Where the item is declared, so its uses here lead there.
+            let t = target.expect("exports come from a module");
+            let theirs = self.scopes[t].as_ref().expect("an imported module is checked first");
+            let (type_span, unit_span) = (theirs.type_spans.get(name).copied(), theirs.unit_spans.get(name).copied());
+            if let Some(l) = type_span {
+                self.type_spans.insert(name.clone(), l);
+            }
+            if let Some(l) = unit_span {
+                self.unit_spans.insert(name.clone(), l);
+            }
+            let decl = match (ex.funcs.get(name), ex.generic_fns.get(name).or(ex.generic_types.get(name))) {
+                (Some(&id), _) => Some(Loc { file: self.sigs[id].module, span: self.sigs[id].span }),
+                (_, Some(&g)) => Some(self.generic_loc(g)),
+                _ => type_span.or(unit_span),
+            };
+            self.note_use(n.span, decl);
             if !ex.public.contains(name) {
                 self.err(
                     Diagnostic::new("E0603", n.span, format!("`{name}` is private to module `{module}`"))
@@ -691,7 +792,7 @@ impl<'a> Checker<'a> {
             if !self.check_new_name(&d.name, "unit", &mut seen) {
                 continue;
             }
-            self.unit_spans.insert(d.name.name.clone(), d.name.span);
+            self.unit_spans.insert(d.name.name.clone(), self.here(d.name.span));
             let text = self.text(d.span);
             self.def(d.name.span, d.name.name.clone(), "unit", text);
             match &d.def {
@@ -788,6 +889,8 @@ impl<'a> Checker<'a> {
         }
         self.touch(n);
         if let Some(&g) = self.generic_types.get(n) {
+            let decl = self.generic_loc(g);
+            self.note_use(name.span, Some(decl));
             return self.generic_type(g, t, args);
         }
         if n == "Option" || n == "Result" {
@@ -940,7 +1043,7 @@ impl<'a> Checker<'a> {
                 continue;
             }
             if self.check_new_name(&d.name, "type", &mut seen) {
-                self.type_spans.insert(d.name.name.clone(), d.name.span);
+                self.type_spans.insert(d.name.name.clone(), self.here(d.name.span));
                 self.def(d.name.span, d.name.name.clone(), "struct", format!("struct {}", d.name.name));
                 kept.push((self.structs.len(), *d));
                 self.struct_index.insert(d.name.name.clone(), self.structs.len());
@@ -959,7 +1062,7 @@ impl<'a> Checker<'a> {
                 continue;
             }
             if self.check_new_name(&d.name, "type", &mut seen) {
-                self.type_spans.insert(d.name.name.clone(), d.name.span);
+                self.type_spans.insert(d.name.name.clone(), self.here(d.name.span));
                 self.def(d.name.span, d.name.name.clone(), "enum", format!("enum {}", d.name.name));
                 self.enum_index.insert(d.name.name.clone(), self.enums.len());
                 kept_enums.push((self.enums.len(), *d));
@@ -973,7 +1076,7 @@ impl<'a> Checker<'a> {
             for (i, (f, t)) in d.fields.iter().enumerate() {
                 self.check_new_name(f, "field", &mut fseen);
                 let ty = self.resolve_type(t);
-                self.field_spans.insert((id, i), f.span);
+                self.field_spans.insert((id, i), self.here(f.span));
                 let shown = self.show(&ty);
                 self.def(f.span, format!("{}.{}", d.name.name, f.name), "field", shown);
                 fields.push((f.name.clone(), ty));
@@ -985,7 +1088,7 @@ impl<'a> Checker<'a> {
             let mut variants = Vec::new();
             for (vi, v) in d.variants.iter().enumerate() {
                 self.check_new_name(&v.name, "variant", &mut vseen);
-                self.variant_spans.insert((*id, vi), v.name.span);
+                self.variant_spans.insert((*id, vi), self.here(v.name.span));
                 let vname = format!("{}.{}", d.name.name, v.name.name);
                 let text = self.text(v.span);
                 self.def(v.name.span, vname.clone(), "variant", text);
@@ -994,7 +1097,7 @@ impl<'a> Checker<'a> {
                 for (fi, (f, t)) in v.fields.iter().enumerate() {
                     self.check_new_name(f, "field", &mut fseen);
                     let ty = self.resolve_type(t);
-                    self.variant_field_spans.insert((*id, vi, fi), f.span);
+                    self.variant_field_spans.insert((*id, vi, fi), self.here(f.span));
                     let shown = self.show(&ty);
                     self.def(f.span, format!("{vname}.{}", f.name), "field", shown);
                     fields.push((f.name.clone(), ty));
@@ -1089,6 +1192,9 @@ impl<'a> Checker<'a> {
             }
             let tps = self.type_params(params);
             self.def(name.span, name.name.clone(), if is_fn { "fn" } else { "type" }, header);
+            if !is_fn {
+                self.type_spans.insert(name.name.clone(), self.here(name.span));
+            }
             self.add_generic(*kind, name, tps, public);
         }
     }
@@ -1129,6 +1235,7 @@ impl<'a> Checker<'a> {
             meta: Vec::new(),
             scopes: vec![HashMap::new()],
             declared: HashMap::new(),
+            facts: HashMap::new(),
             ret,
             uses_io,
             used_io: false,
@@ -1163,8 +1270,11 @@ impl<'a> Checker<'a> {
         b.declared.insert(name.name.clone(), name.span);
         let kind = if meta.is_param { "param" } else { "local" };
         let shown = self.show(&ty);
-        self.def(name.span, name.name.clone(), kind, shown);
+        let fact = self.def(name.span, name.name.clone(), kind, shown);
         let id = b.locals.len();
+        if let Some(i) = fact {
+            b.facts.insert(id, i);
+        }
         b.locals.push(Local { name: name.name.clone(), ty });
         b.meta.push(meta);
         b.scopes.last_mut().unwrap().insert(name.name.clone(), id);
@@ -1325,6 +1435,7 @@ impl<'a> Checker<'a> {
         b.in_ensures = false;
         b.in_contract = false;
         let body = self.block(&mut b, &d.body);
+        self.close_scope(&mut b, d.body.span.end);
         if ret != Ty::Void && ret != Ty::Error && !always_returns(&d.body.stmts) {
             self.err(
                 Diagnostic::new(
@@ -1374,6 +1485,7 @@ impl<'a> Checker<'a> {
             inputs.push(self.declare_local(&mut b, &p.name, ty, meta));
         }
         let body = self.block(&mut b, &t.body);
+        self.close_scope(&mut b, t.body.span.end);
         self.finish_locals(&b);
         self.check_effect_usage(&b, t.uses_span, t.uses_insert);
         Test { name: t.name.clone(), inputs, uses_io, locals: b.locals, body }
@@ -1400,7 +1512,7 @@ impl<'a> Checker<'a> {
                 out.push(st);
             }
         }
-        b.scopes.pop();
+        self.close_scope(b, block.span.end);
         out
     }
 
@@ -1429,6 +1541,11 @@ impl<'a> Checker<'a> {
             }
             StmtKind::Expr(e) => {
                 let (AK::Call { .. } | AK::Method { .. }) = &e.kind else {
+                    // Checked for its facts (completion after `p.` asks for p's type), but
+                    // only this error is reported.
+                    let errors = self.diags.len();
+                    self.expr(b, e);
+                    self.diags.truncate(errors);
                     self.err(Diagnostic::new(
                         "E0392",
                         e.span,
@@ -1483,9 +1600,10 @@ impl<'a> Checker<'a> {
                 };
                 let id = self.declare_local(b, var, Ty::I64, meta);
                 b.loop_depth += 1;
+                let end = body.span.end;
                 let body = self.block(b, body);
                 b.loop_depth -= 1;
-                b.scopes.pop();
+                self.close_scope(b, end);
                 Stmt::For(id, s0, e0, body)
             }
             StmtKind::ForEach { var, iter, body } => {
@@ -1521,9 +1639,10 @@ impl<'a> Checker<'a> {
                 };
                 let id = self.declare_local(b, var, elem, meta);
                 b.loop_depth += 1;
+                let end = body.span.end;
                 let body = self.block(b, body);
                 b.loop_depth -= 1;
-                b.scopes.pop();
+                self.close_scope(b, end);
                 Stmt::ForEach { var: id, held, iter: it, body }
             }
             StmtKind::Match { scrutinee, arms, span_end } => return self.match_stmt(b, scrutinee, arms, *span_end),
@@ -1621,7 +1740,7 @@ impl<'a> Checker<'a> {
             b.scopes.push(HashMap::new());
             let bindings = self.pattern(b, arm, (id, vi), &variants[vi]);
             let body = self.block(b, &arm.body);
-            b.scopes.pop();
+            self.close_scope(b, arm.body.span.end);
             out.push(Arm { variant: vi, bindings, body });
         }
         let missing: Vec<&VariantDef> =
@@ -1677,7 +1796,7 @@ impl<'a> Checker<'a> {
             }
         }
         self.block(b, &arm.body);
-        b.scopes.pop();
+        self.close_scope(b, arm.body.span.end);
     }
 
     fn error_binding(&mut self, b: &mut Body, name: &ast::Ident) {
@@ -1891,7 +2010,7 @@ impl<'a> Checker<'a> {
                     self.unknown_name(b, id);
                     return None;
                 };
-                self.note_use(id.span, Some(b.meta[local].span));
+                self.note_use(id.span, Some(self.here(b.meta[local].span)));
                 let m = &mut b.meta[local];
                 m.assigned = true;
                 if !m.mutable {
@@ -2105,7 +2224,7 @@ impl<'a> Checker<'a> {
             AK::Name(id) => match self.lookup_local(b, id) {
                 Some(l) => {
                     b.meta[l].used = true;
-                    self.note_use(id.span, Some(b.meta[l].span));
+                    self.note_use(id.span, Some(self.here(b.meta[l].span)));
                     (ExprKind::Local(l), b.locals[l].ty.clone())
                 }
                 None => {
@@ -2687,7 +2806,8 @@ impl<'a> Checker<'a> {
         let params: Vec<(String, Ty)> = self.sigs[fid].params.clone();
         let ret = self.sigs[fid].ret.clone();
         let local = self.sigs[fid].module == self.module;
-        self.note_use(callee.span, local.then_some(self.sigs[fid].span));
+        let decl = Loc { file: self.sigs[fid].module, span: self.sigs[fid].span };
+        self.note_use(callee.span, Some(decl));
         if self.sigs[fid].uses_io {
             self.note_io(b, callee.span, &format!("calling `{name}`"));
         }

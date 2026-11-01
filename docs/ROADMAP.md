@@ -71,8 +71,10 @@ green and the interpreter and native backend agreeing on every program in `tests
 - [ ] Linux AArch64 and macOS x86-64/ARM64 (Mach-O): written, to be run by the release workflow
 - [x] Release binaries: `scripts/release.sh` and the tag-driven release workflow
 
-## M11: Language server
-- [ ] Language server on the same facts as `type-at` and `refs`, plus completion
+## M11: Language server (v0.12)
+- [x] Language server on the same facts as `type-at` and `refs`, plus completion: `anvil lsp`
+  (diagnostics, hover, definition, references, completion, formatting, symbols, fixes as code
+  actions), `anvil complete`, `refs` by position, and facts that follow imports into modules
 
 ## M12: Effects and interop
 - [ ] Effects for allocation, time and seeded randomness
