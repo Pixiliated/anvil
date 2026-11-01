@@ -1,0 +1,4 @@
+fn main() uses io, random {
+    print(random_below(3));
+    print(random_below(3 - 3));
+}

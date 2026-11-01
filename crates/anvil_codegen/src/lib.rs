@@ -17,6 +17,7 @@
 //! - Array elements are stored as 8-byte slots, one per scalar, so an element of type T is
 //!   `8 * flat_len(T)` bytes.
 
+pub mod ffi;
 pub mod link;
 
 use anvil_front::ir::*;
@@ -37,7 +38,8 @@ use std::path::Path;
 /// disassembly of every function, so generated code can be inspected from a terminal.
 pub fn build_exe(program: &Program, out: &Path, work_dir: &Path, asm: bool) -> Result<String, String> {
     let (object, listing) = compile_object(program, asm)?;
-    link::link_exe(&object, out, work_dir)?;
+    let objects = link::compile_c(&program.c_files, work_dir)?;
+    link::link_exe(&object, &objects, out, work_dir)?;
     Ok(listing)
 }
 
@@ -57,7 +59,8 @@ pub fn build_test_exe(program: &Program, out: &Path, work_dir: &Path) -> Result<
             instance: false,
             params: Vec::new(),
             ret: Ty::Void,
-            uses_io: t.uses_io,
+            effects: t.effects,
+            external: None,
             requires: Vec::new(),
             ensures: Vec::new(),
             result_local: None,
@@ -67,7 +70,8 @@ pub fn build_test_exe(program: &Program, out: &Path, work_dir: &Path) -> Result<
         entries.push((i, p.funcs.len() - 1));
     }
     let (object, _) = compile(&p, false, Entry::Tests(&entries))?;
-    link::link_exe(&object, out, work_dir)?;
+    let objects = link::compile_c(&program.c_files, work_dir)?;
+    link::link_exe(&object, &objects, out, work_dir)?;
     Ok(entries.iter().map(|(i, _)| *i).collect())
 }
 
@@ -91,6 +95,13 @@ const RUNTIME: &[(&str, &[Type], &[Type])] = &[
     ("anvil_str_from_f64", &[types::F64], &[I]),
     ("anvil_str_from_bool", &[I], &[I]),
     ("anvil_print_line", &[I], &[]),
+    ("anvil_print_i64", &[I], &[]),
+    ("anvil_print_bool", &[I], &[]),
+    ("anvil_print_f64", &[types::F64, I], &[]),
+    ("anvil_clock_ns", &[], &[I]),
+    ("anvil_random_below", &[I, I], &[I]),
+    ("anvil_random_f64", &[], &[types::F64]),
+    ("anvil_random_seed", &[I], &[]),
     ("anvil_panic", &[I], &[]),
     ("anvil_panic_index", &[I, I, I], &[]),
     ("anvil_arr_new", &[I, I], &[I]),
@@ -172,14 +183,23 @@ fn compile(program: &Program, asm: bool, entry: Entry) -> Result<(Vec<u8>, Strin
     }
     for (i, f) in program.funcs.iter().enumerate() {
         let sig = be.signature(program, f.params.iter().map(|p| &f.locals[*p].ty), &f.ret);
-        // Two modules may each have a private `helper`, so the index makes the symbol unique.
-        let name = format!("anv{i}_{}", f.name.replace('.', "_"));
-        let id = be.module.declare_function(&name, Linkage::Local, &sig).map_err(|e| e.to_string())?;
+        let id = match &f.external {
+            // C's symbol; i64 and f64 pass as C's int64_t and double in the platform's C convention.
+            Some(x) => be
+                .module
+                .declare_function(&x.symbol, Linkage::Import, &sig)
+                .map_err(|e| format!("extern `{}` is declared twice with different signatures: {e}", x.symbol))?,
+            None => {
+                // Two modules may each have a private `helper`, so the index makes the symbol unique.
+                let name = format!("anv{i}_{}", f.name.replace('.', "_"));
+                be.module.declare_function(&name, Linkage::Local, &sig).map_err(|e| e.to_string())?
+            }
+        };
         be.funcs.push(id);
     }
 
     let mut fbc = FunctionBuilderContext::new();
-    for (i, f) in program.funcs.iter().enumerate() {
+    for (i, f) in program.funcs.iter().enumerate().filter(|(_, f)| f.external.is_none()) {
         let mut ctx = Context::new();
         ctx.set_disasm(asm);
         ctx.func.signature = be.signature(program, f.params.iter().map(|p| &f.locals[*p].ty), &f.ret);
@@ -1658,11 +1678,35 @@ impl<'a, 'b> Gen<'a, 'b> {
                 return vec![out];
             }
             Builtin::Print => {
-                let t = self.text(&bargs[0]);
-                self.call_rt("anvil_print_line", &[t]);
-                self.call_rt("anvil_release", &[t]);
+                // Numbers and bools are written without building a str: print never allocates.
+                match &bargs[0].ty {
+                    Ty::I64 => {
+                        let v = self.expr(&bargs[0]);
+                        self.call_rt("anvil_print_i64", &v);
+                    }
+                    Ty::Bool => {
+                        let v = self.expr(&bargs[0]);
+                        let wide = self.b.ins().uextend(I, v[0]);
+                        self.call_rt("anvil_print_bool", &[wide]);
+                    }
+                    Ty::F64(u) => {
+                        let v = self.expr(&bargs[0]);
+                        let unit = if u.is_dimensionless() { String::new() } else { format!(" {u}") };
+                        let unit = self.str_obj(&unit);
+                        self.call_rt("anvil_print_f64", &[v[0], unit]);
+                    }
+                    _ => {
+                        let (t, owned) = self.borrow(&bargs[0]);
+                        self.call_rt("anvil_print_line", &[t[0]]);
+                        if owned {
+                            self.call_rt("anvil_release", &[t[0]]);
+                        }
+                    }
+                }
                 return Vec::new();
             }
+            Builtin::ClockNs => return vec![self.call_rt("anvil_clock_ns", &[]).unwrap()],
+            Builtin::RandomF64 => return vec![self.call_rt("anvil_random_f64", &[]).unwrap()],
             Builtin::Len => {
                 // str and arrays both keep their length at the same offset.
                 let (vals, owned) = self.borrow(&bargs[0]);
@@ -1686,7 +1730,17 @@ impl<'a, 'b> Gen<'a, 'b> {
             | Builtin::MapHas
             | Builtin::MapGet
             | Builtin::MapKeys
-            | Builtin::MapValues => unreachable!(),
+            | Builtin::MapValues
+            | Builtin::ClockNs
+            | Builtin::RandomF64 => unreachable!(),
+            Builtin::RandomBelow { site } => {
+                let site = self.str_obj(site);
+                vec![self.call_rt("anvil_random_below", &[x, site]).unwrap()]
+            }
+            Builtin::RandomSeed => {
+                self.call_rt("anvil_random_seed", &[x]);
+                Vec::new()
+            }
             Builtin::Assert { message } => {
                 let fail = self.b.ins().icmp_imm_s(IntCC::Equal, x, 0);
                 self.panic_if(fail, message);

@@ -54,6 +54,10 @@ struct Gen {
     vars: Vec<(String, T)>,
     fns: Vec<Sig>,
     next: usize,
+    /// Whether the function being written may draw random numbers (main may; helpers are pure),
+    /// and whether it has.
+    random: bool,
+    used_random: bool,
 }
 
 impl Gen {
@@ -114,6 +118,15 @@ impl Gen {
 
     /// An expression of type `t`; `d` bounds its depth.
     fn expr(&mut self, t: T, d: u32) -> String {
+        if self.random && matches!(t, T::I | T::F) && self.rng.below(12) == 0 {
+            self.used_random = true;
+            return match t {
+                // Mostly a bound that works; sometimes any value, which may panic.
+                T::I if self.rng.below(4) == 0 => format!("random_below({})", self.expr(T::I, d.saturating_sub(1))),
+                T::I => format!("random_below({})", 1 + self.rng.below(1000)),
+                _ => "random_f64()".into(),
+            };
+        }
         if d == 0 || self.rng.below(4) == 0 {
             return self.leaf(t);
         }
@@ -296,6 +309,10 @@ impl Gen {
                     out.push_str(&format!("{indent}if {cond} {{\n{indent}    {v} = {other};\n{indent}}}\n"));
                     self.vars.push((v, t));
                 }
+                2 if self.random && t == T::I => {
+                    self.used_random = true;
+                    out.push_str(&format!("{indent}random_seed({});\n", self.expr(T::I, 2)));
+                }
                 2 if t == T::Ai => {
                     let v = self.fresh("v");
                     out.push_str(&format!("{indent}var {v}: [i64] = {};\n", self.expr(T::Ai, 1)));
@@ -327,10 +344,13 @@ impl Gen {
             out.push_str(&format!("    return {value};\n}}\n"));
             self.fns.push(Sig { name, params, ret });
         }
-        out.push_str("\nfn main() uses io {\n");
         self.vars.clear();
+        self.random = true;
+        let mut body = String::new();
         let n = 3 + self.rng.below(5);
-        self.statements(&mut out, "    ", n);
+        self.statements(&mut body, "    ", n);
+        let uses = if self.used_random { "io, random" } else { "io" };
+        out.push_str(&format!("\nfn main() uses {uses} {{\n{body}"));
         for (v, t) in self.vars.clone() {
             if t.printable() {
                 out.push_str(&format!("    print(\"{{{v}}}\");\n"));
@@ -353,6 +373,8 @@ pub fn program_for(seed: u64) -> String {
         vars: Vec::new(),
         fns: Vec::new(),
         next: 0,
+        random: false,
+        used_random: false,
     };
     let text = g.program();
     match anvil_front::fmt::format(&SourceFile::new("fuzz.anv", text.clone())) {
@@ -422,5 +444,14 @@ fn check_one(text: &str, seed: u64) -> (&'static str, String) {
             None => ("same", String::new()),
             Some(d) => ("differs", format!("native {d}, against the interpreter")),
         },
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn some_programs_draw_random_numbers() {
+        let n = (1..=50).filter(|s| super::program_for(*s).contains("random_")).count();
+        assert!(n >= 5, "only {n} of 50 fuzz programs draw random numbers");
     }
 }

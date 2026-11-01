@@ -285,12 +285,31 @@ impl Printer<'_> {
             self.line(&line);
         }
         let params: Vec<String> = f.params.iter().map(|p| format!("{}: {}", p.name.name, self.ty(&p.ty))).collect();
-        let mut head =
-            format!("{}fn {}{}({})", vis(f.public), f.name.name, type_params(&f.type_params), params.join(", "));
+        let external = match &f.external {
+            Some(e) => match &e.source {
+                Some((_, span)) => format!("extern {} ", self.slice(*span)),
+                None => "extern ".to_string(),
+            },
+            None => String::new(),
+        };
+        let mut head = format!(
+            "{}{external}fn {}{}({})",
+            vis(f.public),
+            f.name.name,
+            type_params(&f.type_params),
+            params.join(", ")
+        );
         if let Some(r) = &f.ret {
             head.push_str(&format!(" -> {}", self.ty(r)));
         }
         head.push_str(&uses(&f.uses));
+        if f.noalloc.is_some() {
+            head.push_str(" noalloc");
+        }
+        if f.external.is_some() {
+            self.line(&format!("{head};"));
+            return;
+        }
         if f.requires.is_empty() && f.ensures.is_empty() {
             self.block(&head, &f.body, "");
             return;
@@ -611,7 +630,9 @@ fn uses(names: &[Ident]) -> String {
     if names.is_empty() {
         return String::new();
     }
-    let n: Vec<&str> = names.iter().map(|u| u.name.as_str()).collect();
+    // Effects in one order (io, clock, random); names that are not effects keep theirs, last.
+    let mut n: Vec<&str> = names.iter().map(|u| u.name.as_str()).collect();
+    n.sort_by_key(|u| crate::check::EFFECTS.iter().position(|e| e == u).unwrap_or(crate::check::EFFECTS.len()));
     format!(" uses {}", n.join(", "))
 }
 

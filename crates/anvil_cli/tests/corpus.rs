@@ -81,13 +81,16 @@ fn native_build_is_deterministic() {
     std::fs::create_dir_all(&dir).unwrap();
     let a = dir.join(format!("a{}", std::env::consts::EXE_SUFFIX));
     let b = dir.join(format!("b{}", std::env::consts::EXE_SUFFIX));
-    for exe in [&a, &b] {
-        let out = anvil(&["build", "examples/projectile.anv", "-o", exe.to_str().unwrap()]);
-        assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    // The second program links a C file, compiled in a fresh directory each time.
+    for program in ["examples/projectile.anv", "tests/programs/ffi.anv"] {
+        for exe in [&a, &b] {
+            let out = anvil(&["build", program, "-o", exe.to_str().unwrap()]);
+            assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+        }
+        let same = std::fs::read(&a).unwrap() == std::fs::read(&b).unwrap();
+        assert!(same, "two builds of {program} differ");
     }
-    let same = std::fs::read(&a).unwrap() == std::fs::read(&b).unwrap();
     let _ = std::fs::remove_dir_all(&dir);
-    assert!(same, "two builds of the same source differ");
 }
 
 fn check_json(path: &str) -> (bool, serde_json::Value) {
@@ -1040,6 +1043,47 @@ test "plain and failing" {
     let failing = &v["tests"][2];
     assert_eq!(failing["native"].as_str().unwrap(), format!("panic: {}", failing["panic"].as_str().unwrap()));
     assert!(v["tests"][0].get("native").is_none(), "property tests run in the interpreter only");
+}
+
+#[test]
+fn c_functions_are_traced_and_their_failures_are_loud() {
+    let p = Scratch::new("ffi");
+    std::fs::create_dir_all(p.0.join("src/c")).unwrap();
+    p.write("src/c/twice.c", "#include <stdint.h>\nint64_t twice(int64_t n) { return n * 2; }\n");
+    p.write(
+        "src/main.anv",
+        "extern \"c/twice.c\" fn twice(n: i64) -> i64;\n\nfn main() uses io {\n    print(twice(21));\n}\n",
+    );
+    let v = p.json(&["trace", "src/main.anv"]);
+    let calls: Vec<String> = v["events"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|e| match (e["call"].as_str(), e["return"].as_str()) {
+            (Some(f), _) => Some(format!("call {f}({})", e["args"].as_str().unwrap())),
+            (_, Some(f)) => Some(format!("{f} returned {}", e["value"].as_str().unwrap())),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(calls, ["call main()", "call twice(n: 21)", "twice returned 42", "main returned nothing"], "{v}");
+
+    // C that does not compile stops the run, with the compiler's own message.
+    p.write("src/c/twice.c", "int64_t twice(int64_t n) { return n * ; }\n");
+    for args in [&["run", "src/main.anv"][..], &["build", "src/main.anv"][..]] {
+        let out = p.anvil(args);
+        let err = String::from_utf8_lossy(&out.stderr);
+        assert!(!out.status.success() && err.contains("could not compile") && err.contains("twice.c"), "{err}");
+    }
+
+    // An executable refuses a clock it does not know.
+    p.write("src/c/twice.c", "#include <stdint.h>\nint64_t twice(int64_t n) { return n * 2; }\n");
+    let exe = p.0.join(format!("main{}", std::env::consts::EXE_SUFFIX));
+    assert!(p.anvil(&["build", "src/main.anv", "-o", exe.to_str().unwrap()]).status.success());
+    let out = Command::new(&exe).env("ANVIL_CLOCK", "fast").output().unwrap();
+    assert_eq!(out.status.code(), Some(70));
+    assert!(String::from_utf8_lossy(&out.stderr).contains("ANVIL_CLOCK must be unset"), "{out:?}");
+    let out = Command::new(&exe).output().unwrap();
+    assert_eq!(String::from_utf8_lossy(&out.stdout), "42\n");
 }
 
 #[test]

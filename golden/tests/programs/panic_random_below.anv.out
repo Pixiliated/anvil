@@ -1,0 +1,4 @@
+exit: 101
+panic: random_below(0) needs a bound above 0 at tests/programs/panic_random_below.anv:3:11
+---
+1

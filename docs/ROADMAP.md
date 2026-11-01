@@ -76,9 +76,11 @@ green and the interpreter and native backend agreeing on every program in `tests
   (diagnostics, hover, definition, references, completion, formatting, symbols, fixes as code
   actions), `anvil complete`, `refs` by position, and facts that follow imports into modules
 
-## M12: Effects and interop
-- [ ] Effects for allocation, time and seeded randomness
-- [ ] C FFI with declared effects
+## M12: Effects and interop (v0.13)
+- [x] Effects for allocation, time and seeded randomness: `uses clock` (virtual in tests and
+  goldens), `uses random` (one specified, seeded sequence) and the `noalloc` promise
+- [x] C FFI with declared effects: `extern` functions from the C runtime or a C file, on both
+  backends
 
 ## M13: Publishing
 - [ ] crates.io as `anvil-lang` (`anvil` is taken), docs site, contribution guide

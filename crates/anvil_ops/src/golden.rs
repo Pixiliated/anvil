@@ -102,10 +102,12 @@ impl Counts {
 
 /// Runs main in the interpreter; Err when the step limit stops it.
 pub fn interpret(program: Program, max_steps: Option<u64>) -> Result<(Output, Counts), String> {
+    let mut ffi = crate::c_functions(&program)?;
     let (outcome, bytes, counts) = anvil_interp::run_on_big_stack(move || {
         let mut buf = Vec::new();
         let mut rec = Recorder::new(&program);
-        let o = anvil_interp::run_main_recorded(&program, &mut buf, max_steps, Some(&mut rec));
+        let host = crate::virtual_host(&mut ffi);
+        let o = anvil_interp::run_main_recorded(&program, &mut buf, max_steps, Some(&mut rec), host);
         (o, buf, Counts::of(&rec))
     });
     let stdout = String::from_utf8_lossy(&bytes).into_owned();
@@ -222,6 +224,7 @@ pub(crate) fn run_native(exe: &Path, args: &[&str]) -> Result<Output, String> {
     let out = Command::new(exe)
         .args(args)
         .env("ANVIL_CHECK_LEAKS", "1")
+        .env("ANVIL_CLOCK", "virtual")
         .output()
         .map_err(|e| format!("cannot run {}: {e}", exe.display()))?;
     let stderr = String::from_utf8_lossy(&out.stderr);

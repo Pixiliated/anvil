@@ -1,0 +1,6 @@
+// expect: E0803
+extern fn anvil_exit(code: i64);
+
+fn main() {
+    anvil_exit(0);
+}

@@ -1,0 +1,10 @@
+// expect: E0390
+fn pick(n: i64) -> i64 uses random
+    requires random_below(2) < n
+{
+    return random_below(n);
+}
+
+fn main() uses io, random {
+    print(pick(3));
+}

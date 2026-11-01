@@ -123,12 +123,25 @@ pub struct FnDecl {
     pub uses_span: Option<Span>,
     /// Where `uses io` would be inserted.
     pub uses_insert: Span,
+    /// `noalloc`: a promise, checked, that the function never allocates.
+    pub noalloc: Option<Span>,
+    /// `extern fn ...;`: implemented in C. Its body is empty, spanning the `;`.
+    pub external: Option<Extern>,
     pub requires: Vec<Expr>,
     pub ensures: Vec<Expr>,
     pub body: Block,
     pub span: Span,
     /// `allow LINT "reason"` lines written before `fn`.
     pub allows: Vec<AllowDecl>,
+}
+
+/// Where an extern function's C code is: a `.c` file named relative to the Anvil file, or the C
+/// runtime when there is none.
+#[derive(Clone, Debug)]
+pub struct Extern {
+    pub source: Option<(String, Span)>,
+    /// The `extern` keyword.
+    pub span: Span,
 }
 
 /// `allow untested "reason"`: switches one lint off for one function, saying why.

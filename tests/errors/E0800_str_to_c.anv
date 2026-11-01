@@ -1,0 +1,6 @@
+// expect: E0800
+extern fn puts(text: str) -> i64;
+
+fn main() -> i64 {
+    return puts("hi");
+}

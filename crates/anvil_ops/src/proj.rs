@@ -220,10 +220,17 @@ fn verify_file(
     let generic_fns = program.generic_fns.clone();
     let program_main = program.main;
     let p2 = program.clone();
+    let mut ffi = match crate::c_functions(&program) {
+        Ok(f) => f,
+        Err(e) => {
+            add("build", format!("its C functions do not build: {e}"), String::new());
+            None
+        }
+    };
     let (results, mut ran) = anvil_interp::run_on_big_stack(move || {
         let mut ran = vec![false; p2.funcs.len()];
         let mut rec = Recorder::new(&p2);
-        let results = crate::testing::run_all(&p2, crate::PROPERTY_CASES, 0, max_steps, Some(&mut rec));
+        let results = crate::testing::run_all(&p2, crate::PROPERTY_CASES, 0, max_steps, Some(&mut rec), &mut ffi);
         mark_ran(&mut ran, &Counts::of(&rec));
         (results, ran)
     });

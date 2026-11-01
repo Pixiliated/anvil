@@ -257,6 +257,11 @@ impl Report {
         let message = message.into();
         Report::failed(json!({ "ok": false, "error": message }), format!("error: {message}\n"), EXIT_USAGE)
     }
+
+    /// A command that could not do its work (a C file that does not compile, say).
+    pub(crate) fn error(message: String) -> Report {
+        Report::failed(json!({ "ok": false, "error": message }), format!("error: {message}\n"), EXIT_FAILED)
+    }
 }
 
 /// A source file named as the user gave it (diagnostics cite this name), read relative to `root`.
@@ -364,11 +369,17 @@ pub fn check_in(files: Files, file: &str) -> Report {
 /// code and, if it stopped early, the panic or the step limit.
 pub fn run(root: &Path, file: &str, max_steps: Option<u64>, out: &mut (dyn Write + Send)) -> Report {
     let (_, program) = try_report!(with_main(root, file));
+    let mut ffi = match c_functions(&program) {
+        Ok(f) => f,
+        Err(e) => return Report::failed(json!({ "ok": false, "error": e }), format!("error: {e}\n"), EXIT_FAILED),
+    };
     // A thread with a stack big enough for MAX_CALL_DEPTH interpreted calls; output streams.
     let outcome = std::thread::scope(|s| {
         std::thread::Builder::new()
             .stack_size(1 << 30)
-            .spawn_scoped(s, || anvil_interp::run_main(&program, out, max_steps))
+            .spawn_scoped(s, || {
+                anvil_interp::run_main(&program, out, max_steps, host(anvil_interp::Clock::Real, &mut ffi))
+            })
             .expect("cannot spawn interpreter thread")
             .join()
             .expect("interpreter thread crashed")
@@ -413,6 +424,30 @@ pub fn build(root: &Path, file: &str, out: Option<&str>, asm: bool) -> Report {
         }
         Err(e) => Report::failed(json!({ "ok": false, "error": e }), format!("error: {e}\n"), EXIT_FAILED),
     }
+}
+
+/// The C functions of a program's extern declarations, built and loaded for the interpreter.
+pub(crate) struct Ffi(anvil_codegen::ffi::CLibrary);
+
+impl anvil_interp::Foreign for Ffi {
+    fn call(&mut self, func: usize, args: &[u64]) -> u64 {
+        self.0.call(func, args)
+    }
+}
+
+/// Builds the library of `program`'s C functions; None when it declares no externs.
+pub(crate) fn c_functions(program: &Program) -> Result<Option<Ffi>, String> {
+    let dir = std::env::temp_dir().join(format!("anvil_ffi_{}_{}", std::process::id(), unique()));
+    Ok(anvil_codegen::ffi::load(program, &dir)?.map(Ffi))
+}
+
+/// The host of every run but `anvil run`: the virtual clock, and the program's C functions.
+pub(crate) fn virtual_host(ffi: &mut Option<Ffi>) -> anvil_interp::Host<'_> {
+    host(anvil_interp::Clock::Virtual, ffi)
+}
+
+pub(crate) fn host(clock: anvil_interp::Clock, ffi: &mut Option<Ffi>) -> anvil_interp::Host<'_> {
+    anvil_interp::Host { clock, foreign: ffi.as_mut().map(|f| f as &mut dyn anvil_interp::Foreign) }
 }
 
 /// Distinct per call within this process, for scratch directories (the MCP server builds many times).
@@ -513,7 +548,12 @@ pub fn outline_in(files: Files, file: &str) -> Report {
                     f.allows.iter().map(|a| json!({ "lint": a.lint.name, "reason": a.reason })).collect();
                 json!({
                     "kind": "fn", "name": f.name.name, "pub": f.public, "line": line(f.span), "signature": sig,
-                    "uses_io": f.uses.iter().any(|u| u.name == "io"),
+                    "effects": f.uses.iter().map(|u| u.name.as_str()).collect::<Vec<_>>(),
+                    "noalloc": f.noalloc.is_some(),
+                    "extern": f.external.as_ref().map(|x| match &x.source {
+                        Some((w, _)) => json!({ "file": anvil_front::c_file(&src.name, w) }),
+                        None => json!({ "file": null }),
+                    }),
                     "requires": f.requires.iter().map(|e| text(e.span)).collect::<Vec<_>>(),
                     "ensures": f.ensures.iter().map(|e| text(e.span)).collect::<Vec<_>>(),
                     "allows": allows,

@@ -65,9 +65,42 @@ enum Flow {
     Return(Value),
 }
 
-pub struct Interp<'p> {
+/// Which clock `clock_ns` reads: the host's monotonic clock (`anvil run`), or the virtual clock
+/// of tests, goldens, traces and profiles, whose n-th read (from 0) gives n milliseconds.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Clock {
+    Real,
+    Virtual,
+}
+
+/// Calls the C functions of extern declarations (anvil_codegen builds them into a library).
+pub trait Foreign {
+    /// Calls extern function `func` with its i64 and f64 arguments as bits; the result's bits
+    /// (0 for a function that returns nothing).
+    fn call(&mut self, func: FuncId, args: &[u64]) -> u64;
+}
+
+/// What a run takes from outside the program.
+pub struct Host<'h> {
+    pub clock: Clock,
+    /// The program's C functions; None for a program without externs.
+    pub foreign: Option<&'h mut dyn Foreign>,
+}
+
+impl Host<'_> {
+    pub fn reborrow(&mut self) -> Host<'_> {
+        Host { clock: self.clock, foreign: self.foreign.as_deref_mut().map(|f| f as &mut dyn Foreign) }
+    }
+}
+
+pub struct Interp<'p, 'h> {
     program: &'p Program,
     out: &'p mut dyn Write,
+    host: Host<'h>,
+    /// Reads of the clock so far, and when the run began (the real clock counts from there).
+    clock_reads: i64,
+    started: std::time::Instant,
+    random: Random,
     depth: usize,
     /// Statements and loop iterations left before the run stops; None is unlimited.
     steps_left: Option<u64>,
@@ -199,8 +232,31 @@ pub fn step_limit_message(limit: u64) -> String {
 
 /// Runs main. Needs a large stack for deep recursion; see `run_on_big_stack`. A step is one
 /// statement or one loop iteration; `max_steps` None runs without a limit.
-pub fn run_main(program: &Program, out: &mut dyn Write, max_steps: Option<u64>) -> Outcome {
-    run_main_recorded(program, out, max_steps, None)
+pub fn run_main(program: &Program, out: &mut dyn Write, max_steps: Option<u64>, host: Host) -> Outcome {
+    run_main_recorded(program, out, max_steps, None, host)
+}
+
+impl<'p, 'h> Interp<'p, 'h> {
+    fn new(
+        program: &'p Program,
+        out: &'p mut dyn Write,
+        max_steps: Option<u64>,
+        rec: Option<&'p mut Recorder>,
+        host: Host<'h>,
+    ) -> Interp<'p, 'h> {
+        Interp {
+            program,
+            out,
+            host,
+            clock_reads: 0,
+            started: std::time::Instant::now(),
+            random: Random::default(),
+            depth: 0,
+            steps_left: max_steps,
+            taken: 0,
+            rec,
+        }
+    }
 }
 
 /// `run_main`, counting into `rec` when given.
@@ -209,9 +265,10 @@ pub fn run_main_recorded(
     out: &mut dyn Write,
     max_steps: Option<u64>,
     rec: Option<&mut Recorder>,
+    host: Host,
 ) -> Outcome {
     let main = program.main.expect("run_main needs a main function");
-    let mut it = Interp { program, out, depth: 0, steps_left: max_steps, taken: 0, rec };
+    let mut it = Interp::new(program, out, max_steps, rec, host);
     let result = it.call(main, Vec::new());
     it.finish();
     match result {
@@ -226,8 +283,14 @@ pub fn run_main_recorded(
 }
 
 /// Runs one test body. Ok(()) if it finished, Err(message) if it panicked or ran out of steps.
-pub fn run_test(program: &Program, index: usize, out: &mut dyn Write, max_steps: Option<u64>) -> Result<(), String> {
-    run_test_recorded(program, index, out, max_steps, None)
+pub fn run_test(
+    program: &Program,
+    index: usize,
+    out: &mut dyn Write,
+    max_steps: Option<u64>,
+    host: Host,
+) -> Result<(), String> {
+    run_test_recorded(program, index, out, max_steps, None, host)
 }
 
 /// `run_test`, counting into `rec` when given. The test body itself belongs to no function.
@@ -237,8 +300,9 @@ pub fn run_test_recorded(
     out: &mut dyn Write,
     max_steps: Option<u64>,
     rec: Option<&mut Recorder>,
+    host: Host,
 ) -> Result<(), String> {
-    run_test_with(program, index, &[], out, max_steps, rec).map_err(|f| match f {
+    run_test_with(program, index, &[], out, max_steps, rec, host).map_err(|f| match f {
         TestFail::Panic(m) | TestFail::Stopped(m) => m,
     })
 }
@@ -252,7 +316,8 @@ pub enum TestFail {
     Stopped(String),
 }
 
-/// Runs one test body with `inputs` bound to its `for all` inputs (none for a plain test).
+/// Runs one test body with `inputs` bound to its `for all` inputs (none for a plain test). Each
+/// run starts its own clock and random sequence.
 pub fn run_test_with(
     program: &Program,
     index: usize,
@@ -260,9 +325,10 @@ pub fn run_test_with(
     out: &mut dyn Write,
     max_steps: Option<u64>,
     rec: Option<&mut Recorder>,
+    host: Host,
 ) -> Result<(), TestFail> {
     let test = &program.tests[index];
-    let mut it = Interp { program, out, depth: 0, steps_left: max_steps, taken: 0, rec };
+    let mut it = Interp::new(program, out, max_steps, rec, host);
     let mut frame = vec![Value::Void; test.locals.len()];
     for (l, v) in test.inputs.iter().zip(inputs) {
         frame[*l] = v.clone();
@@ -306,6 +372,7 @@ pub fn run_property(
     seed: u64,
     max_steps: Option<u64>,
     mut rec: Option<&mut Recorder>,
+    mut host: Host,
 ) -> Property {
     let test = &program.tests[index];
     let types: Vec<Ty> = test.inputs.iter().map(|l| test.locals[*l].ty.clone()).collect();
@@ -315,12 +382,12 @@ pub fn run_property(
         let size = 1 + case * 30 / cases.max(1);
         let inputs: Vec<Value> = types.iter().map(|t| gen::generate(t, program, &mut rng, size)).collect();
         let mut out = Vec::new();
-        match run_test_with(program, index, &inputs, &mut out, max_steps, rec.as_deref_mut()) {
+        match run_test_with(program, index, &inputs, &mut out, max_steps, rec.as_deref_mut(), host.reborrow()) {
             Ok(()) => {}
             Err(TestFail::Stopped(m)) => return Property::Stopped(m),
             Err(TestFail::Panic(message)) => {
                 let (inputs, message, output, shrinks) =
-                    shrink_failure(program, index, &types, inputs, message, out, max_steps);
+                    shrink_failure(program, index, &types, (inputs, message, out), max_steps, host);
                 return Property::Failed { case, inputs, message, output, shrinks };
             }
         }
@@ -333,10 +400,9 @@ fn shrink_failure(
     program: &Program,
     index: usize,
     types: &[Ty],
-    mut inputs: Vec<Value>,
-    mut message: String,
-    out: Vec<u8>,
+    (mut inputs, mut message, out): (Vec<Value>, String, Vec<u8>),
     max_steps: Option<u64>,
+    mut host: Host,
 ) -> (Vec<Value>, String, String, u64) {
     let mut output = String::from_utf8_lossy(&out).into_owned();
     let mut tries = 0;
@@ -351,7 +417,8 @@ fn shrink_failure(
                 let mut trial = inputs.clone();
                 trial[i] = c;
                 let mut out = Vec::new();
-                if let Err(TestFail::Panic(m)) = run_test_with(program, index, &trial, &mut out, max_steps, None) {
+                let run = run_test_with(program, index, &trial, &mut out, max_steps, None, host.reborrow());
+                if let Err(TestFail::Panic(m)) = run {
                     inputs = trial;
                     message = m;
                     output = String::from_utf8_lossy(&out).into_owned();
@@ -416,7 +483,7 @@ fn place_mut<'v>(mut slot: &'v mut Value, path: &[Step], indices: &[i64]) -> R<&
     Ok(slot)
 }
 
-impl<'p> Interp<'p> {
+impl<'p, 'h> Interp<'p, 'h> {
     fn step(&mut self) -> R<()> {
         if let Some(n) = &mut self.steps_left {
             if *n == 0 {
@@ -458,6 +525,26 @@ impl<'p> Interp<'p> {
 
     fn call_body(&mut self, fid: FuncId, args: Vec<Value>) -> R<Value> {
         let f = &self.program.funcs[fid];
+        if f.external.is_some() {
+            let bits: Vec<u64> = args
+                .iter()
+                .map(|a| match a {
+                    Value::I64(i) => *i as u64,
+                    Value::F64(x) => x.to_bits(),
+                    other => unreachable!("{other:?} passed to C"),
+                })
+                .collect();
+            let Some(foreign) = self.host.foreign.as_deref_mut() else {
+                unreachable!("`{}` is an extern function, but the run has no C library", f.name)
+            };
+            let r = foreign.call(fid, &bits);
+            return Ok(match f.ret {
+                Ty::Void => Value::Void,
+                Ty::I64 => Value::I64(r as i64),
+                Ty::F64(_) => Value::F64(f64::from_bits(r)),
+                ref t => unreachable!("C returned {t:?}"),
+            });
+        }
         let mut frame = vec![Value::Void; f.locals.len()];
         for (p, a) in f.params.iter().zip(args) {
             frame[*p] = a;
@@ -785,8 +872,32 @@ impl<'p> Interp<'p> {
     }
 
     fn builtin(&mut self, b: &Builtin, args: &[Expr], frame: &mut Vec<Value>) -> R<Value> {
+        match b {
+            Builtin::ClockNs => {
+                let ns = match self.host.clock {
+                    Clock::Virtual => self.clock_reads * VIRTUAL_TICK_NS,
+                    Clock::Real => self.started.elapsed().as_nanos().min(i64::MAX as u128) as i64,
+                };
+                self.clock_reads += 1;
+                return Ok(Value::I64(ns));
+            }
+            Builtin::RandomF64 => return Ok(Value::F64(self.random.unit_f64())),
+            _ => {}
+        }
         let x = self.eval(&args[0], frame)?;
         Ok(match b {
+            Builtin::ClockNs | Builtin::RandomF64 => unreachable!(),
+            Builtin::RandomBelow { site } => {
+                let n = x.as_i64();
+                if n <= 0 {
+                    return panic(random_below_message(n, site));
+                }
+                Value::I64(self.random.below(n))
+            }
+            Builtin::RandomSeed => {
+                self.random = Random::seeded(x.as_i64());
+                Value::Void
+            }
             Builtin::Print => {
                 let mut line = print_text(&x, &args[0].ty);
                 if let Some(r) = &mut self.rec {

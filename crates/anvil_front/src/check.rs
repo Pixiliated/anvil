@@ -13,7 +13,10 @@ use generic::{Constraint, Generic, GenericKind, Pending, Scope};
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 
-pub const BUILTINS: &[&str] = &["print", "assert", "sqrt", "abs", "to_f64", "to_i64"];
+pub const BUILTINS: &[&str] =
+    &["print", "assert", "sqrt", "abs", "to_f64", "to_i64", "clock_ns", "random_below", "random_f64", "random_seed"];
+/// The effects `uses` can list, in the order it lists them.
+pub const EFFECTS: &[&str] = &["io", "clock", "random"];
 /// Constructors of the built-in Option and Result enums, usable without a type prefix.
 pub const CONSTRUCTORS: &[&str] = &["Some", "None", "Ok", "Err"];
 pub const TYPE_NAMES: &[&str] = &["i64", "f64", "bool", "str", "Option", "Result", "Map"];
@@ -27,6 +30,10 @@ pub const BUILTIN_SIGNATURES: &[(&str, &str)] = &[
     ("abs", "abs(x) for i64 or f64"),
     ("to_f64", "to_f64(i: i64) -> f64"),
     ("to_i64", "to_i64(x: f64) -> i64, truncating"),
+    ("clock_ns", "clock_ns() -> i64 uses clock: nanoseconds since the program started"),
+    ("random_below", "random_below(n: i64) -> i64 uses random: uniform in 0..n"),
+    ("random_f64", "random_f64() -> f64 uses random: uniform in [0, 1)"),
+    ("random_seed", "random_seed(seed: i64) uses random: restarts the sequence"),
     ("Some", "Some(value) -> Option[T]"),
     ("None", "None: Option[T]"),
     ("Ok", "Ok(value) -> Result[T, E]"),
@@ -67,7 +74,10 @@ fn compound(ty: &Ty) -> bool {
 struct FuncSig {
     params: Vec<(String, Ty)>,
     ret: Ty,
-    uses_io: bool,
+    effects: Effects,
+    noalloc: bool,
+    /// Where ` noalloc` would go in its signature (fixes that promise it).
+    noalloc_insert: Span,
     span: Span,
     /// The module that declares it; `span` is in that module's file.
     module: usize,
@@ -81,6 +91,9 @@ pub struct Module<'a> {
     /// `geometry` or `shapes.circle`; empty for the root.
     pub name: String,
     pub imports: Vec<usize>,
+    /// The C files its extern functions name, by the text in quotes: the file's path and text,
+    /// or why it could not be read.
+    pub c_files: HashMap<String, Result<(String, String), String>>,
 }
 
 /// What a checked module declares itself (never what it imports), and which of it is pub.
@@ -148,6 +161,11 @@ pub struct Analysis {
 
 pub struct Checker<'a> {
     src: &'a SourceFile,
+    /// The C files of the program, and the index of each by path.
+    c_files: Vec<CFile>,
+    c_index: HashMap<String, usize>,
+    /// The current module's C files by the text in quotes: an index into c_files, or why not.
+    module_c: HashMap<String, Result<usize, String>>,
     /// The module being checked; only the root's (0) facts are kept.
     module: usize,
     /// Filled in as each module is checked, dependencies first.
@@ -229,9 +247,14 @@ struct Body {
     /// The fact recorded for each local, so its scope can be filled in when its block ends.
     facts: HashMap<LocalId, usize>,
     ret: Ty,
-    uses_io: bool,
-    used_io: bool,
+    uses: Effects,
+    used: Effects,
+    /// The effect names as written, and the whole clause, for fixes.
+    uses_list: Vec<ast::Ident>,
+    uses_span: Option<Span>,
     uses_insert: Span,
+    /// Some(the `noalloc` keyword) when the body must not allocate.
+    noalloc: Option<Span>,
     loop_depth: usize,
     /// Some(local) while checking ensures clauses of a function with a return value.
     result_local: Option<LocalId>,
@@ -250,7 +273,7 @@ pub fn check(src: &SourceFile, file: &ast::File) -> Result<Program, Vec<Diagnost
 /// A program of one file. Its imports find no module (E0601); `analyze_modules` is the way to
 /// check a file with imports.
 pub fn analyze(src: &SourceFile, file: &ast::File) -> Analysis {
-    analyze_modules(&[Module { src, file, name: String::new(), imports: Vec::new() }], &[0])
+    analyze_modules(&[Module { src, file, name: String::new(), imports: Vec::new(), c_files: HashMap::new() }], &[0])
 }
 
 /// Checks the modules of a program in `order` (each after the modules it imports, the root
@@ -259,6 +282,9 @@ pub fn analyze_modules<'a>(modules: &[Module<'a>], order: &[usize]) -> Analysis 
     let srcs: Vec<&'a SourceFile> = modules.iter().map(|m| m.src).collect();
     let mut c = Checker {
         src: modules[0].src,
+        c_files: Vec::new(),
+        c_index: HashMap::new(),
+        module_c: HashMap::new(),
         module: 0,
         exports: vec![None; modules.len()],
         imported: HashMap::new(),
@@ -343,6 +369,7 @@ pub fn analyze_modules<'a>(modules: &[Module<'a>], order: &[usize]) -> Analysis 
         main,
         modules: modules.iter().map(|m| m.src.name.clone()).collect(),
         generic_fns,
+        c_files: c.c_files.clone(),
     };
     let program = c.diags.is_empty().then_some(program);
     Analysis { program, diags: c.diags, facts: c.facts }
@@ -374,6 +401,14 @@ fn distance(a: &str, b: &str) -> usize {
 }
 
 /// The candidate within a small edit distance of `name`, for "did you mean" suggestions.
+/// Where ` noalloc` goes in the signature of `d`: after its uses clause, or where one would go.
+fn noalloc_insert(d: &ast::FnDecl) -> Span {
+    match d.uses_span {
+        Some(s) => s.at_end(),
+        None => d.uses_insert,
+    }
+}
+
 pub fn closest<'b>(name: &str, candidates: impl Iterator<Item = &'b String>) -> Option<String> {
     let limit = (name.len() / 3).max(1);
     candidates
@@ -489,6 +524,12 @@ impl<'a> Checker<'a> {
                 ast::Item::Unit(u) => unit_decls.push(u),
                 ast::Item::Struct(s) if !s.type_params.is_empty() => generic_decls.push(GenericKind::Struct(s)),
                 ast::Item::Enum(e) if !e.type_params.is_empty() => generic_decls.push(GenericKind::Enum(e)),
+                ast::Item::Fn(f) if f.external.is_some() && !f.type_params.is_empty() => {
+                    self.err(
+                        Diagnostic::new("E0800", f.name.span, "an extern function cannot be generic")
+                            .note("C has one copy of each function: declare one extern per type it takes", None),
+                    );
+                }
                 ast::Item::Fn(f) if !f.type_params.is_empty() => generic_decls.push(GenericKind::Fn(f)),
                 ast::Item::Struct(s) => struct_decls.push(s),
                 ast::Item::Enum(e) => enum_decls.push(e),
@@ -498,6 +539,17 @@ impl<'a> Checker<'a> {
         }
         for (k, imp) in import_decls.iter().enumerate() {
             self.import(imp, k, me.imports.get(k).copied());
+        }
+        self.module_c.clear();
+        for (written, file) in &me.c_files {
+            let entry = match file {
+                Ok((path, text)) => Ok(*self.c_index.entry(path.clone()).or_insert_with(|| {
+                    self.c_files.push(CFile { name: path.clone(), text: text.clone() });
+                    self.c_files.len() - 1
+                })),
+                Err(why) => Err(why.clone()),
+            };
+            self.module_c.insert(written.clone(), entry);
         }
         self.declare_units(&unit_decls);
         // Generic names first, so other declarations can use them; their shapes once all names exist.
@@ -1153,23 +1205,34 @@ impl<'a> Checker<'a> {
         false
     }
 
-    fn effects(&mut self, uses: &[ast::Ident]) -> bool {
-        let mut io = false;
+    fn effects(&mut self, uses: &[ast::Ident]) -> Effects {
+        let mut out = Effects::default();
         for u in uses {
-            if u.name == "io" {
-                if io {
-                    self.err(Diagnostic::new("E0201", u.span, "effect `io` is listed twice"));
+            match Effect::from_name(&u.name) {
+                Some(e) if out.has(e) => {
+                    self.err(Diagnostic::new("E0201", u.span, format!("effect `{}` is listed twice", u.name)))
                 }
-                io = true;
-            } else {
-                self.err(Diagnostic::new(
-                    "E0332",
-                    u.span,
-                    format!("unknown effect `{}`; the only effect is io", u.name),
-                ));
+                Some(e) => out.add(e),
+                None => {
+                    let mut d = Diagnostic::new(
+                        "E0332",
+                        u.span,
+                        format!("unknown effect `{}`; the effects are io, clock and random", u.name),
+                    );
+                    let names: Vec<String> = EFFECTS.iter().map(|e| e.to_string()).collect();
+                    if u.name == "alloc" || u.name == "noalloc" {
+                        d = d.note(
+                            "allocation is not an effect: write `noalloc` after the signature to promise none",
+                            None,
+                        );
+                    } else if let Some(s) = closest(&u.name, names.iter()) {
+                        d = d.fix1(FixKind::ChangesMeaning, format!("did you mean `{s}`?"), u.span, s);
+                    }
+                    self.err(d);
+                }
             }
         }
-        io
+        out
     }
 
     /// Registers generic functions, structs and enums by name; their shapes come later.
@@ -1216,20 +1279,37 @@ impl<'a> Checker<'a> {
             }
             let params = d.params.iter().map(|p| (p.name.name.clone(), self.resolve_type(&p.ty))).collect();
             let ret = d.ret.as_ref().map(|t| self.resolve_type(t)).unwrap_or(Ty::Void);
-            let uses_io = self.effects(&d.uses);
+            let effects = self.effects(&d.uses);
             if fresh {
                 self.func_index.insert(d.name.name.clone(), self.sigs.len());
             }
             let header = self.text(Span::new(d.span.start, d.body.span.start)).trim_end().to_string();
             self.def(d.name.span, d.name.name.clone(), "fn", header);
             // Duplicates still get a slot so FuncIds line up with fn_decls order.
-            self.sigs.push(FuncSig { params, ret, uses_io, span: d.name.span, module: self.module });
+            self.sigs.push(FuncSig {
+                params,
+                ret,
+                effects,
+                noalloc: d.noalloc.is_some(),
+                noalloc_insert: noalloc_insert(d),
+                span: d.name.span,
+                module: self.module,
+            });
         }
     }
 
     // ---------------- bodies ----------------
 
-    fn new_body(&self, ret: Ty, uses_io: bool, uses_insert: Span) -> Body {
+    /// `uses` lists the effects as written; `uses_span` is the whole clause.
+    fn new_body(
+        &self,
+        ret: Ty,
+        effects: Effects,
+        uses: &[ast::Ident],
+        uses_span: Option<Span>,
+        uses_insert: Span,
+        noalloc: Option<Span>,
+    ) -> Body {
         Body {
             locals: Vec::new(),
             meta: Vec::new(),
@@ -1237,9 +1317,12 @@ impl<'a> Checker<'a> {
             declared: HashMap::new(),
             facts: HashMap::new(),
             ret,
-            uses_io,
-            used_io: false,
+            uses: effects,
+            used: Effects::default(),
+            uses_list: uses.to_vec(),
+            uses_span,
             uses_insert,
+            noalloc,
             loop_depth: 0,
             result_local: None,
             in_ensures: false,
@@ -1329,16 +1412,29 @@ impl<'a> Checker<'a> {
         }
     }
 
-    fn check_effect_usage(&mut self, b: &Body, uses_span: Option<Span>, uses_insert: Span) {
-        if b.uses_io && !b.used_io {
-            if let Some(s) = uses_span {
-                self.err(Diagnostic::new("E0331", s, "declares uses io but never performs io").fix1(
-                    FixKind::Mechanical,
-                    "remove `uses io`",
-                    Span::new(uses_insert.start, s.end),
-                    "",
-                ));
+    /// Every declared effect must be used (E0331); the fix takes it out of the clause.
+    fn check_effect_usage(&mut self, b: &Body) {
+        let Some(clause) = b.uses_span else { return };
+        let list = &b.uses_list;
+        for (i, u) in list.iter().enumerate() {
+            let Some(e) = Effect::from_name(&u.name) else { continue };
+            if b.used.has(e) || list[..i].iter().any(|p| p.name == u.name) {
+                continue;
             }
+            let span = if list.len() == 1 {
+                Span::new(b.uses_insert.start, clause.end)
+            } else if i + 1 < list.len() {
+                Span::new(u.span.start, list[i + 1].span.start)
+            } else {
+                Span::new(list[i - 1].span.end, u.span.end)
+            };
+            let message = format!("declares uses {} but never {}", e.name(), e.doing());
+            self.err(Diagnostic::new("E0331", u.span, message).fix1(
+                FixKind::Mechanical,
+                format!("remove `{}`", e.name()),
+                span,
+                "",
+            ));
         }
     }
 
@@ -1378,14 +1474,114 @@ impl<'a> Checker<'a> {
 
     fn func(&mut self, d: &ast::FnDecl) -> Func {
         let id = self.sigs.iter().position(|s| s.module == self.module && s.span == d.name.span).unwrap();
-        self.func_at(d, id)
+        match &d.external {
+            Some(x) => self.extern_func(d, x, id),
+            None => self.func_at(d, id),
+        }
+    }
+
+    /// An extern function: only its signature, which must be one C can have.
+    fn extern_func(&mut self, d: &ast::FnDecl, x: &ast::Extern, id: FuncId) -> Func {
+        let ret = self.sigs[id].ret.clone();
+        let effects = self.sigs[id].effects;
+        let mut b = self.new_body(ret.clone(), effects, &d.uses, d.uses_span, d.uses_insert, d.noalloc);
+        let crosses = |t: &Ty| matches!(t, Ty::I64 | Ty::F64(_) | Ty::Error);
+        let mut params = Vec::new();
+        for (i, p) in d.params.iter().enumerate() {
+            let ty = self.sigs[id].params[i].1.clone();
+            if !crosses(&ty) {
+                let t = self.show(&ty);
+                self.err(
+                    Diagnostic::new("E0800", p.ty.span, format!("{t} cannot be passed to C"))
+                        .note("extern functions take and return i64 and f64 (with any unit)", None),
+                );
+            }
+            let meta = LocalMeta {
+                span: p.name.span,
+                kw_span: None,
+                mutable: false,
+                is_param: true,
+                is_loop_var: false,
+                // C reads it; Anvil cannot see that.
+                used: true,
+                assigned: false,
+                rename_fix: None,
+            };
+            params.push(self.declare_local(&mut b, &p.name, ty, meta));
+        }
+        if !crosses(&ret) && ret != Ty::Void {
+            let t = self.show(&ret);
+            self.err(
+                Diagnostic::new("E0800", d.ret.as_ref().unwrap().span, format!("C cannot return {t}"))
+                    .note("extern functions take and return i64 and f64 (with any unit)", None),
+            );
+        }
+        if let Some(io) = d.uses.iter().find(|u| u.name == "io") {
+            self.err(
+                Diagnostic::new("E0802", io.span, "an extern function cannot perform io")
+                    .note("C writes past Anvil's output, which tests, goldens and tools capture; return the values and print them in Anvil", None),
+            );
+        }
+        let name = &d.name.name;
+        if name.starts_with("anvil_") || name == "main" {
+            self.err(
+                Diagnostic::new("E0803", d.name.span, format!("`{name}` is reserved for the Anvil runtime")).note(
+                    "the runtime defines main and every symbol starting with anvil_; give the C function another name",
+                    None,
+                ),
+            );
+        }
+        let file = match &x.source {
+            None => None,
+            Some((written, span)) if !written.ends_with(".c") => {
+                self.err(Diagnostic::new("E0801", *span, format!("`{written}` is not a C file")).note(
+                    "an extern names a .c file, relative to this file's directory, or nothing for the C runtime",
+                    None,
+                ));
+                None
+            }
+            Some((written, span)) => match self.module_c.get(written).cloned() {
+                Some(Ok(i)) => Some(i),
+                Some(Err(why)) => {
+                    self.err(
+                        Diagnostic::new("E0801", *span, format!("cannot read C file `{written}`")).note(why, None),
+                    );
+                    None
+                }
+                None => {
+                    let why = "no files can be read here; check the program as part of a project";
+                    self.err(
+                        Diagnostic::new("E0801", *span, format!("cannot read C file `{written}`")).note(why, None),
+                    );
+                    None
+                }
+            },
+        };
+        self.close_scope(&mut b, d.body.span.end);
+        let allows = self.allows(&d.allows, d.span.start);
+        Func {
+            name: d.name.name.clone(),
+            span: d.name.span,
+            allows,
+            module: self.module,
+            instance: false,
+            params,
+            ret,
+            effects,
+            external: Some(ExternFn { symbol: d.name.name.clone(), file }),
+            requires: Vec::new(),
+            ensures: Vec::new(),
+            result_local: None,
+            locals: b.locals,
+            body: Vec::new(),
+        }
     }
 
     /// Checks the body of `d` against signature `id` (an instance's, for a generic function).
     fn func_at(&mut self, d: &ast::FnDecl, id: FuncId) -> Func {
         let ret = self.sigs[id].ret.clone();
-        let uses_io = self.sigs[id].uses_io;
-        let mut b = self.new_body(ret.clone(), uses_io, d.uses_insert);
+        let effects = self.sigs[id].effects;
+        let mut b = self.new_body(ret.clone(), effects, &d.uses, d.uses_span, d.uses_insert, d.noalloc);
         let mut params = Vec::new();
         for (i, p) in d.params.iter().enumerate() {
             let ty = self.sigs[id].params[i].1.clone();
@@ -1447,7 +1643,7 @@ impl<'a> Checker<'a> {
             );
         }
         self.finish_locals(&b);
-        self.check_effect_usage(&b, d.uses_span, d.uses_insert);
+        self.check_effect_usage(&b);
         let allows = self.allows(&d.allows, d.span.start);
         Func {
             name: d.name.name.clone(),
@@ -1457,7 +1653,8 @@ impl<'a> Checker<'a> {
             instance: false,
             params,
             ret,
-            uses_io,
+            effects,
+            external: None,
             requires,
             ensures,
             result_local,
@@ -1467,8 +1664,8 @@ impl<'a> Checker<'a> {
     }
 
     fn test(&mut self, t: &ast::TestDecl) -> Test {
-        let uses_io = self.effects(&t.uses);
-        let mut b = self.new_body(Ty::Void, uses_io, t.uses_insert);
+        let effects = self.effects(&t.uses);
+        let mut b = self.new_body(Ty::Void, effects, &t.uses, t.uses_span, t.uses_insert, None);
         let mut inputs = Vec::new();
         for p in &t.inputs {
             let ty = self.resolve_type(&p.ty);
@@ -1487,8 +1684,8 @@ impl<'a> Checker<'a> {
         let body = self.block(&mut b, &t.body);
         self.close_scope(&mut b, t.body.span.end);
         self.finish_locals(&b);
-        self.check_effect_usage(&b, t.uses_span, t.uses_insert);
-        Test { name: t.name.clone(), inputs, uses_io, locals: b.locals, body }
+        self.check_effect_usage(&b);
+        Test { name: t.name.clone(), inputs, effects, locals: b.locals, body }
     }
 
     fn block(&mut self, b: &mut Body, block: &ast::Block) -> Vec<Stmt> {
@@ -1536,6 +1733,10 @@ impl<'a> Checker<'a> {
             }
             StmtKind::Assign { target, value } => {
                 let (local, path, ty) = self.place(b, target)?;
+                if path.iter().any(|s| matches!(s, Step::Index { .. })) {
+                    // The array is copied first if anything else shares it.
+                    self.note_alloc(b, target.span, "assigning to an array element");
+                }
                 let v = self.value(b, value, &ty);
                 Stmt::Assign(local, path, v)
             }
@@ -2310,6 +2511,7 @@ impl<'a> Checker<'a> {
                 let t = self.expect(b, to, &Ty::I64);
                 match x.ty.clone() {
                     ty @ (Ty::Array(_) | Ty::Str) => {
+                        self.note_alloc(b, e.span, "a slice");
                         let site = self.site(e.span);
                         (ExprKind::Slice { base: Box::new(x), from: Box::new(f), to: Box::new(t), site }, ty)
                     }
@@ -2363,6 +2565,7 @@ impl<'a> Checker<'a> {
                 let vals: Vec<(Expr, Expr)> =
                     entries.iter().map(|(ke, ve)| (self.expect(b, ke, &k), self.expect(b, ve, &v))).collect();
                 let duplicate = duplicate_key_message(&self.site(e.span));
+                self.note_alloc(b, e.span, "a map literal");
                 (ExprKind::MapLit { entries: vals, duplicate }, Ty::Map(Box::new(k), Box::new(v)))
             }
             AK::Array(elems) if hint == Some(&Ty::Error) => {
@@ -2397,6 +2600,7 @@ impl<'a> Checker<'a> {
                     return Self::err_expr();
                 }
                 let vals: Vec<Expr> = elems.iter().map(|x| self.expect(b, x, &elem)).collect();
+                self.note_alloc(b, e.span, "an array literal");
                 (ExprKind::ArrayLit(vals), Ty::Array(Box::new(elem)))
             }
             AK::Interp(parts) => {
@@ -2428,6 +2632,7 @@ impl<'a> Checker<'a> {
                 if bad {
                     return Self::err_expr();
                 }
+                self.note_alloc(b, e.span, "interpolation");
                 (ExprKind::Interp(out), Ty::Str)
             }
             AK::Try(inner) => {
@@ -2492,6 +2697,7 @@ impl<'a> Checker<'a> {
         let (lt, rt) = (x.ty.clone(), y.ty.clone());
         if lt == Ty::Str && rt == Ty::Str {
             if op == BinOp::Add {
+                self.note_alloc(b, e.span, "joining strings");
                 return Expr { kind: ExprKind::StrConcat(bx(x), bx(y)), ty: Ty::Str };
             }
             if op.is_comparison() {
@@ -2759,20 +2965,73 @@ impl<'a> Checker<'a> {
         Expr { kind: ExprKind::StructLit(sid, vals), ty: Ty::Struct(sid) }
     }
 
-    fn note_io(&mut self, b: &mut Body, span: Span, what: &str) {
+    fn note_effect(&mut self, b: &mut Body, e: Effect, span: Span, what: &str) {
+        let doing = e.doing();
         if b.in_contract {
-            self.err(Diagnostic::new("E0390", span, format!("{what} performs io, which contracts cannot do")));
+            self.err(Diagnostic::new("E0390", span, format!("{what} {doing}, which contracts cannot do")));
             return;
         }
-        b.used_io = true;
-        if !b.uses_io {
-            self.err(Diagnostic::new("E0330", span, format!("{what} performs io, but this function is pure")).fix1(
-                FixKind::ChangesMeaning,
-                "declare the effect: uses io",
-                b.uses_insert,
-                " uses io",
-            ));
+        b.used.add(e);
+        if b.uses.has(e) {
+            return;
         }
+        let whose = if b.uses.is_pure() {
+            "this function is pure".to_string()
+        } else {
+            format!("this function does not declare uses {}", e.name())
+        };
+        // The effect goes where the formatter puts it: a clause lists io, clock, random.
+        let rank = |n: &str| EFFECTS.iter().position(|x| *x == n).unwrap_or(EFFECTS.len());
+        let later = b.uses_list.iter().find(|u| rank(&u.name) > rank(e.name()));
+        let (at, text) = match (b.uses_span, later) {
+            (None, _) => (b.uses_insert, format!(" uses {}", e.name())),
+            (Some(_), Some(l)) => (Span::new(l.span.start, l.span.start), format!("{}, ", e.name())),
+            (Some(clause), None) => (clause.at_end(), format!(", {}", e.name())),
+        };
+        self.err(Diagnostic::new("E0330", span, format!("{what} {doing}, but {whose}")).fix1(
+            FixKind::ChangesMeaning,
+            format!("declare the effect: uses {}", e.name()),
+            at,
+            text,
+        ));
+    }
+
+    /// Something that may allocate: an error in a `noalloc` function (E0333).
+    fn note_alloc(&mut self, b: &mut Body, span: Span, what: &str) {
+        let Some(kw) = b.noalloc else { return };
+        let remove = Span::new(self.space_before(kw.start), kw.end);
+        self.err(
+            Diagnostic::new("E0333", span, format!("{what} may allocate, but this function is noalloc"))
+                .note("promised here", Some(kw))
+                .fix1(FixKind::ChangesMeaning, "remove the promise `noalloc`", remove, ""),
+        );
+    }
+
+    /// A call from a `noalloc` function to one that makes no such promise (E0334).
+    fn note_alloc_call(&mut self, b: &mut Body, span: Span, name: &str, callee: Option<FuncId>) {
+        let Some(kw) = b.noalloc else { return };
+        let mut d =
+            Diagnostic::new("E0334", span, format!("calling `{name}`, which is not noalloc, from a noalloc function"))
+                .note("promised here", Some(kw));
+        if let Some(f) = callee.filter(|f| self.sigs[*f].module == self.module) {
+            d = d.fix1(
+                FixKind::ChangesMeaning,
+                format!("promise that `{name}` does not allocate either"),
+                self.sigs[f].noalloc_insert,
+                " noalloc",
+            );
+        }
+        self.err(d);
+    }
+
+    /// Where the spaces before `at` begin in the current file.
+    fn space_before(&self, at: usize) -> usize {
+        let text = self.src.text.as_bytes();
+        let mut i = at;
+        while i > 0 && text[i - 1] == b' ' {
+            i -= 1;
+        }
+        i
     }
 
     fn call(&mut self, b: &mut Body, e: &ast::Expr, callee: &ast::Ident, args: &[ast::Arg]) -> Expr {
@@ -2808,8 +3067,11 @@ impl<'a> Checker<'a> {
         let local = self.sigs[fid].module == self.module;
         let decl = Loc { file: self.sigs[fid].module, span: self.sigs[fid].span };
         self.note_use(callee.span, Some(decl));
-        if self.sigs[fid].uses_io {
-            self.note_io(b, callee.span, &format!("calling `{name}`"));
+        for eff in self.sigs[fid].effects.iter() {
+            self.note_effect(b, eff, callee.span, &format!("calling `{name}`"));
+        }
+        if !self.sigs[fid].noalloc {
+            self.note_alloc_call(b, callee.span, name, Some(fid));
         }
         let sig_span = local.then_some(self.sigs[fid].span);
         let Some(ok) = self.check_args(name, e.span, args, &params, sig_span) else {
@@ -2953,9 +3215,14 @@ impl<'a> Checker<'a> {
                 );
             }
         }
-        if name == "print" {
-            // Recorded first, so an error in the argument cannot also report `uses io` as unused.
-            self.note_io(b, callee.span, "print");
+        // Recorded first, so an error in an argument cannot also report the effect as unused.
+        match name {
+            "print" => self.note_effect(b, Effect::Io, callee.span, "print"),
+            "clock_ns" => self.note_effect(b, Effect::Clock, callee.span, "clock_ns"),
+            "random_below" | "random_f64" | "random_seed" => {
+                self.note_effect(b, Effect::Random, callee.span, &format!("`{name}`"))
+            }
+            _ => {}
         }
         let vals: Vec<Expr> = args.iter().map(|a| self.expr(b, &a.value)).collect();
         if vals.iter().any(|v| v.ty == Ty::Error) {
@@ -2992,6 +3259,20 @@ impl<'a> Checker<'a> {
                 return Self::err_expr();
             }
             return Expr { kind: ExprKind::Builtin(Builtin::Print, vals), ty: Ty::Void };
+        }
+        if name == "clock_ns" || name == "random_f64" {
+            if !vals.is_empty() {
+                self.err(Diagnostic::new(
+                    "E0303",
+                    e.span,
+                    format!("`{name}` takes no arguments, found {}", vals.len()),
+                ));
+                return Self::err_expr();
+            }
+            return match name {
+                "clock_ns" => Expr { kind: ExprKind::Builtin(Builtin::ClockNs, vals), ty: Ty::I64 },
+                _ => Expr { kind: ExprKind::Builtin(Builtin::RandomF64, vals), ty: Ty::F64(Unit::dimensionless()) },
+            };
         }
         if vals.len() != 1 {
             self.err(Diagnostic::new("E0303", e.span, format!("`{name}` takes 1 argument, found {}", vals.len())));
@@ -3062,6 +3343,18 @@ impl<'a> Checker<'a> {
                 }
                 _ => bad(self, "f64"),
             },
+            "random_below" => {
+                if t != Ty::I64 {
+                    return bad(self, "i64");
+                }
+                Expr { kind: ExprKind::Builtin(Builtin::RandomBelow { site }, vec![x]), ty: Ty::I64 }
+            }
+            "random_seed" => {
+                if t != Ty::I64 {
+                    return bad(self, "i64");
+                }
+                Expr { kind: ExprKind::Builtin(Builtin::RandomSeed, vec![x]), ty: Ty::Void }
+            }
             _ => unreachable!("builtin {name}"),
         }
     }
@@ -3391,6 +3684,9 @@ impl<'a> Checker<'a> {
                 return Self::err_expr();
             }
         };
+        if matches!(builtin, Builtin::StrSplit { .. } | Builtin::MapKeys | Builtin::MapValues) {
+            self.note_alloc(b, e.span, &format!("`{m}`"));
+        }
         let arg_ty = match &x.ty {
             Ty::Map(k, _) => (**k).clone(),
             _ => Ty::Str,
@@ -3444,16 +3740,19 @@ impl<'a> Checker<'a> {
         };
         match (m, ty) {
             ("push", Ty::Array(elem)) => {
+                self.note_alloc(b, e.span, "`push`");
                 let v = self.expect(b, &args[0].value, &elem);
                 Expr { kind: ExprKind::Push { local, path, value: Box::new(v) }, ty: Ty::Void }
             }
             ("pop", Ty::Array(elem)) => {
                 // pop reads the array; push and assignment only write it.
                 b.meta[local].used = true;
+                self.note_alloc(b, e.span, "`pop`");
                 let message = pop_message(&self.site(e.span));
                 Expr { kind: ExprKind::Pop { local, path, message }, ty: *elem }
             }
             ("set", Ty::Map(k, v)) => {
+                self.note_alloc(b, e.span, "`set`");
                 let params = vec![("key".to_string(), *k), ("value".to_string(), *v)];
                 if self.check_args("set", e.span, args, &params, None) != Some(true) {
                     for a in args {
@@ -3471,6 +3770,7 @@ impl<'a> Checker<'a> {
             ("remove", Ty::Map(k, _)) => {
                 // remove reads the map: it fails when the key is not there.
                 b.meta[local].used = true;
+                self.note_alloc(b, e.span, "`remove`");
                 let key = self.expect(b, &args[0].value, &k);
                 let missing = missing_key_message(&self.site(e.span));
                 Expr { kind: ExprKind::MapRemove { local, path, key: Box::new(key), missing }, ty: Ty::Void }

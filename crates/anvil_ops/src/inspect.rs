@@ -83,17 +83,19 @@ fn observe<T: Send + 'static>(
     max_steps: Option<u64>,
     make: impl FnOnce(&Program) -> Recorder + Send + 'static,
     read: impl FnOnce(&Program, &Recorder, Ended) -> T + Send + 'static,
-) -> T {
-    anvil_interp::run_on_big_stack(move || {
+) -> Result<T, String> {
+    let mut ffi = crate::c_functions(&program)?;
+    Ok(anvil_interp::run_on_big_stack(move || {
         let mut rec = make(&program);
         let mut sink = Vec::new();
+        let host = crate::virtual_host(&mut ffi);
         let ended = match which {
-            None => match anvil_interp::run_main_recorded(&program, &mut sink, max_steps, Some(&mut rec)) {
+            None => match anvil_interp::run_main_recorded(&program, &mut sink, max_steps, Some(&mut rec), host) {
                 Outcome::Exit(code) => Ended::Exit(code),
                 Outcome::Panicked(m) => Ended::Panic(m),
                 Outcome::OutOfSteps(n) => Ended::Stopped(anvil_interp::step_limit_message(n)),
             },
-            Some(i) => match anvil_interp::run_test_recorded(&program, i, &mut sink, max_steps, Some(&mut rec)) {
+            Some(i) => match anvil_interp::run_test_recorded(&program, i, &mut sink, max_steps, Some(&mut rec), host) {
                 Ok(()) => Ended::Passed,
                 // run_test reports the step limit as its message; tell it apart from a panic.
                 Err(m) if max_steps.is_some_and(|n| m == anvil_interp::step_limit_message(n)) => Ended::Stopped(m),
@@ -101,7 +103,7 @@ fn observe<T: Send + 'static>(
             },
         };
         read(&program, &rec, ended)
-    })
+    }))
 }
 
 pub fn trace(
@@ -139,7 +141,7 @@ pub fn trace(
         }
     };
     let run = run_name(&program, which);
-    let (events, text, steps, dropped, ended) = observe(
+    let (events, text, steps, dropped, ended) = try_report!(observe(
         program,
         which,
         max_steps,
@@ -156,7 +158,8 @@ pub fn trace(
             }
             (events, text, rec.steps, t.dropped, ended)
         },
-    );
+    )
+    .map_err(Report::error));
     let mut text = format!("    step  trace of {run} in {file}\n{text}");
     if dropped > 0 {
         text.push_str(&format!("          ... {dropped} more event(s) not kept (the limit is {limit})\n"));
@@ -200,7 +203,7 @@ pub fn profile(root: &Path, file: &str, test: Option<&str>, max_steps: Option<u6
     let (_, program) = try_report!(compile(root, file));
     let which = try_report!(target(&program, file, test));
     let run = run_name(&program, which);
-    let (funcs, not_run, steps, ended) = observe(program, which, max_steps, Recorder::new, |p, rec, ended| {
+    let observed = observe(program, which, max_steps, Recorder::new, |p, rec, ended| {
         let mut ran: Vec<(String, u64, u64, u64)> = Vec::new();
         let mut not_run = Vec::new();
         for (f, s) in p.funcs.iter().zip(&rec.funcs) {
@@ -214,6 +217,7 @@ pub fn profile(root: &Path, file: &str, test: Option<&str>, max_steps: Option<u6
         ran.sort_by(|a, b| b.3.cmp(&a.3).then(a.0.cmp(&b.0)));
         (ran, not_run, rec.steps, ended)
     });
+    let (funcs, not_run, steps, ended) = try_report!(observed.map_err(Report::error));
     let mut text = format!("{:>10} {:>10} {:>8}  function ({run} in {file})\n", "self", "total", "calls");
     for (name, calls, total, own) in &funcs {
         text.push_str(&format!("{own:>10} {total:>10} {calls:>8}  {name}\n"));

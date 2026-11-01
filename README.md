@@ -67,25 +67,28 @@ much of that judgement as possible into the compiler:
 - **Local and explicit.** No operator overloading, macros, implicit conversions, shadowing or
   global state. Every binding states its type. Calls with two or more arguments name them,
   so swapped arguments cannot compile.
-- **Checks built in.** Units of measure (`f64[m/s]`), effects (`uses io`), contracts
-  (`requires`/`ensures`) and `test` blocks are part of the language, not libraries.
+- **Checks built in.** Units of measure (`f64[m/s]`), effects (`uses io, clock, random`), a
+  checked promise not to allocate (`noalloc`), contracts (`requires`/`ensures`) and `test`
+  blocks are part of the language, not libraries.
 - **Errors as values.** `Option` and `Result` with `?`, and `match` that must handle every
   variant: there is no catch-all arm and no exception to forget.
 - **Values, not references.** Arrays and structs copy on assignment (cheaply: storage is shared
   until written), so no two names ever see each other's changes.
-- **Deterministic and loud.** Integer overflow panics. Output is byte-identical on every run
-  and platform. The same source gives a byte-identical executable.
+- **Deterministic and loud.** Integer overflow panics. Random numbers come from one specified,
+  seeded sequence, and tests read a virtual clock, so output is byte-identical on every run and
+  platform. The same source gives a byte-identical executable.
 
 The whole language is in [docs/SPEC.md](docs/SPEC.md), which is short enough to give an agent
 in full (`anvil spec` prints it).
 
 ## Status
 
-v0.12: programs of one or more files (modules with explicit imports and `pub`), generic
+v0.13: programs of one or more files (modules with explicit imports and `pub`), generic
 functions, structs and enums with built-in constraints, i64, f64 with units, bool, strings with interpolation,
 search and split, growable arrays and slices, maps in key order, structs, enums with
 exhaustive `match`, structural `==`, `Option` and `Result` with `?`,
-contracts, effects and tests. There are two backends:
+contracts, effects (io, a clock, seeded random numbers), `noalloc`, C functions (`extern`) and
+tests. There are two backends:
 
 - an **interpreter**, which is the reference semantics;
 - a **native compiler**: Cranelift to x86-64, linked with MSVC on Windows. Strings and arrays
@@ -95,13 +98,14 @@ The test suite runs every program through both and requires identical stdout, pa
 and exit codes, on a corpus, on every test (`anvil test --native`) and on random programs
 (`anvil fuzz`). Property tests (`test "name" for all xs: [i64] { ... }`) run on seeded,
 generated inputs and shrink failures. Editors get a language server (`anvil lsp`) that answers
-from the same commands. More platforms and effects are on the [roadmap](docs/ROADMAP.md).
+from the same commands. More platforms are on the [roadmap](docs/ROADMAP.md).
 
 ## Using it
 
 You need Rust (stable). Native builds are for the machine you build on and need its linker:
 the Visual Studio C++ build tools on Windows x64, a C compiler (`cc`, or `$CC`) on Linux and
-macOS. Windows x64 and Linux x86-64 are tested; ARM64 Linux and macOS are built and tested by
+macOS. A program with C functions (`extern "x.c" fn`) also compiles them with that compiler, for
+the interpreter as well as for executables. Windows x64 and Linux x86-64 are tested; ARM64 Linux and macOS are built and tested by
 the release workflow. `scripts/release.sh` packs the binaries of the host into `dist/`.
 
 ```bash

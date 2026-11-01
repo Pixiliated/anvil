@@ -1,0 +1,30 @@
+// C functions: from the C runtime (libm) and from a C file next to this one.
+unit m;
+
+extern fn atan2(y: f64, x: f64) -> f64 noalloc;
+
+extern fn floor(x: f64) -> f64 noalloc;
+
+extern "c/ffi_math.c" fn gcd(a: i64, b: i64) -> i64 noalloc;
+
+extern "c/ffi_math.c" fn lerp(a: f64[m], b: f64[m], t: f64) -> f64[m];
+
+extern "c/ffi_math.c" fn answer() -> i64;
+
+// Mixed integer and float arguments, more than fit in registers on Windows.
+extern "c/ffi_math.c" fn fold6(a: i64, b: f64, c: i64, d: f64, e: i64, f: f64) -> f64;
+
+fn reduce(num: i64, den: i64) -> str {
+    let g: i64 = gcd(a: num, b: den);
+    return "{num / g}/{den / g}";
+}
+
+fn main() uses io {
+    print(atan2(y: 1.0, x: 1.0) * 4.0);
+    print(floor(-2.5));
+    print(gcd(a: 84, b: -36));
+    print(reduce(num: 12, den: 18));
+    print(lerp(a: 2.0[m], b: 4.0[m], t: 0.25));
+    print(answer());
+    print(fold6(a: 1, b: 2.0, c: 3, d: 4.0, e: 5, f: 6.0));
+}

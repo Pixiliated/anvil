@@ -60,6 +60,7 @@ pub fn analyze_with(src: &SourceFile, load: Load) -> (Vec<SourceFile>, check::An
         asts: Vec::new(),
         names: vec![String::new()],
         imports: vec![Vec::new()],
+        c_files: vec![HashMap::new()],
         state: vec![Visit::New],
         stack: Vec::new(),
         order: Vec::new(),
@@ -88,6 +89,7 @@ pub fn analyze_with(src: &SourceFile, load: Load) -> (Vec<SourceFile>, check::An
             file: &asts[i],
             name: l.names[i].clone(),
             imports: l.imports[i].clone(),
+            c_files: l.c_files[i].clone(),
         })
         .collect();
     let a = check::analyze_modules(&modules, &l.order);
@@ -102,6 +104,12 @@ pub fn module_file(importer: &str, module: &str) -> String {
     format!("{}{}.anv", dir_of(importer), module.replace('.', "/"))
 }
 
+/// The C file that `extern "lib/x.c"` names in the file `importer`: relative to its directory,
+/// like imports.
+pub fn c_file(importer: &str, written: &str) -> String {
+    format!("{}{written}", dir_of(importer))
+}
+
 fn dir_of(file: &str) -> &str {
     match file.rfind('/') {
         Some(i) => &file[..=i],
@@ -112,6 +120,8 @@ fn dir_of(file: &str) -> &str {
 fn no_files(name: &str) -> Result<String, String> {
     Err(format!("no files can be read here (wanted {name}); check the program as part of a project"))
 }
+
+type CFiles = HashMap<String, Result<(String, String), String>>;
 
 #[derive(Clone, Copy, PartialEq)]
 enum Visit {
@@ -129,6 +139,8 @@ struct Loading<'l> {
     asts: Vec<Option<ast::File>>,
     names: Vec<String>,
     imports: Vec<Vec<usize>>,
+    /// Per module, the C files its externs name (see check::Module::c_files).
+    c_files: Vec<CFiles>,
     state: Vec<Visit>,
     stack: Vec<usize>,
     order: Vec<usize>,
@@ -141,6 +153,19 @@ impl Loading<'_> {
     fn visit(&mut self, m: usize) {
         self.state[m] = Visit::Active;
         self.stack.push(m);
+        let written: Vec<String> = self.asts[m]
+            .iter()
+            .flat_map(|f| &f.items)
+            .filter_map(|i| match i {
+                ast::Item::Fn(f) => f.external.as_ref().and_then(|x| x.source.as_ref()).map(|(w, _)| w.clone()),
+                _ => None,
+            })
+            .collect();
+        for w in written {
+            let path = c_file(&self.sources[m].name, &w);
+            let read = (self.load)(&path).map(|text| (path.clone(), text)).map_err(|e| format!("{path}: {e}"));
+            self.c_files[m].insert(w, read);
+        }
         let decls: Vec<ast::ImportDecl> = self.asts[m]
             .iter()
             .flat_map(|f| &f.items)
@@ -211,6 +236,7 @@ impl Loading<'_> {
         self.sources.push(src);
         self.names.push(name);
         self.imports.push(Vec::new());
+        self.c_files.push(HashMap::new());
         self.state.push(Visit::New);
         self.by_file.insert(file, index);
         Ok(index)

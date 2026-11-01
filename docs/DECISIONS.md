@@ -208,3 +208,33 @@ Short records of choices that are not obvious from the code. Newest last.
   other errors are dropped, so it reports what it did before.
 - **UTF-32 positions when offered**, since Anvil columns count characters; UTF-16 otherwise.
   Unknown requests are errors (MethodNotFound), as a silent null would hide a missing feature.
+
+## M12 (v0.13)
+
+- **Three effects, declared like io.** `clock` and `random` are effects because they make a
+  function's result depend on more than its arguments; a caller should see that in the
+  signature. The order in `uses` is fixed (io, clock, random) so the formatter has one layout and
+  fixes insert an effect where it belongs.
+- **Allocation is a promise, not an effect.** Almost every function that touches text or arrays
+  allocates, so `uses alloc` would sit on most signatures and say little. `noalloc` marks the
+  few that must not, and the checker proves it from a fixed list of operations that may
+  allocate (the runtime calls that do). A noalloc function calls only noalloc functions, so the
+  promise is visible at every call, as effects are, rather than inferred across files.
+- **print never allocates**, natively too: numbers and bools are written by the runtime without
+  building a str, so a noalloc function can still report.
+- **Tests and goldens read a virtual clock** (1 ms per read) and executables do when
+  `ANVIL_CLOCK=virtual`, so everything checked stays deterministic; `anvil run` reads the real
+  one. Monotonic only: no dates, which would need time zones.
+- **Randomness is one seeded sequence, SplitMix64 from seed 0**, specified in SPEC and
+  implemented twice (`ir::Random`, the C runtime), so goldens with random numbers mean the same
+  thing on every platform and in every version. Seeding from the clock is the program's choice.
+- **C is reached through a shim in the interpreter.** The interpreter loads a library built from
+  the C files and a generated `anvil_ffi_call(func, args, result)`, so it needs no assembly or
+  libffi; only i64 and f64 cross, as their bits. The shim is compiled without optimisation so a
+  call to libm stays a call to the same function an executable links.
+- **Extern declarations are trusted, so they say everything**: effects and noalloc as for any
+  function. `uses io` is refused, because C writes past the output Anvil captures (and would
+  corrupt the MCP and LSP streams). C files are read through the same loader as modules, so
+  editors' unsaved text and `check` see them, and compiled in their own directory so no path
+  reaches the object and executables stay byte-identical.
+- **`outline` reports `effects`, `noalloc` and `extern`** in place of `uses_io`.

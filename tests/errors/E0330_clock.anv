@@ -1,0 +1,9 @@
+// expect: E0330
+fn stamp() -> i64 uses io {
+    print("now");
+    return clock_ns();
+}
+
+fn main() uses io {
+    print(stamp());
+}

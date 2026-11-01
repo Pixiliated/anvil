@@ -246,18 +246,43 @@ pub fn explain(code: &str) -> Option<&'static str> {
         "E0322" => "`result` is only valid inside ensures clauses, where it names the return value.",
         "E0323" => "Unreachable code. Nothing may follow return, break or continue in the same block.",
         "E0330" => {
-            "Effect not declared. Functions are pure unless they declare effects with uses io. \
-                    Calling print, or a function that uses io, requires uses io on the caller."
+            "Effect not declared. Functions are pure unless they declare their effects: uses io for \
+                    print, uses clock for clock_ns, uses random for random_below, random_f64 and \
+                    random_seed. Calling a function that has an effect needs it on the caller too, so a \
+                    signature always says everything a call can do."
         }
-        "E0331" => "Effect declared but never used. Remove uses io so callers can see the function is pure.",
-        "E0332" => "Unknown effect. The only effect in v0.1 is io.",
+        "E0331" => {
+            "Effect declared but never used. Remove it, so callers can see what the function really \
+                    does (a function that never reads the clock gives the same answer every time)."
+        }
+        "E0332" => {
+            "Unknown effect. The effects are io, clock and random. Allocation is not an effect: \
+                    write noalloc after the signature to promise that a function never allocates."
+        }
+        "E0333" => {
+            "Allocation in a noalloc function. noalloc promises that the function never allocates, \
+                    so it can run where allocation is too slow or must not fail. Interpolation, joining \
+                    strings, array and map literals, slices, split, keys, values, push, pop, set, remove \
+                    and assigning to an array element may allocate; arithmetic, comparisons, fields, \
+                    indexing, len, the str searches, get, has, print and the other built-ins never do. \
+                    Move the allocation out (build the array before, pass it in), or drop the promise."
+        }
+        "E0334" => {
+            "A noalloc function calls a function that does not promise noalloc. The promise covers \
+                    everything the function calls, so its callees must make it too: add noalloc to the \
+                    callee (it is then checked in turn), or drop the promise."
+        }
         "E0340" => "Unused variable or parameter. Remove it, or prefix it with _ if it is unused on purpose.",
         "E0341" => "var never reassigned. Use let; var is reserved for bindings that change.",
         "E0350" => "Invalid main. main takes no parameters and returns nothing or i64 (the exit code, 0..=255).",
         "E0360" => "sqrt of a unit with an odd exponent, which has no unit result (sqrt(f64[m]) is meaningless).",
         "E0370" => "break or continue outside a loop.",
         "E0380" => "Condition is not bool. Anvil has no truthiness: write x != 0, not x.",
-        "E0390" => "Contracts and asserts must be pure: they cannot call functions that use io.",
+        "E0390" => {
+            "Contracts must be pure: requires and ensures cannot print, read the clock or draw random \
+                    numbers, directly or through a call, so checking a contract never changes what a \
+                    program does."
+        }
         "E0391" => "Comparison chain. a < b < c is not allowed; write a < b && b < c.",
         "E0392" => {
             "Unused value. An expression statement must be a call; the value of a call that returns \
@@ -323,7 +348,29 @@ pub fn explain(code: &str) -> Option<&'static str> {
             "Operation needs a constraint. A type parameter allows only ==, !=, copying and passing,                     unless declared otherwise: `T: ordered` for <, `T: text` to print it, `T: key` for map keys.                     The fix adds the constraint, which callers must then meet."
         }
         "E0704" => {
-            "Endless instantiation. A generic that calls itself with a type built from its own                     parameter (f[T] calling f[[T]]) would need an instance for every depth. Recurse with the same types."
+            "Endless instantiation. A generic that calls itself with a type built from its own \
+                    parameter (f[T] calling f[[T]]) would need an instance for every depth. Recurse with the same types."
+        }
+        "E0800" => {
+            "A type that cannot cross into C. Extern functions take and return i64 (C's int64_t) and \
+                    f64 (C's double, with any unit), and cannot be generic. Pass text, arrays and structs \
+                    as numbers, or keep that work in Anvil."
+        }
+        "E0801" => {
+            "The C file of an extern cannot be used. extern \"lib/x.c\" fn ... names a .c file \
+                    relative to the Anvil file's directory, as imports do; without a file the function \
+                    comes from the C runtime (libm's cos, say)."
+        }
+        "E0802" => {
+            "An extern function declared to perform io. C writes past Anvil's output, which tests, \
+                    goldens and tools capture, so its output would be lost or interleaved wrongly. Return \
+                    the values to Anvil and print them there. Externs may declare uses clock and uses \
+                    random, but Anvil's virtual clock and seed do not reach into C."
+        }
+        "E0803" => {
+            "An extern name the runtime reserves. The C runtime defines main and every symbol \
+                    starting with anvil_; an extern of that name would replace part of it. Rename the \
+                    C function."
         }
         "E0500" => {
             "Unknown lint in an allow. `allow LINT \"reason\"` names one of the lints that \
@@ -354,8 +401,8 @@ pub fn lint(name: &str) -> Option<&'static str> {
 pub const ALL_CODES: &[&str] = &[
     "E0001", "E0002", "E0003", "E0004", "E0100", "E0110", "E0111", "E0200", "E0201", "E0202", "E0300", "E0301",
     "E0302", "E0303", "E0304", "E0305", "E0306", "E0307", "E0308", "E0310", "E0311", "E0320", "E0321", "E0322",
-    "E0323", "E0330", "E0331", "E0332", "E0340", "E0341", "E0350", "E0360", "E0370", "E0380", "E0390", "E0391",
-    "E0392", "E0400", "E0401", "E0402", "E0403", "E0404", "E0405", "E0406", "E0407", "E0408", "E0500", "E0501",
-    "E0502", "E0601", "E0602", "E0603", "E0604", "E0605", "E0606", "E0607", "E0700", "E0701", "E0702", "E0703",
-    "E0704",
+    "E0323", "E0330", "E0331", "E0332", "E0333", "E0334", "E0340", "E0341", "E0350", "E0360", "E0370", "E0380",
+    "E0390", "E0391", "E0392", "E0400", "E0401", "E0402", "E0403", "E0404", "E0405", "E0406", "E0407", "E0408",
+    "E0500", "E0501", "E0502", "E0601", "E0602", "E0603", "E0604", "E0605", "E0606", "E0607", "E0700", "E0701",
+    "E0702", "E0703", "E0704", "E0800", "E0801", "E0802", "E0803",
 ];

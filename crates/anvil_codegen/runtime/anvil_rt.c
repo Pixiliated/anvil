@@ -7,6 +7,9 @@
  * their capacity at 24, element layout at 32 and element storage at 40. Static strings have
  * rc -1 and are never freed. Functions taking objects borrow them; returned objects are owned. */
 #define _CRT_SECURE_NO_WARNINGS
+#ifndef _WIN32
+#define _POSIX_C_SOURCE 200809L /* clock_gettime */
+#endif
 #ifdef _MSC_VER
 #pragma warning(disable : 4200) /* flexible array members are standard C99 */
 #endif
@@ -18,6 +21,10 @@
 #ifdef _WIN32
 #include <io.h>
 #include <fcntl.h>
+__declspec(dllimport) int __stdcall QueryPerformanceCounter(int64_t *count);
+__declspec(dllimport) int __stdcall QueryPerformanceFrequency(int64_t *frequency);
+#else
+#include <time.h>
 #endif
 
 #define ANVIL_PANIC_EXIT 101
@@ -199,6 +206,27 @@ AnvStr *anvil_str_from_f64(double v) {
 void anvil_print_line(const AnvStr *s) {
     init_stdout();
     fwrite(s->bytes, 1, (size_t)s->len, stdout);
+    fputc('\n', stdout);
+}
+
+/* print of a number or a bool writes its text straight out: print never allocates. */
+void anvil_print_i64(int64_t v) {
+    init_stdout();
+    fprintf(stdout, "%lld\n", (long long)v);
+}
+
+void anvil_print_bool(int64_t v) {
+    init_stdout();
+    fputs(v ? "true\n" : "false\n", stdout);
+}
+
+/* `unit` is the text after the digits: "" or " m/s". */
+void anvil_print_f64(double v, const AnvStr *unit) {
+    char buf[64];
+    int n = format_f64(v, buf);
+    init_stdout();
+    fwrite(buf, 1, (size_t)n, stdout);
+    fwrite(unit->bytes, 1, (size_t)unit->len, stdout);
     fputc('\n', stdout);
 }
 
@@ -422,6 +450,72 @@ int64_t anvil_map_find_str(const AnvArr *m, const AnvStr *key) {
     return -lo - 1;
 }
 
+/* ---- the clock and the random sequence (docs/SPEC.md, Effects) ---- */
+
+/* With ANVIL_CLOCK=virtual (tests and goldens set it), the n-th read gives n milliseconds, as in
+ * the interpreter (ir::VIRTUAL_TICK_NS); otherwise reads count from the start of the program. */
+static int clock_virtual = 0;
+static int64_t clock_reads = 0;
+static int64_t clock_start = 0;
+
+static int64_t monotonic_ns(void) {
+#ifdef _WIN32
+    int64_t count, frequency;
+    QueryPerformanceCounter(&count);
+    QueryPerformanceFrequency(&frequency);
+    return (int64_t)((double)count * (1e9 / (double)frequency));
+#else
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (int64_t)ts.tv_sec * 1000000000 + (int64_t)ts.tv_nsec;
+#endif
+}
+
+static void init_clock(void) {
+    const char *mode = getenv("ANVIL_CLOCK");
+    if (mode && strcmp(mode, "virtual") != 0) runtime_error("ANVIL_CLOCK must be unset or \"virtual\"");
+    clock_virtual = mode != NULL;
+    clock_start = clock_virtual ? 0 : monotonic_ns();
+}
+
+int64_t anvil_clock_ns(void) {
+    int64_t reads = clock_reads++;
+    if (clock_virtual) return reads * 1000000;
+    return monotonic_ns() - clock_start;
+}
+
+/* SplitMix64 from seed 0; mirrors ir::Random. */
+static uint64_t random_state = 0;
+
+static uint64_t random_next(void) {
+    random_state += 0x9E3779B97F4A7C15ull;
+    uint64_t z = random_state;
+    z = (z ^ (z >> 30)) * 0xBF58476D1CE4E5B9ull;
+    z = (z ^ (z >> 27)) * 0x94D049BB133111EBull;
+    return z ^ (z >> 31);
+}
+
+void anvil_random_seed(int64_t seed) { random_state = (uint64_t)seed; }
+
+/* Same text as ir::random_below_message. */
+int64_t anvil_random_below(int64_t n, const AnvStr *site) {
+    if (n <= 0) {
+        char buf[512];
+        int len = snprintf(buf, sizeof buf, "random_below(%lld) needs a bound above 0 at %.*s", (long long)n,
+                           (int)site->len, site->bytes);
+        if (len >= (int)sizeof buf) len = (int)sizeof buf - 1;
+        panic_bytes(buf, len);
+    }
+    uint64_t m = (uint64_t)n;
+    uint64_t reject = (0 - m) % m;
+    for (;;) {
+        uint64_t x = random_next();
+        if (x >= reject) return (int64_t)(x % m);
+    }
+}
+
+double anvil_random_f64(void) { return (double)(random_next() >> 11) * (1.0 / 9007199254740992.0); }
+
 /* ---- the entry point ---- */
 
 /* Generated: the program's main, or (in a test executable) the test argv[1] names. */
@@ -450,6 +544,7 @@ void anvil_no_test(int64_t index) {
 int main(int argc, char **argv) {
     saved_argc = argc;
     saved_argv = argv;
+    init_clock();
     anvil_program();
     return 0;
 }
@@ -467,6 +562,7 @@ static void *run_program(void *unused) {
 int main(int argc, char **argv) {
     saved_argc = argc;
     saved_argv = argv;
+    init_clock();
     pthread_attr_t attr;
     pthread_t thread;
     if (pthread_attr_init(&attr) != 0 || pthread_attr_setstacksize(&attr, (size_t)64 << 20) != 0 ||

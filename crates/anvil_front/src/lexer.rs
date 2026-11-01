@@ -32,6 +32,8 @@ pub enum Tok {
     Requires,
     Ensures,
     Uses,
+    Noalloc,
+    Extern,
     True,
     False,
     Result,
@@ -105,6 +107,8 @@ impl Tok {
             Tok::Requires => "requires",
             Tok::Ensures => "ensures",
             Tok::Uses => "uses",
+            Tok::Noalloc => "noalloc",
+            Tok::Extern => "extern",
             Tok::True => "true",
             Tok::False => "false",
             Tok::Result => "result",
@@ -158,7 +162,8 @@ pub struct Token {
 /// Every keyword, for completion (a test checks each is one).
 pub const KEYWORDS: &[&str] = &[
     "allow", "import", "pub", "fn", "enum", "match", "let", "var", "if", "else", "while", "for", "in", "return",
-    "break", "continue", "struct", "unit", "test", "requires", "ensures", "uses", "true", "false", "result",
+    "break", "continue", "struct", "unit", "test", "requires", "ensures", "uses", "noalloc", "extern", "true", "false",
+    "result",
 ];
 
 pub(crate) fn keyword(s: &str) -> Option<Tok> {
@@ -185,6 +190,8 @@ pub(crate) fn keyword(s: &str) -> Option<Tok> {
         "requires" => Tok::Requires,
         "ensures" => Tok::Ensures,
         "uses" => Tok::Uses,
+        "noalloc" => Tok::Noalloc,
+        "extern" => Tok::Extern,
         "true" => Tok::True,
         "false" => Tok::False,
         "result" => Tok::Result,

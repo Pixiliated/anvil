@@ -43,6 +43,7 @@ pub(crate) fn run_all(
     seed: u64,
     max_steps: Option<u64>,
     mut rec: Option<&mut anvil_interp::Recorder>,
+    ffi: &mut Option<crate::Ffi>,
 ) -> Vec<Ran> {
     let mut out = Vec::new();
     for (i, t) in program.tests.iter().enumerate() {
@@ -58,14 +59,16 @@ pub(crate) fn run_all(
         };
         if t.inputs.is_empty() {
             let mut buf = Vec::new();
-            match anvil_interp::run_test_with(program, i, &[], &mut buf, max_steps, rec.as_deref_mut()) {
+            let host = crate::virtual_host(ffi);
+            match anvil_interp::run_test_with(program, i, &[], &mut buf, max_steps, rec.as_deref_mut(), host) {
                 Ok(()) => {}
                 Err(TestFail::Panic(m)) => ran.failure = Some(m),
                 Err(TestFail::Stopped(m)) => (ran.failure, ran.stopped) = (Some(m), true),
             }
             ran.output = String::from_utf8_lossy(&buf).into_owned();
         } else {
-            match anvil_interp::run_property(program, i, cases, seed, max_steps, rec.as_deref_mut()) {
+            let host = crate::virtual_host(ffi);
+            match anvil_interp::run_property(program, i, cases, seed, max_steps, rec.as_deref_mut(), host) {
                 Property::Passed { .. } => {}
                 Property::Stopped(m) => (ran.failure, ran.stopped) = (Some(m), true),
                 Property::Failed { case, inputs, message, output, shrinks } => {
@@ -110,7 +113,11 @@ pub fn test(
     }
     let seed = seed.unwrap_or(0);
     let p2 = program.clone();
-    let ran = anvil_interp::run_on_big_stack(move || run_all(&p2, cases, seed, max_steps, None));
+    let mut ffi = match crate::c_functions(&program) {
+        Ok(f) => f,
+        Err(e) => return Report::failed(json!({ "ok": false, "error": e }), format!("error: {e}\n"), EXIT_FAILED),
+    };
+    let ran = anvil_interp::run_on_big_stack(move || run_all(&p2, cases, seed, max_steps, None, &mut ffi));
 
     // Natively: the plain tests, in one executable, compared with the interpreter.
     let mut native_notes: Vec<Option<String>> = vec![None; ran.len()];

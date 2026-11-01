@@ -31,6 +31,72 @@ pub enum Ty {
     Error,
 }
 
+/// The effects a function or test may have, declared with `uses` (see SPEC, Effects).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Effect {
+    Io,
+    Clock,
+    Random,
+}
+
+/// Every effect, in the order `uses` lists them.
+pub const ALL_EFFECTS: [Effect; 3] = [Effect::Io, Effect::Clock, Effect::Random];
+
+impl Effect {
+    pub fn name(self) -> &'static str {
+        match self {
+            Effect::Io => "io",
+            Effect::Clock => "clock",
+            Effect::Random => "random",
+        }
+    }
+    pub fn from_name(name: &str) -> Option<Effect> {
+        ALL_EFFECTS.into_iter().find(|e| e.name() == name)
+    }
+    /// What performing it is called in messages: "performs io".
+    pub fn doing(self) -> &'static str {
+        match self {
+            Effect::Io => "performs io",
+            Effect::Clock => "reads the clock",
+            Effect::Random => "draws random numbers",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Effects(u8);
+
+impl Effects {
+    pub fn has(self, e: Effect) -> bool {
+        self.0 & (1 << e as u8) != 0
+    }
+    pub fn add(&mut self, e: Effect) {
+        self.0 |= 1 << e as u8;
+    }
+    pub fn is_pure(self) -> bool {
+        self.0 == 0
+    }
+    pub fn iter(self) -> impl Iterator<Item = Effect> {
+        ALL_EFFECTS.into_iter().filter(move |e| self.has(*e))
+    }
+}
+
+/// A function written in C: its symbol, and the index into `Program::c_files` of the file that
+/// defines it (None: the C runtime, such as libm's `cos`).
+#[derive(Clone, Debug)]
+pub struct ExternFn {
+    pub symbol: String,
+    pub file: Option<usize>,
+}
+
+/// A C file that extern functions name, with its text as read (so editors' unsaved text works).
+#[derive(Clone, Debug)]
+pub struct CFile {
+    /// Its path, relative in the same way as the program's file names.
+    pub name: String,
+    pub text: String,
+}
+
 #[derive(Clone, Debug)]
 pub struct StructDef {
     pub name: String,
@@ -83,7 +149,9 @@ pub struct Func {
     pub instance: bool,
     pub params: Vec<LocalId>,
     pub ret: Ty,
-    pub uses_io: bool,
+    pub effects: Effects,
+    /// Implemented in C: the body is empty, and calls go to the C function.
+    pub external: Option<ExternFn>,
     pub requires: Vec<Check>,
     pub ensures: Vec<Check>,
     /// Bound to the return value while ensures clauses run.
@@ -97,7 +165,7 @@ pub struct Test {
     pub name: String,
     /// The generated inputs of a property test (`for all`), as locals; empty for a plain test.
     pub inputs: Vec<LocalId>,
-    pub uses_io: bool,
+    pub effects: Effects,
     pub locals: Vec<Local>,
     pub body: Vec<Stmt>,
 }
@@ -114,6 +182,8 @@ pub struct Program {
     pub modules: Vec<String>,
     /// Every generic function, instantiated or not, so coverage can see the ones never called.
     pub generic_fns: Vec<GenericFn>,
+    /// The C files extern functions are defined in.
+    pub c_files: Vec<CFile>,
 }
 
 #[derive(Clone, Debug)]
@@ -233,6 +303,16 @@ pub enum Builtin {
     StrSplit {
         message: String,
     },
+    /// Nanoseconds on the run's clock (see `clock_ns` in SPEC): real, or virtual in tests.
+    ClockNs,
+    /// A uniformly random i64 in 0..n; unless n > 0, panics naming `site`.
+    RandomBelow {
+        site: String,
+    },
+    /// A uniformly random f64 in [0, 1), a multiple of 2^-53.
+    RandomF64,
+    /// Restarts the random sequence from a seed.
+    RandomSeed,
 }
 
 #[derive(Clone, Debug)]
@@ -366,6 +446,46 @@ pub fn split_message(site: &str) -> String {
 pub fn duplicate_key_message(site: &str) -> String {
     format!("duplicate key in the map literal at {site}")
 }
+/// Mirrors anvil_random_below in the C runtime.
+pub fn random_below_message(n: i64, site: &str) -> String {
+    format!("random_below({n}) needs a bound above 0 at {site}")
+}
+
+/// The one random sequence of every run (SplitMix64; mirrored by the C runtime). It starts from
+/// seed 0, so a program that never calls `random_seed` draws the same numbers every time.
+#[derive(Clone, Debug, Default)]
+pub struct Random(u64);
+
+impl Random {
+    pub fn seeded(seed: i64) -> Random {
+        Random(seed as u64)
+    }
+    pub fn next_u64(&mut self) -> u64 {
+        self.0 = self.0.wrapping_add(0x9E37_79B9_7F4A_7C15);
+        let mut z = self.0;
+        z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+        z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+        z ^ (z >> 31)
+    }
+    /// Uniform in 0..n for n > 0: draws below 2^64 mod n are rejected, so no value is favoured.
+    pub fn below(&mut self, n: i64) -> i64 {
+        let n = n as u64;
+        let reject = n.wrapping_neg() % n;
+        loop {
+            let x = self.next_u64();
+            if x >= reject {
+                return (x % n) as i64;
+            }
+        }
+    }
+    pub fn unit_f64(&mut self) -> f64 {
+        (self.next_u64() >> 11) as f64 * (1.0 / 9_007_199_254_740_992.0)
+    }
+}
+
+/// The virtual clock of tests and goldens: the n-th read (from 0) gives n milliseconds.
+pub const VIRTUAL_TICK_NS: i64 = 1_000_000;
+
 pub fn missing_key_message(site: &str) -> String {
     format!("remove of a key the map does not have at {site}")
 }

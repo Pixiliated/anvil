@@ -1,0 +1,71 @@
+// Effects: the clock (virtual under goldens and tests), seeded random numbers, and noalloc.
+unit m;
+
+struct Walker {
+    x: i64,
+    steps: i64,
+}
+
+// A random walk of n steps from seed: the same seed walks the same way every run.
+fn walk(seed: i64, n: i64) -> Walker uses random noalloc {
+    random_seed(seed);
+    var w: Walker = Walker { x: 0, steps: 0 };
+    while w.steps < n {
+        if random_below(2) == 0 {
+            w.x = w.x - 1;
+        } else {
+            w.x = w.x + 1;
+        }
+        w.steps = w.steps + 1;
+    }
+    return w;
+}
+
+fn mean_of_draws(n: i64) -> f64 uses random noalloc {
+    var sum: f64 = 0.0;
+    for _i in 0..n {
+        sum = sum + random_f64();
+    }
+    return sum / to_f64(n);
+}
+
+fn report(label: str, x: f64[m]) uses io noalloc {
+    print(label);
+    print(x);
+}
+
+fn elapsed_ms(start: i64) -> i64 uses clock noalloc {
+    return (clock_ns() - start) / 1_000_000;
+}
+
+fn main() uses io, clock, random {
+    let start: i64 = clock_ns();
+    // The sequence starts at seed 0 when nothing seeds it.
+    print(random_below(10));
+    print(random_below(10));
+    print(random_f64());
+    let a: Walker = walk(seed: 7, n: 100);
+    let b: Walker = walk(seed: 7, n: 100);
+    print("walks agree: {a == b}, ended at {a.x}");
+    print(walk(seed: -1, n: 1000).x);
+    // Bounds near 2^62 reject some draws, so every value stays equally likely.
+    print(random_below(4_611_686_018_427_387_905));
+    print(random_below(1));
+    print(mean_of_draws(1000));
+    report(label: "distance", x: 12.5[m]);
+    print(elapsed_ms(start));
+    print(elapsed_ms(start));
+}
+
+test "dice stay on the die" uses random {
+    random_seed(3);
+    for _i in 0..500 {
+        let d: i64 = random_below(6) + 1;
+        assert(d >= 1 && d <= 6);
+    }
+}
+
+test "the clock ticks a millisecond per read in tests" uses clock {
+    let t: i64 = clock_ns();
+    assert(clock_ns() - t == 1_000_000);
+}

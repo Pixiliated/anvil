@@ -1,4 +1,4 @@
-# Anvil language specification (v0.12)
+# Anvil language specification (v0.13)
 
 Anvil is a small, compiled, general-purpose language designed to be written mostly by AI agents
 and read by humans. Its rules aim at three things: one obvious way to write each thing, code
@@ -19,15 +19,17 @@ unit m;                       // base unit
 unit N = kg*m/s^2;            // unit alias
 struct Body { mass: f64[kg], pos: f64[m], }
 enum Shape { Circle(radius: f64[m]), Empty, }
-fn name(param: Type, ...) -> Ret uses io requires cond ensures cond { body }
+fn name(param: Type, ...) -> Ret uses io noalloc requires cond ensures cond { body }
 fn first[T](xs: [T]) -> Option[T] { body }   // generic (see Generics)
+extern "lib/fast.c" fn mix(a: i64, b: i64) -> i64;   // written in C (see C functions)
 test "description" { body }
 allow untested "reason"       // before a fn: switches one lint off for it (see Projects)
 ```
 
 Comments start with `//` and run to the end of the line. Identifiers are ASCII letters, digits
 and `_`, not starting with a digit. Keywords: `allow fn import let pub var if else while for in
-match return break continue struct enum unit test requires ensures uses true false result`. The names
+match return break continue struct enum unit test requires ensures uses noalloc extern true false
+result`. The names
 `Some`, `None`, `Ok` and `Err` are reserved for the built-in enums.
 
 ## Modules
@@ -167,9 +169,38 @@ fn area(width: f64[m], height: f64[m]) -> f64[m^2] {
 
 ### Effects
 
-Functions are pure unless they declare `uses io`. Only `io` exists. `print`, and any call to a
-function that uses io, requires `uses io` on the caller. Declaring `uses io` without performing
-io is an error, so a signature always tells the truth.
+Functions are pure unless they declare their effects, so a signature says everything a call can
+do. There are three:
+
+| Effect | Performed by |
+|---|---|
+| `io` | `print` |
+| `clock` | `clock_ns` |
+| `random` | `random_below`, `random_f64`, `random_seed` |
+
+`fn main() uses io, random { ... }`: calling a function that has an effect needs the effect on
+the caller too. Declaring an effect a function never uses is an error, so a function without
+effects gives the same result for the same arguments. `uses` lists them in the order above.
+
+- **The clock** is monotonic: `clock_ns()` is nanoseconds since the program started, never the
+  date. `anvil run` and built executables read the real clock. Tests, goldens, `trace`,
+  `profile` and fuzzing read a **virtual clock** whose n-th read (from 0) gives n milliseconds,
+  so they stay deterministic; an executable reads it when `ANVIL_CLOCK=virtual` is set (any other
+  value is an error).
+- **Random numbers** come from one sequence per run (SplitMix64), starting from seed 0 every run
+  and every test, so a program that never calls `random_seed` draws the same numbers each time.
+  `random_seed(n)` restarts the sequence; seed it from the clock for numbers that differ between
+  runs. `random_below(n)` is uniform in `0..n` and panics unless `n > 0`; `random_f64()` is uniform
+  in [0, 1), a multiple of 2^-53. The sequence is part of the language: both backends, and every
+  version, draw the same numbers from the same seed.
+
+**`noalloc`** after the effects promises that a function never allocates, so it can run where
+allocation is too slow or must not fail. The checker holds it to that (E0333): interpolation,
+joining strings, array and map literals, slices, `split`, `keys`, `values`, `push`, `pop`, `set`,
+`remove` and assigning to an array element may allocate; arithmetic, comparisons, struct fields,
+indexing, `len`, the str searches, `get`, `has`, `print` and the other built-ins never do. A
+noalloc function may only call functions that are noalloc too (E0334). Allocation is not an
+effect: most functions allocate, so it is the promise not to that a signature carries.
 
 ### Contracts
 
@@ -185,6 +216,30 @@ fn safe_div(n: i64, d: i64) -> i64
 `requires` clauses run on entry, `ensures` clauses before returning (including returns made by
 `?`), with `result` naming the return value. A false clause is a panic naming the clause.
 Contracts must be pure. All `requires` come before all `ensures`.
+
+### C functions
+
+```
+extern fn atan2(y: f64, x: f64) -> f64 noalloc;          // from the C runtime (libm)
+extern "c/geo.c" fn gcd(a: i64, b: i64) -> i64 noalloc;  // from a C file next to this one
+```
+
+- An `extern` declares a function written in C: a signature ending in `;`. With a file in quotes
+  (relative to the Anvil file's directory, like imports) the C function is in that `.c` file;
+  without one it comes from the C runtime.
+- Only `i64` (C's `int64_t`) and `f64` (C's `double`, with any unit) cross, as parameters and as
+  the result; an extern may return nothing (E0800). Externs cannot be generic or have contracts:
+  wrap one in an Anvil function that checks its arguments.
+- Anvil cannot see inside C, so an extern's effects and `noalloc` are what its declaration says,
+  and the declaration is trusted. It may declare `uses clock` and `uses random`, but the virtual
+  clock and the seed do not reach into C. It may not declare `uses io` (E0802): C's output would
+  bypass Anvil's, which tests, goldens and tools capture.
+- They are called like any function (named arguments when there are two or more) and appear in
+  traces and profiles. The C file is compiled with the platform's C compiler (MSVC's `cl.exe`, or
+  `cc`) for `build`, and into a library the interpreter loads for `run`, `test` and goldens, with
+  the same flags, so both backends call the same code; executables stay byte-identical. A C file
+  that does not compile is an error with the compiler's message. `main` and names starting with
+  `anvil_` are the runtime's (E0803).
 
 ## Statements
 
@@ -394,6 +449,10 @@ target's bounds are checked.
 | `abs(x)` | absolute value of `i64` (panics on `i64` minimum) or `f64` |
 | `to_f64(i)` | `i64` to dimensionless `f64` |
 | `to_i64(x)` | dimensionless `f64` to `i64`, truncating |
+| `clock_ns()` | `i64` nanoseconds since the program started; needs `uses clock` |
+| `random_below(n)` | uniform `i64` in `0..n`, panics unless `n > 0`; needs `uses random` |
+| `random_f64()` | uniform `f64` in [0, 1); needs `uses random` |
+| `random_seed(n)` | restarts the random sequence from seed `n`; needs `uses random` |
 
 Built-ins take positional arguments. To print several values, interpolate:
 `print("{a} and {b}")`.
@@ -414,13 +473,14 @@ must be in 0..=255. A panic writes `panic: <message>` to stderr and exits with c
 Panic messages name the source location: `index 3 out of bounds for length 3 at
 main.anv:12:9`.
 
-Output is byte-identical on every platform (`\n` line endings) and every run: Anvil has no
-randomness, clock or environment access.
+Output is byte-identical on every platform (`\n` line endings) and every run of a program
+without `uses clock`: random numbers are seeded (see Effects) and Anvil has no environment access.
 
 ## Tests
 
 `test "name" { ... }` blocks run with `anvil test file.anv`. A test passes if it finishes and
-fails if it panics (`assert`, a contract, overflow, a bad index). Tests may declare `uses io`.
+fails if it panics (`assert`, a contract, overflow, a bad index). Tests may declare effects; each
+starts with the random sequence at seed 0 and the virtual clock at 0.
 
 A **property test** names inputs after `for all` and runs on generated values of their types:
 
@@ -549,7 +609,7 @@ a test; where no test can reach the function, write `allow untested "reason"` on
 before the `fn`. The reason is required, an unknown lint or a repeated allow is an error, and
 an allow on a function that does run is reported as stale.
 
-`anvil-mcp` serves the same commands, except `watch`, as MCP tools over stdio (`type-at` is
+`anvil-mcp` serves the same commands, except `watch` and `lsp`, as MCP tools over stdio (`type-at` is
 `type_at`, `golden check` is `golden_check`), with the same arguments and the same JSON; a
 failing check is a tool error. Over MCP, every run stops after 100,000,000 steps unless
 `max_steps` says otherwise.

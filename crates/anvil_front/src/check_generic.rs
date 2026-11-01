@@ -63,8 +63,8 @@ pub(super) struct Generic<'a> {
     pub module: usize,
     pub public: bool,
     pub shape: Shape,
-    /// The abstract signature (functions): parameters, return type, uses io.
-    pub sig: (Vec<(String, Ty)>, Ty, bool),
+    /// The abstract signature (functions): parameters, return type, effects.
+    pub sig: (Vec<(String, Ty)>, Ty, Effects),
     /// The abstract fields (structs) or variants (enums), with `Ty::Param` for parameters.
     pub fields: Vec<(String, Ty)>,
     pub variants: Vec<VariantDef>,
@@ -155,7 +155,7 @@ impl<'a> Checker<'a> {
             module: self.module,
             public,
             shape: Shape::Unresolved,
-            sig: (Vec::new(), Ty::Void, false),
+            sig: (Vec::new(), Ty::Void, Effects::default()),
             fields: Vec::new(),
             variants: Vec::new(),
             unfilled: Vec::new(),
@@ -606,16 +606,18 @@ impl<'a> Checker<'a> {
         g: usize,
     ) -> Expr {
         self.resolve_shape(g);
-        let (params, ret, uses_io) = self.generics[g].sig.clone();
+        let (params, ret, effects) = self.generics[g].sig.clone();
         let name = callee.name.as_str();
-        let decl_span = match self.generics[g].kind {
-            GenericKind::Fn(d) => d.name.span,
-            _ => unreachable!(),
-        };
+        let GenericKind::Fn(d) = self.generics[g].kind else { unreachable!() };
+        let decl_span = d.name.span;
         let local = self.generics[g].module == self.module;
         self.note_use(callee.span, Some(self.generic_loc(g)));
-        if uses_io {
-            self.note_io(b, callee.span, &format!("calling `{name}`"));
+        for eff in effects.iter() {
+            self.note_effect(b, eff, callee.span, &format!("calling `{name}`"));
+        }
+        if d.noalloc.is_none() {
+            // A fix would edit the generic's signature; only the message is given.
+            self.note_alloc_call(b, callee.span, name, None);
         }
         let Some(true) = self.check_args(name, e.span, args, &params, local.then_some(decl_span)) else {
             for a in args {
@@ -748,15 +750,20 @@ impl<'a> Checker<'a> {
             return id;
         }
         let map = self.binding(g, &args);
-        let (params, ret, uses_io) = self.generics[g].sig.clone();
+        let (params, ret, effects) = self.generics[g].sig.clone();
         let params: Vec<(String, Ty)> = params.iter().map(|(n, t)| (n.clone(), self.subst(t, &map))).collect();
         let ret = self.subst(&ret, &map);
-        let span = match self.generics[g].kind {
-            GenericKind::Fn(d) => d.name.span,
-            _ => unreachable!(),
-        };
+        let GenericKind::Fn(d) = self.generics[g].kind else { unreachable!() };
         let id = self.sigs.len();
-        self.sigs.push(FuncSig { params, ret, uses_io, span, module: self.generics[g].module });
+        self.sigs.push(FuncSig {
+            params,
+            ret,
+            effects,
+            noalloc: d.noalloc.is_some(),
+            noalloc_insert: super::noalloc_insert(d),
+            span: d.name.span,
+            module: self.generics[g].module,
+        });
         self.instances.insert(key, id);
         let level = self.inst_level + 1;
         self.pending.push(Pending { id, generic: g, args, site: (self.module, site), level });
@@ -769,9 +776,17 @@ impl<'a> Checker<'a> {
     pub(super) fn check_generic_body(&mut self, g: usize) {
         self.resolve_shape(g);
         let GenericKind::Fn(d) = self.generics[g].kind else { return };
-        let (params, ret, uses_io) = self.generics[g].sig.clone();
+        let (params, ret, effects) = self.generics[g].sig.clone();
         let id = self.sigs.len();
-        self.sigs.push(FuncSig { params, ret, uses_io, span: d.name.span, module: self.module });
+        self.sigs.push(FuncSig {
+            params,
+            ret,
+            effects,
+            noalloc: d.noalloc.is_some(),
+            noalloc_insert: super::noalloc_insert(d),
+            span: d.name.span,
+            module: self.module,
+        });
         let was = std::mem::replace(&mut self.abstract_body, true);
         self.as_params(g, |c| c.func_at(d, id));
         self.abstract_body = was;
@@ -849,7 +864,8 @@ impl<'a> Checker<'a> {
             instance: true,
             params: Vec::new(),
             ret: Ty::Void,
-            uses_io: false,
+            effects: Effects::default(),
+            external: None,
             requires: Vec::new(),
             ensures: Vec::new(),
             result_local: None,

@@ -40,7 +40,8 @@ pub fn supported() -> Result<(), String> {
     Ok(())
 }
 
-pub fn link_exe(object: &[u8], out: &Path, work_dir: &Path) -> Result<(), String> {
+/// `objects` are the compiled C files of extern functions (see `compile_c`).
+pub fn link_exe(object: &[u8], objects: &[PathBuf], out: &Path, work_dir: &Path) -> Result<(), String> {
     supported()?;
     std::fs::create_dir_all(work_dir).map_err(|e| format!("cannot create {}: {e}", work_dir.display()))?;
     let (obj_name, rt_name) =
@@ -53,6 +54,7 @@ pub fn link_exe(object: &[u8], out: &Path, work_dir: &Path) -> Result<(), String
         if out.is_absolute() { out.to_path_buf() } else { std::env::current_dir().unwrap().join(out) };
     let (mut cmd, name) =
         if cfg!(windows) { msvc(&obj_path, &rt_path, &out_abs)? } else { unix(&obj_path, &rt_path, &out_abs) };
+    cmd.args(objects);
     let output = cmd.output().map_err(|e| format!("cannot run {name}: {e}"))?;
     if !output.status.success() {
         return Err(format!(
@@ -88,4 +90,66 @@ fn unix(obj: &Path, rt: &Path, out: &Path) -> (Command, String) {
     let mut cmd = Command::new(&cc);
     cmd.arg("-o").arg(out).arg(obj).arg(rt).args(["-lm", "-lpthread"]);
     (cmd, cc)
+}
+
+/// How C files are compiled, for executables and for the interpreter's library alike, so a C
+/// function computes the same thing in both.
+#[cfg(windows)]
+const C_FLAGS: &[&str] = &["/nologo", "/O2", "/MT", "/W3", "/Brepro"];
+#[cfg(not(windows))]
+const C_FLAGS: &[&str] = &["-O2", "-fPIC", "-Wall"];
+
+/// The C compiler: MSVC's cl.exe on Windows, `cc` (or `$CC`) elsewhere.
+pub(crate) fn c_compiler() -> Result<(Command, String), String> {
+    if cfg!(windows) {
+        let cmd = cc::windows_registry::find(TARGET, "cl.exe")
+            .ok_or_else(|| "cl.exe not found: install the Visual Studio C++ build tools".to_string())?;
+        Ok((cmd, "cl.exe".into()))
+    } else {
+        let cc = std::env::var("CC").unwrap_or_else(|_| "cc".into());
+        Ok((Command::new(&cc), cc))
+    }
+}
+
+/// Writes each C file into `dir` (as c0/name.c, c1/...) and compiles it there to an object;
+/// `#include "x.h"` still finds headers next to the original. Compiling in the file's own
+/// directory keeps every path out of the object, so builds stay byte-identical.
+pub fn compile_c(files: &[anvil_front::ir::CFile], dir: &Path) -> Result<Vec<PathBuf>, String> {
+    let mut objects = Vec::new();
+    for (i, f) in files.iter().enumerate() {
+        let sub = dir.join(format!("c{i}"));
+        std::fs::create_dir_all(&sub).map_err(|e| format!("cannot create {}: {e}", sub.display()))?;
+        let base = Path::new(&f.name).file_name().and_then(|n| n.to_str()).unwrap_or("extern.c").to_string();
+        std::fs::write(sub.join(&base), &f.text).map_err(|e| format!("cannot write {base}: {e}"))?;
+        let stem = base.strip_suffix(".c").unwrap_or(&base);
+        let obj = if cfg!(windows) { format!("{stem}.obj") } else { format!("{stem}.o") };
+        let (mut cmd, name) = c_compiler()?;
+        cmd.current_dir(&sub).args(C_FLAGS);
+        if let Some(parent) = Path::new(&f.name).parent().filter(|p| !p.as_os_str().is_empty()) {
+            let inc = std::env::current_dir().unwrap().join(parent);
+            cmd.arg(if cfg!(windows) { format!("/I{}", inc.display()) } else { format!("-I{}", inc.display()) });
+        }
+        if cfg!(windows) {
+            cmd.args(["/c", &base, &format!("/Fo{obj}")]);
+        } else {
+            cmd.args(["-c", &base, "-o", &obj]);
+        }
+        run_compiler(&mut cmd, &name, &f.name)?;
+        objects.push(sub.join(obj));
+    }
+    Ok(objects)
+}
+
+/// Runs a compiler; a failure is an error naming the file with everything the compiler said.
+pub(crate) fn run_compiler(cmd: &mut Command, name: &str, file: &str) -> Result<(), String> {
+    let output = cmd.output().map_err(|e| format!("cannot run {name}: {e}"))?;
+    if !output.status.success() {
+        return Err(format!(
+            "{name} could not compile {file} ({}):\n{}{}",
+            output.status,
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        ));
+    }
+    Ok(())
 }

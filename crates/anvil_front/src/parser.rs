@@ -41,6 +41,7 @@ pub fn parse(toks: Vec<Token>) -> (File, Vec<Diagnostic>) {
                         | Tok::Allow
                         | Tok::Import
                         | Tok::Pub
+                        | Tok::Extern
                 ) {
                     p.bump();
                 }
@@ -115,8 +116,9 @@ impl Parser {
                     Tok::Unit => self.unit_decl().map(Item::Unit)?,
                     Tok::Struct => self.struct_decl().map(Item::Struct)?,
                     Tok::Enum => self.enum_decl().map(Item::Enum)?,
-                    Tok::Fn => self.fn_decl(Vec::new()).map(|f| Item::Fn(Box::new(f)))?,
-                    _ => return Err(self.unexpected("`fn`, `struct`, `enum` or `unit` after `pub`")),
+                    Tok::Fn => self.fn_decl(Vec::new(), false).map(|f| Item::Fn(Box::new(f)))?,
+                    Tok::Extern => self.extern_decl(Vec::new()).map(|f| Item::Fn(Box::new(f)))?,
+                    _ => return Err(self.unexpected("`fn`, `extern`, `struct`, `enum` or `unit` after `pub`")),
                 };
                 match &mut item {
                     Item::Unit(d) => (d.public, d.span) = (true, start.to(d.span)),
@@ -130,17 +132,23 @@ impl Parser {
             Tok::Unit => self.unit_decl().map(Item::Unit),
             Tok::Struct => self.struct_decl().map(Item::Struct),
             Tok::Enum => self.enum_decl().map(Item::Enum),
-            Tok::Fn => self.fn_decl(Vec::new()).map(|f| Item::Fn(Box::new(f))),
+            Tok::Fn => self.fn_decl(Vec::new(), false).map(|f| Item::Fn(Box::new(f))),
+            Tok::Extern => self.extern_decl(Vec::new()).map(|f| Item::Fn(Box::new(f))),
             Tok::Allow => {
                 let mut allows = Vec::new();
                 while self.peek() == &Tok::Allow {
                     allows.push(self.allow_decl()?);
                 }
                 let public = if self.peek() == &Tok::Pub { Some(self.bump().span) } else { None };
-                if self.peek() != &Tok::Fn {
-                    return Err(self.unexpected("`fn` or another `allow` (an allow applies to the function after it)"));
-                }
-                let mut f = self.fn_decl(allows)?;
+                let mut f = match self.peek() {
+                    Tok::Fn => self.fn_decl(allows, false)?,
+                    Tok::Extern => self.extern_decl(allows)?,
+                    _ => {
+                        return Err(
+                            self.unexpected("`fn` or another `allow` (an allow applies to the function after it)")
+                        )
+                    }
+                };
                 if let Some(p) = public {
                     f.public = true;
                     f.span = p.to(f.span);
@@ -148,7 +156,7 @@ impl Parser {
                 Ok(Item::Fn(Box::new(f)))
             }
             Tok::Test => self.test_decl().map(Item::Test),
-            _ => Err(self.unexpected("`fn`, `struct`, `enum`, `unit`, `test`, `allow`, `import` or `pub`")),
+            _ => Err(self.unexpected("`fn`, `extern`, `struct`, `enum`, `unit`, `test`, `allow`, `import` or `pub`")),
         }
     }
 
@@ -359,7 +367,24 @@ impl Parser {
         Ok(AllowDecl { lint, reason, reason_span, span: start.to(reason_span) })
     }
 
-    fn fn_decl(&mut self, allows: Vec<AllowDecl>) -> PResult<FnDecl> {
+    /// `extern ["file.c"] fn name(params) -> Ret uses ... noalloc;`: a C function, no body.
+    fn extern_decl(&mut self, allows: Vec<AllowDecl>) -> PResult<FnDecl> {
+        let start = self.bump().span;
+        let source = match self.peek().clone() {
+            Tok::Str(s) => Some((s, self.bump().span)),
+            _ => None,
+        };
+        if self.peek() != &Tok::Fn {
+            return Err(self.unexpected("`fn`, or the C file in quotes: extern \"lib.c\" fn name(...)"));
+        }
+        let mut f = self.fn_decl(allows, true)?;
+        f.span = start.to(f.span);
+        f.external = Some(Extern { source, span: start });
+        Ok(f)
+    }
+
+    /// `external`: an extern's signature, which ends in `;` instead of a body.
+    fn fn_decl(&mut self, allows: Vec<AllowDecl>, external: bool) -> PResult<FnDecl> {
         let start = self.bump().span;
         let name = self.ident("function name")?;
         let type_params = self.type_params()?;
@@ -378,6 +403,33 @@ impl Parser {
         let ret = if self.eat(&Tok::Arrow) { Some(self.type_expr()?) } else { None };
         let uses_insert = self.prev_span().at_end();
         let (uses, uses_span) = self.uses_clause()?;
+        let noalloc = if self.peek() == &Tok::Noalloc { Some(self.bump().span) } else { None };
+        if external {
+            if matches!(self.peek(), Tok::Requires | Tok::Ensures) {
+                return Err(self.unexpected("`;`").note(
+                    "an extern function cannot have contracts: wrap it in an Anvil function that checks them",
+                    None,
+                ));
+            }
+            let semi = self.expect(Tok::Semi)?;
+            return Ok(FnDecl {
+                public: false,
+                name,
+                type_params,
+                params,
+                ret,
+                uses,
+                uses_span,
+                uses_insert,
+                noalloc,
+                external: None,
+                requires: Vec::new(),
+                ensures: Vec::new(),
+                body: Block { stmts: Vec::new(), span: semi },
+                span: start.to(semi),
+                allows,
+            });
+        }
         let mut requires = Vec::new();
         let mut ensures = Vec::new();
         loop {
@@ -411,6 +463,8 @@ impl Parser {
             uses,
             uses_span,
             uses_insert,
+            noalloc,
+            external: None,
             requires,
             ensures,
             body,

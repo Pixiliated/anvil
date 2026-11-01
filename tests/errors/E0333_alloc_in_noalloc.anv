@@ -1,0 +1,8 @@
+// expect: E0333
+fn label(n: i64) -> str noalloc {
+    return "item {n}";
+}
+
+fn main() uses io {
+    print(label(3));
+}

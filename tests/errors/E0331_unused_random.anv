@@ -1,0 +1,5 @@
+// expect: E0331
+// resolve: mechanical
+fn main() uses io, random {
+    print("no dice");
+}
