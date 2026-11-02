@@ -1,0 +1,10 @@
+// expect: E0406
+interface Named {
+    fn name(self) -> str;
+}
+
+fn shout[T: Named](x: T) -> str {
+    return x.loud();
+}
+
+fn main() {}

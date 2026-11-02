@@ -1,0 +1,47 @@
+// A module whose type brings its methods along: importing `Money` is enough to call them.
+pub struct Money {
+    cents: i64,
+}
+
+pub interface Priced {
+    fn price(self) -> Money;
+    fn label(self) -> str;
+}
+
+pub fn money(cents: i64) -> Money {
+    return Money { cents: cents };
+}
+
+pub fn Money.plus(self, other: Money) -> Money {
+    return Money { cents: self.cents + other.cents };
+}
+
+pub fn Money.times(self, n: i64) -> Money {
+    return Money { cents: self.cents * n };
+}
+
+pub fn Money.text(self) -> str {
+    return "${self.dollars()}.{self.rest()}";
+}
+
+fn Money.dollars(self) -> i64 {
+    return self.cents / 100;
+}
+
+// Two digits, so 5 cents reads .05.
+fn Money.rest(self) -> str {
+    let r: i64 = self.cents % 100;
+    if r < 10 {
+        return "0{r}";
+    }
+    return "{r}";
+}
+
+// The total of anything priced, in this module and in any that imports Priced.
+pub fn total[T: Priced](items: [T]) -> Money {
+    var sum: Money = money(0);
+    for item in items {
+        sum = sum.plus(item.price());
+    }
+    return sum;
+}

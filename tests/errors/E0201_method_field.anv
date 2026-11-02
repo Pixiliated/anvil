@@ -1,0 +1,12 @@
+// expect: E0201
+struct Point {
+    x: i64,
+}
+
+fn Point.x(self) -> i64 {
+    return self.x;
+}
+
+fn main() -> i64 {
+    return Point { x: 1 }.x;
+}

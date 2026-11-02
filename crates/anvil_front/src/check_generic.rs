@@ -21,6 +21,8 @@ pub(super) enum Constraint {
     Ordered,
     Text,
     Key,
+    /// A declared interface, by index (see check_methods.rs).
+    Interface(usize),
 }
 
 pub(super) const CONSTRAINTS: &[(&str, Constraint, &str)] = &[
@@ -29,8 +31,9 @@ pub(super) const CONSTRAINTS: &[(&str, Constraint, &str)] = &[
     ("key", Constraint::Key, "i64 and str, so it can be a map key"),
 ];
 
+/// The name of a built-in constraint (interfaces are named by their declaration).
 fn constraint_name(c: Constraint) -> &'static str {
-    CONSTRAINTS.iter().find(|(_, k, _)| *k == c).unwrap().0
+    CONSTRAINTS.iter().find(|(_, k, _)| *k == c).map_or("an interface", |c| c.0)
 }
 
 #[derive(Clone)]
@@ -121,12 +124,20 @@ impl<'a> Checker<'a> {
             }
             let mut constraints = Vec::new();
             for c in &d.constraints {
+                self.touch(&c.name);
                 match CONSTRAINTS.iter().find(|(name, _, _)| *name == c.name) {
                     Some((_, k, _)) => constraints.push(*k),
+                    None if self.interface_index.contains_key(&c.name) => {
+                        let i = self.interface_index[&c.name];
+                        let loc = self.interface_loc(i);
+                        self.note_use(c.span, Some(loc));
+                        constraints.push(Constraint::Interface(i));
+                    }
                     None => {
-                        let names: Vec<String> = CONSTRAINTS.iter().map(|(n, _, _)| n.to_string()).collect();
+                        let mut names: Vec<String> = CONSTRAINTS.iter().map(|(n, _, _)| n.to_string()).collect();
+                        names.extend(self.interface_index.keys().cloned());
                         let mut diag = Diagnostic::new("E0702", c.span, format!("unknown constraint `{}`", c.name))
-                            .note("the constraints are ordered, text and key", None);
+                            .note("the constraints are ordered, text and key, and the interfaces in scope", None);
                         if let Some(s) = super::closest(&c.name, names.iter()) {
                             diag = diag.fix1(FixKind::ChangesMeaning, format!("did you mean `{s}`?"), c.span, s);
                         }
@@ -161,6 +172,8 @@ impl<'a> Checker<'a> {
             unfilled: Vec::new(),
         });
         match kind {
+            // Methods are found by their type, not by name.
+            GenericKind::Fn(d) if d.receiver.is_some() => None,
             GenericKind::Fn(_) => self.generic_fns.insert(name.name.clone(), id),
             _ => self.generic_types.insert(name.name.clone(), id),
         };
@@ -499,7 +512,7 @@ impl<'a> Checker<'a> {
 
     /// Binds the parameters in `pattern` so it matches `actual`; the first binding of each wins
     /// (a conflicting later argument is then reported as a plain type mismatch).
-    fn unify(&self, pattern: &Ty, actual: &Ty, binds: &mut HashMap<String, Ty>) {
+    pub(super) fn unify(&self, pattern: &Ty, actual: &Ty, binds: &mut HashMap<String, Ty>) {
         match (pattern, actual) {
             (Ty::Param(n), a) if *a != Ty::Error => {
                 binds.entry(n.clone()).or_insert_with(|| a.clone());
@@ -570,6 +583,21 @@ impl<'a> Checker<'a> {
         let name = self.generics[g].name.clone();
         for (p, a) in params.iter().zip(args) {
             for c in &p.constraints {
+                if let (Constraint::Interface(i), false) = (c, matches!(a, Ty::Param(_) | Ty::Error)) {
+                    if let Err(why) = self.implements(a, *i) {
+                        ok = false;
+                        let (shown, iname) = (self.show(a), self.interfaces[*i].name.clone());
+                        self.err(
+                            Diagnostic::new(
+                                "E0701",
+                                at,
+                                format!("`{name}` needs `{}: {iname}`, but {} is {shown} here", p.name, p.name),
+                            )
+                            .note(why, None),
+                        );
+                    }
+                    continue;
+                }
                 if !self.satisfies(a, *c) {
                     ok = false;
                     let shown = self.show(a);
@@ -618,10 +646,14 @@ impl<'a> Checker<'a> {
         callee: &ast::Ident,
         args: &[ast::Arg],
         g: usize,
+        receiver: Option<&ast::Expr>,
     ) -> Expr {
         self.resolve_shape(g);
         let (params, ret, effects) = self.generics[g].sig.clone();
-        let name = callee.name.as_str();
+        let name = &self.generics[g].name.clone();
+        // A method's receiver is its first argument, given before the `.`.
+        let skip = usize::from(receiver.is_some());
+        let values: Vec<&ast::Expr> = receiver.into_iter().chain(args.iter().map(|a| &a.value)).collect();
         let GenericKind::Fn(d) = self.generics[g].kind else { unreachable!() };
         let decl_span = d.name.span;
         let local = self.generics[g].module == self.module;
@@ -633,32 +665,32 @@ impl<'a> Checker<'a> {
             // A fix would edit the generic's signature; only the message is given.
             self.note_alloc_call(b, callee.span, name, None);
         }
-        let Some(true) = self.check_args(name, e.span, args, &params, local.then_some(decl_span)) else {
-            for a in args {
-                self.expr(b, &a.value);
+        let Some(true) = self.check_args(name, e.span, args, &params[skip..], local.then_some(decl_span)) else {
+            for v in &values {
+                self.expr(b, v);
             }
             return Self::err_expr();
         };
-        let binds = self.infer(b, args.iter().map(|a| &a.value), params.iter().map(|(_, t)| t));
+        let binds = self.infer(b, values.iter().copied(), params.iter().map(|(_, t)| t));
         let tps = self.generics[g].params.clone();
         if tps.iter().any(|p| !binds.contains_key(&p.name)) {
             // Only when an argument had an error of its own: report those.
-            for a in args {
-                self.expr(b, &a.value);
+            for v in &values {
+                self.expr(b, v);
             }
             return Self::err_expr();
         }
         let targs: Vec<Ty> = tps.iter().map(|p| binds[&p.name].clone()).collect();
         if !self.constraints_hold(g, &targs, e.span) {
-            for a in args {
-                self.expr(b, &a.value);
+            for v in &values {
+                self.expr(b, v);
             }
             return Self::err_expr();
         }
         let mut vals = Vec::new();
-        for (a, (_, t)) in args.iter().zip(&params) {
+        for (v, (_, t)) in values.iter().zip(&params) {
             let want = self.subst(t, &binds);
-            vals.push(self.expect(b, &a.value, &want));
+            vals.push(self.expect(b, v, &want));
         }
         let ret = self.subst(&ret, &binds);
         if vals.iter().any(|v| v.ty == Ty::Error) {
@@ -836,8 +868,8 @@ impl<'a> Checker<'a> {
             (self.module, self.src) = (here.0, here.1);
             self.load_scope(here.2);
             let shown: Vec<String> = p.args.iter().map(|a| self.show(a)).collect();
-            let qualified =
-                if module_name.is_empty() { d.name.name.clone() } else { format!("{module_name}.{}", d.name.name) };
+            let own = self.generics[g].name.clone();
+            let qualified = if module_name.is_empty() { own } else { format!("{module_name}.{own}") };
             let label = format!("{qualified}[{}]", shown.join(", "));
             let f = match f.take() {
                 Some(mut f) => {

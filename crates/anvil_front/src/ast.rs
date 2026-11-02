@@ -20,7 +20,26 @@ pub enum Item {
     Struct(StructDecl),
     Enum(EnumDecl),
     Fn(Box<FnDecl>),
+    Interface(InterfaceDecl),
     Test(TestDecl),
+}
+
+/// `interface Area { fn area(self) -> f64[m^2]; }`: methods a type must have to meet the
+/// constraint `T: Area`. Each method's body is empty, spanning its `;`; `self` is of type `Self`.
+#[derive(Clone, Debug)]
+pub struct InterfaceDecl {
+    pub public: bool,
+    pub name: Ident,
+    pub methods: Vec<FnDecl>,
+    pub span: Span,
+}
+
+/// `fn Circle.area(self)`: the type a method is declared on, and that type's parameters as the
+/// method names them (`fn Stack[T].top(self)`).
+#[derive(Clone, Debug)]
+pub struct Receiver {
+    pub ty: Ident,
+    pub type_params: Vec<TypeParamDecl>,
 }
 
 /// `import shapes.circle.{area, Circle};`: names from the module in `shapes/circle.anv`, a path
@@ -135,6 +154,9 @@ pub struct FnDecl {
     pub span: Span,
     /// `allow LINT "reason"` lines written before `fn`.
     pub allows: Vec<AllowDecl>,
+    /// A method: its type. The first parameter is then `self`, of that type, and `type_params`
+    /// starts with the receiver's.
+    pub receiver: Option<Receiver>,
 }
 
 /// Where an extern function's C code is: a `.c` file named relative to the Anvil file, or the C

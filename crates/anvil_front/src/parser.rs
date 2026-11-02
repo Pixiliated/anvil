@@ -42,6 +42,7 @@ pub fn parse(toks: Vec<Token>) -> (File, Vec<Diagnostic>) {
                         | Tok::Import
                         | Tok::Pub
                         | Tok::Extern
+                        | Tok::Interface
                 ) && !(p.peek() == &Tok::Fn && p.peek_at(1) != &Tok::LParen)
                 {
                     p.bump();
@@ -119,9 +120,15 @@ impl Parser {
                     Tok::Enum => self.enum_decl().map(Item::Enum)?,
                     Tok::Fn => self.fn_decl(Vec::new(), false).map(|f| Item::Fn(Box::new(f)))?,
                     Tok::Extern => self.extern_decl(Vec::new()).map(|f| Item::Fn(Box::new(f)))?,
-                    _ => return Err(self.unexpected("`fn`, `extern`, `struct`, `enum` or `unit` after `pub`")),
+                    Tok::Interface => self.interface_decl().map(Item::Interface)?,
+                    _ => {
+                        return Err(
+                            self.unexpected("`fn`, `extern`, `struct`, `enum`, `interface` or `unit` after `pub`")
+                        )
+                    }
                 };
                 match &mut item {
+                    Item::Interface(d) => (d.public, d.span) = (true, start.to(d.span)),
                     Item::Unit(d) => (d.public, d.span) = (true, start.to(d.span)),
                     Item::Struct(d) => (d.public, d.span) = (true, start.to(d.span)),
                     Item::Enum(d) => (d.public, d.span) = (true, start.to(d.span)),
@@ -135,6 +142,7 @@ impl Parser {
             Tok::Enum => self.enum_decl().map(Item::Enum),
             Tok::Fn => self.fn_decl(Vec::new(), false).map(|f| Item::Fn(Box::new(f))),
             Tok::Extern => self.extern_decl(Vec::new()).map(|f| Item::Fn(Box::new(f))),
+            Tok::Interface => self.interface_decl().map(Item::Interface),
             Tok::Allow => {
                 let mut allows = Vec::new();
                 while self.peek() == &Tok::Allow {
@@ -157,7 +165,9 @@ impl Parser {
                 Ok(Item::Fn(Box::new(f)))
             }
             Tok::Test => self.test_decl().map(Item::Test),
-            _ => Err(self.unexpected("`fn`, `extern`, `struct`, `enum`, `unit`, `test`, `allow`, `import` or `pub`")),
+            _ => Err(self.unexpected(
+                "`fn`, `extern`, `struct`, `enum`, `interface`, `unit`, `test`, `allow`, `import` or `pub`",
+            )),
         }
     }
 
@@ -348,6 +358,90 @@ impl Parser {
         Ok(out)
     }
 
+    /// `interface Name { fn m(self, ...) -> R uses ...; ... }`
+    fn interface_decl(&mut self) -> PResult<InterfaceDecl> {
+        let start = self.bump().span;
+        let name = self.ident("interface name")?;
+        self.expect(Tok::LBrace)?;
+        let mut methods = Vec::new();
+        while self.peek() != &Tok::RBrace {
+            if self.peek() != &Tok::Fn {
+                return Err(self.unexpected("`fn` and a method signature ending in `;`, or `}`"));
+            }
+            let fstart = self.bump().span;
+            let mname = self.ident("method name")?;
+            if self.peek() == &Tok::LBracket {
+                return Err(self.unexpected("`(`").note("interface methods are not generic", None));
+            }
+            let self_ty = TypeExpr {
+                kind: TypeKind::Named {
+                    name: Ident { name: "Self".into(), span: mname.span },
+                    unit: None,
+                    args: Vec::new(),
+                },
+                span: mname.span,
+            };
+            let params = self.params(Some(self_ty))?;
+            let ret = if self.eat(&Tok::Arrow) { Some(self.ret_type()?) } else { None };
+            let uses_insert = self.prev_span().at_end();
+            let (uses, uses_span) = self.uses_clause()?;
+            let noalloc = if self.peek() == &Tok::Noalloc { Some(self.bump().span) } else { None };
+            let semi = self.expect(Tok::Semi)?;
+            methods.push(FnDecl {
+                public: false,
+                name: mname,
+                type_params: Vec::new(),
+                params,
+                ret,
+                uses,
+                uses_span,
+                uses_insert,
+                noalloc,
+                external: None,
+                requires: Vec::new(),
+                ensures: Vec::new(),
+                body: Block { stmts: Vec::new(), span: semi },
+                span: fstart.to(semi),
+                allows: Vec::new(),
+                receiver: None,
+            });
+        }
+        let end = self.expect(Tok::RBrace)?;
+        Ok(InterfaceDecl { public: false, name, methods, span: start.to(end) })
+    }
+
+    /// `(a: T, b: U)`. With `self_ty`, a method's: the first parameter is `self`, of that type.
+    fn params(&mut self, self_ty: Option<TypeExpr>) -> PResult<Vec<Param>> {
+        self.expect(Tok::LParen)?;
+        let mut params = Vec::new();
+        if let Some(ty) = self_ty {
+            if self.peek() != &Tok::SelfValue {
+                return Err(self.unexpected("`self`: a method's first parameter is `self`"));
+            }
+            let span = self.bump().span;
+            params.push(Param { name: Ident { name: "self".into(), span }, ty: TypeExpr { span, ..ty } });
+            if !self.eat(&Tok::Comma) {
+                self.expect(Tok::RParen)?;
+                return Ok(params);
+            }
+        } else if self.peek() == &Tok::SelfValue {
+            return Err(self
+                .unexpected("a parameter name")
+                .note("`self` is the first parameter of a method: fn Type.name(self)", None));
+        }
+        while self.peek() != &Tok::RParen {
+            let pname = self.ident("parameter name")?;
+            self.expect(Tok::Colon)?;
+            let ty = self.type_expr()?;
+            params.push(Param { name: pname, ty });
+            if !self.eat(&Tok::Comma) {
+                break;
+            }
+        }
+        self.expect(Tok::RParen)?;
+        Ok(params)
+    }
+
     fn struct_decl(&mut self) -> PResult<StructDecl> {
         let start = self.bump().span;
         let name = self.ident("struct name")?;
@@ -445,20 +539,26 @@ impl Parser {
     /// `external`: an extern's signature, which ends in `;` instead of a body.
     fn fn_decl(&mut self, allows: Vec<AllowDecl>, external: bool) -> PResult<FnDecl> {
         let start = self.bump().span;
-        let name = self.ident("function name")?;
-        let type_params = self.type_params()?;
-        self.expect(Tok::LParen)?;
-        let mut params = Vec::new();
-        while self.peek() != &Tok::RParen {
-            let pname = self.ident("parameter name")?;
-            self.expect(Tok::Colon)?;
-            let ty = self.type_expr()?;
-            params.push(Param { name: pname, ty });
-            if !self.eat(&Tok::Comma) {
-                break;
-            }
+        let mut name = self.ident("function name")?;
+        let mut type_params = self.type_params()?;
+        // `fn Circle.area(self)`, `fn Stack[T].top(self)`: a method of that type.
+        let mut receiver = None;
+        let mut self_ty = None;
+        if self.eat(&Tok::Dot) {
+            let args = type_params
+                .iter()
+                .map(|p: &TypeParamDecl| TypeExpr {
+                    kind: TypeKind::Named { name: p.name.clone(), unit: None, args: Vec::new() },
+                    span: p.name.span,
+                })
+                .collect();
+            self_ty =
+                Some(TypeExpr { kind: TypeKind::Named { name: name.clone(), unit: None, args }, span: name.span });
+            receiver = Some(Receiver { ty: name, type_params: type_params.clone() });
+            name = self.ident("method name")?;
+            type_params.extend(self.type_params()?);
         }
-        self.expect(Tok::RParen)?;
+        let params = self.params(self_ty)?;
         let ret = if self.eat(&Tok::Arrow) { Some(self.ret_type()?) } else { None };
         let uses_insert = self.prev_span().at_end();
         let (uses, uses_span) = self.uses_clause()?;
@@ -487,6 +587,7 @@ impl Parser {
                 body: Block { stmts: Vec::new(), span: semi },
                 span: start.to(semi),
                 allows,
+                receiver,
             });
         }
         let mut requires = Vec::new();
@@ -529,6 +630,7 @@ impl Parser {
             body,
             span,
             allows,
+            receiver,
         })
     }
 
@@ -890,6 +992,7 @@ impl Parser {
             span: start.to(body.span),
             body,
             allows: Vec::new(),
+            receiver: None,
         })
     }
 
@@ -994,6 +1097,10 @@ impl Parser {
             Tok::Result => {
                 self.bump();
                 ExprKind::Result
+            }
+            Tok::SelfValue => {
+                let span = self.bump().span;
+                ExprKind::Name(Ident { name: "self".into(), span })
             }
             Tok::Fn => ExprKind::Lambda(Box::new(self.lambda()?)),
             Tok::LParen => {

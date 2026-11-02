@@ -605,8 +605,13 @@ pub fn outline_in(files: Files, file: &str) -> Report {
                 human.push_str(&format!("{:>4}  {sig}\n", line(f.span)));
                 let allows: Vec<_> =
                     f.allows.iter().map(|a| json!({ "lint": a.lint.name, "reason": a.reason })).collect();
+                let name = match &f.receiver {
+                    Some(r) => format!("{}.{}", r.ty.name, f.name.name),
+                    None => f.name.name.clone(),
+                };
                 json!({
-                    "kind": "fn", "name": f.name.name, "pub": f.public, "line": line(f.span), "signature": sig,
+                    "kind": if f.receiver.is_some() { "method" } else { "fn" },
+                    "name": name, "pub": f.public, "line": line(f.span), "signature": sig,
                     "effects": f.uses.iter().map(|u| u.name.as_str()).collect::<Vec<_>>(),
                     "noalloc": f.noalloc.is_some(),
                     "extern": f.external.as_ref().map(|x| match &x.source {
@@ -629,6 +634,17 @@ pub fn outline_in(files: Files, file: &str) -> Report {
                 let variants: Vec<String> = e.variants.iter().map(|v| one_line(&text(v.span))).collect();
                 human.push_str(&format!("{:>4}  enum {} {{ {} }}\n", line(e.span), e.name.name, variants.join(", ")));
                 json!({ "kind": "enum", "name": e.name.name, "line": line(e.span), "variants": variants })
+            }
+            Item::Interface(i) => {
+                let methods: Vec<String> =
+                    i.methods.iter().map(|m| one_line(&text(m.span)).trim_end_matches(';').to_string()).collect();
+                human.push_str(&format!(
+                    "{:>4}  interface {} {{ {} }}\n",
+                    line(i.span),
+                    i.name.name,
+                    methods.join("; ")
+                ));
+                json!({ "kind": "interface", "name": i.name.name, "pub": i.public, "line": line(i.span), "methods": methods })
             }
             Item::Unit(u) => {
                 human.push_str(&format!("{:>4}  {}\n", line(u.span), text(u.span)));

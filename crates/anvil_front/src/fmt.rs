@@ -245,6 +245,28 @@ impl Printer<'_> {
                 self.line("}");
             }
             Item::Fn(f) => self.func(f),
+            Item::Interface(i) => {
+                let head = format!("{}interface {}", vis(i.public), i.name.name);
+                let open = self.after_brace(i.name.span.end);
+                if i.methods.is_empty() && !self.has_comments(open, i.span.end) {
+                    self.line(&format!("{head} {{}}"));
+                    return;
+                }
+                self.line(&format!("{head} {{"));
+                self.depth += 1;
+                self.entries(
+                    &i.methods,
+                    open,
+                    i.span.end - 1,
+                    |_, _| false,
+                    |p, m| {
+                        let t = format!("{};", p.signature(m));
+                        p.line(&t);
+                    },
+                );
+                self.depth -= 1;
+                self.line("}");
+            }
             Item::Test(t) => {
                 let inputs = if t.inputs.is_empty() {
                     String::new()
@@ -289,7 +311,6 @@ impl Printer<'_> {
             let line = format!("allow {} {}", a.lint.name, self.slice(a.reason_span));
             self.line(&line);
         }
-        let params: Vec<String> = f.params.iter().map(|p| format!("{}: {}", p.name.name, self.ty(&p.ty))).collect();
         let external = match &f.external {
             Some(e) => match &e.source {
                 Some((_, span)) => format!("extern {} ", self.slice(*span)),
@@ -297,20 +318,7 @@ impl Printer<'_> {
             },
             None => String::new(),
         };
-        let mut head = format!(
-            "{}{external}fn {}{}({})",
-            vis(f.public),
-            f.name.name,
-            type_params(&f.type_params),
-            params.join(", ")
-        );
-        if let Some(r) = &f.ret {
-            head.push_str(&format!(" -> {}", self.ret_ty(r)));
-        }
-        head.push_str(&uses(&f.uses));
-        if f.noalloc.is_some() {
-            head.push_str(" noalloc");
-        }
+        let head = format!("{}{external}{}", vis(f.public), self.signature(f));
         if f.external.is_some() {
             self.line(&format!("{head};"));
             return;
@@ -331,6 +339,36 @@ impl Printer<'_> {
         }
         self.depth -= 1;
         self.block("", &f.body, "");
+    }
+
+    /// `fn name[T](params) -> R uses ... noalloc`; a method's `fn Type[T].name[U](self, ...)`.
+    fn signature(&self, f: &FnDecl) -> String {
+        let params: Vec<String> = f
+            .params
+            .iter()
+            .map(|p| {
+                if p.name.name == "self" {
+                    "self".to_string()
+                } else {
+                    format!("{}: {}", p.name.name, self.ty(&p.ty))
+                }
+            })
+            .collect();
+        let (owner, own_params) = match &f.receiver {
+            Some(r) => {
+                (format!("{}{}.", r.ty.name, type_params(&r.type_params)), &f.type_params[r.type_params.len()..])
+            }
+            None => (String::new(), &f.type_params[..]),
+        };
+        let mut head = format!("fn {owner}{}{}({})", f.name.name, type_params(own_params), params.join(", "));
+        if let Some(r) = &f.ret {
+            head.push_str(&format!(" -> {}", self.ret_ty(r)));
+        }
+        head.push_str(&uses(&f.uses));
+        if f.noalloc.is_some() {
+            head.push_str(" noalloc");
+        }
+        head
     }
 
     /// `head {`, the statements, `}` + `tail`; an empty block without comments is `head {}`.
@@ -711,8 +749,15 @@ impl Entry for Item {
                 Some(a) => a.span.to(f.span),
                 None => f.span,
             },
+            Item::Interface(i) => i.span,
             Item::Test(t) => t.span,
         }
+    }
+}
+
+impl Entry for FnDecl {
+    fn span(&self) -> Span {
+        self.span
     }
 }
 

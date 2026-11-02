@@ -320,6 +320,22 @@ pub fn complete_in(files: Files, file: &str, line: usize, col: usize) -> Report 
                 v["receiver_type"] = json!(ty);
                 let base = ty.split('[').next().unwrap_or(ty);
                 items.extend(members(&a, base, "field"));
+                // Another module's private methods cannot be called from here.
+                let callable = |d: &Def| d.file == 0 || d.detail.starts_with("pub ");
+                let own: Vec<Item> = a
+                    .facts
+                    .defs
+                    .iter()
+                    .filter(|d| d.kind == "method" && callable(d))
+                    .filter_map(|d| {
+                        d.name.strip_prefix(&format!("{base}.")).filter(|m| !m.contains('.')).map(|m| Item {
+                            label: m.to_string(),
+                            kind: "method",
+                            detail: d.detail.clone(),
+                        })
+                    })
+                    .collect();
+                items.extend(own);
                 items.extend(methods(ty));
             }
         }

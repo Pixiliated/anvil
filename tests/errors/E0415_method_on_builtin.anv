@@ -1,0 +1,8 @@
+// expect: E0415
+fn str.shout(self) -> str {
+    return self + "!";
+}
+
+fn main() uses io {
+    print("hi");
+}

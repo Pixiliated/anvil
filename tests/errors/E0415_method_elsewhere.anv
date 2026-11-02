@@ -1,0 +1,12 @@
+// expect: E0415
+import lib.counter.{Counter, counter};
+
+fn Counter.twice(self) -> Counter {
+    return self.next().next();
+}
+
+fn main() -> i64 {
+    let c: Counter = counter();
+    let _d: Counter = c.next();
+    return 0;
+}

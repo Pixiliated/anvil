@@ -1,0 +1,20 @@
+// expect: E0701
+interface Named {
+    fn name(self) -> str;
+}
+
+struct Dog {
+    age: i64,
+}
+
+fn Dog.name(self) -> i64 {
+    return self.age;
+}
+
+fn greet[T: Named](x: T) -> str {
+    return "hello {x.name()}";
+}
+
+fn main() uses io {
+    print(greet(Dog { age: 3 }));
+}

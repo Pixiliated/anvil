@@ -1,0 +1,6 @@
+// expect: E0603
+import lib.counter.{counter};
+
+fn main() -> i64 {
+    return counter().next().step();
+}

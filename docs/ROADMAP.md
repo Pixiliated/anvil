@@ -96,5 +96,11 @@ green and the interpreter and native backend agreeing on every program in `tests
   allows more; generics over function types (`map`, `keep`, `fold`, `sort_by` in Anvil)
 - [x] The fuzzer makes function literals and passes helpers as values
 
-## M15: Publishing
+## M15: Methods and interfaces (v0.16)
+- [x] Methods on structs and enums, `fn Type.name(self, ...)`, found by a value's type across
+  modules; methods of generic types and generic methods
+- [x] Interfaces as constraints (`T: Shape`), met by having the methods, with `Self`
+- [x] Outline, completion, refs and traces name methods `Type.name`
+
+## M16: Publishing
 - [ ] crates.io as `anvil-lang` (`anvil` is taken), docs site, contribution guide

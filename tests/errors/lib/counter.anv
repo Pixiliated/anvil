@@ -1,0 +1,16 @@
+// Imported by the error tests: a type with a pub method and a private one.
+pub struct Counter {
+    n: i64,
+}
+
+pub fn counter() -> Counter {
+    return Counter { n: 0 };
+}
+
+pub fn Counter.next(self) -> Counter {
+    return Counter { n: self.step() };
+}
+
+fn Counter.step(self) -> i64 {
+    return self.n + 1;
+}

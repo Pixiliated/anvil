@@ -294,3 +294,21 @@ Short records of choices that are not obvious from the code. Newest last.
   nothing are static objects, so they never allocate.
 - **Function literals are not linted as untested**: they belong to the function they are
   written in, which is.
+
+## M15 (v0.16)
+
+- **Methods are declared next to their type** (`fn Circle.area(self)`), in the type's module, so
+  a value's methods are found by its type and need no import, and two types can each have
+  `area`. Built-in and imported types take none: a function does the same job.
+- **Methods are functions with a receiver**, no new semantics: `self` is a value like any
+  parameter, so "mutating" methods return the new value. Both backends needed no change.
+- **Interfaces are constraints only.** Generics are already monomorphised, so `T: Shape` adds no
+  runtime cost, and a list of different shapes is an enum, which keeps match exhaustive. Values
+  of interface type (vtables) can come later without changing this syntax.
+- **Meeting an interface is structural**: a type that has the methods meets it, and E0701 says
+  which method is missing or differs. An `impl` declaration would repeat the signatures.
+- **`self` is a keyword and may go unused**: an interface can ask for a method whose
+  implementation needs nothing from its value.
+- **Privacy applies where a call is written.** An instance of a generic from another module
+  calls the type's methods through its interfaces, private or not: the type's module chose to
+  pass the value there.

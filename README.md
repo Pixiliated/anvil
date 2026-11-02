@@ -83,11 +83,11 @@ in full (`anvil spec` prints it).
 
 ## Status
 
-v0.15: programs of one or more files (modules with explicit imports and `pub`), generic
+v0.16: programs of one or more files (modules with explicit imports and `pub`), generic
 functions, structs and enums with built-in constraints, i64, f64 with units, bool, strings with interpolation,
 search and split, growable arrays and slices, maps in key order, structs, enums with
 exhaustive `match`, structural `==`, `Option` and `Result` with `?`, function values and
-closures,
+closures, methods and interfaces,
 contracts, effects (io with arguments and stdin, files, a clock, seeded random numbers),
 `noalloc`, C functions (`extern`) and tests. There are two backends:
 

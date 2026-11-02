@@ -1,0 +1,157 @@
+// Methods on structs, enums and generic types; interfaces as constraints, with Self; methods
+// found through a value's type across modules.
+import lib.money.{Money, Priced, money, total};
+
+unit m;
+
+interface Shape {
+    fn area(self) -> f64[m^2];
+    fn name(self) -> str;
+    fn scaled(self, by: f64) -> Self;
+}
+
+struct Circle {
+    r: f64[m],
+}
+
+enum Tile {
+    Square(side: f64[m]),
+    Strip(w: f64[m], h: f64[m]),
+}
+
+struct Item {
+    title: str,
+    cost: Money,
+    count: i64,
+}
+
+struct Stack[T] {
+    items: [T],
+}
+
+fn Circle.area(self) -> f64[m^2] {
+    return 3.0 * self.r * self.r;
+}
+
+fn Circle.name(self) -> str {
+    return "circle";
+}
+
+fn Circle.scaled(self, by: f64) -> Circle {
+    return Circle { r: self.r * by };
+}
+
+// A method with type parameters of its own.
+fn Circle.measure[U](self, f: fn(f64[m]) -> U) -> U {
+    return f(self.r);
+}
+
+fn Tile.area(self) -> f64[m^2] {
+    var a: f64[m^2] = 0.0[m^2];
+    match self {
+        Square(side) => { a = side * side; }
+        Strip(w, h) => { a = w * h; }
+    }
+    return a;
+}
+
+fn Tile.name(self) -> str {
+    var n: str = "";
+    match self {
+        Square(side: _) => { n = "square"; }
+        Strip(w: _, h: _) => { n = "strip"; }
+    }
+    return n;
+}
+
+fn Tile.scaled(self, by: f64) -> Tile {
+    var t: Tile = self;
+    match self {
+        Square(side) => { t = Tile.Square(side * by); }
+        Strip(w, h) => { t = Tile.Strip(w: w * by, h: h * by); }
+    }
+    return t;
+}
+
+fn Item.price(self) -> Money {
+    return self.cost.times(self.count);
+}
+
+fn Item.label(self) -> str {
+    return "{self.count} x {self.title}";
+}
+
+fn Stack[T].push(self, x: T) -> Stack[T] {
+    var items: [T] = self.items;
+    items.push(x);
+    return Stack { items: items };
+}
+
+fn Stack[T].top(self) -> Option[T] {
+    if self.items.len() == 0 {
+        return None;
+    }
+    return Some(self.items[self.items.len() - 1]);
+}
+
+fn Stack[T].len(self) -> i64 {
+    return self.items.len();
+}
+
+fn describe[T: Shape](x: T) -> str {
+    return "{x.name()}: {x.area()}, doubled {x.scaled(2.0).area()}";
+}
+
+fn largest[T: Shape](xs: [T]) -> str {
+    var best: str = "none";
+    var most: f64[m^2] = 0.0[m^2];
+    for x in xs {
+        if x.area() > most {
+            most = x.area();
+            best = x.name();
+        }
+    }
+    return best;
+}
+
+fn labels[T: Priced](xs: [T]) -> str {
+    var out: str = "";
+    for x in xs {
+        out = out + "[{x.label()} = {x.price().text()}]";
+    }
+    return out;
+}
+
+fn main() uses io {
+    let c: Circle = Circle { r: 1.0[m] };
+    print(describe(c));
+    print(describe(Tile.Strip(w: 2.0[m], h: 0.5[m])));
+    print(largest([Tile.Square(1.0[m]), Tile.Strip(w: 3.0[m], h: 1.0[m]), Tile.Square(1.5[m])]));
+    print(c.measure(fn(r: f64[m]) -> str {
+        return "radius {r}";
+    }));
+
+    var s: Stack[str] = Stack { items: [] };
+    s = s.push("a").push("b");
+    print("{s.len()} on the stack");
+    match s.top() {
+        Some(value: v) => { print("top {v}"); }
+        None => { print("empty"); }
+    }
+
+    // Money's methods come with the type, though only Money and its helpers are imported.
+    let lunch: Money = money(1250).plus(money(5));
+    print(lunch.text());
+    let cart: [Item] = [
+        Item { title: "tea", cost: money(250), count: 2 },
+        Item { title: "cake", cost: money(375), count: 1 },
+    ];
+    print(labels(cart));
+    print("total {total(cart).text()}");
+}
+
+test "methods of a generic type" {
+    let s: Stack[i64] = Stack { items: [1, 2, 3] };
+    assert(s.len() == 3);
+    assert(s.push(4).top() == Some(4));
+}

@@ -1,4 +1,4 @@
-# Anvil language specification (v0.15)
+# Anvil language specification (v0.16)
 
 Anvil is a small, compiled, general-purpose language designed to be written mostly by AI agents
 and read by humans. Its rules aim at three things: one obvious way to write each thing, code
@@ -21,6 +21,8 @@ struct Body { mass: f64[kg], pos: f64[m], }
 enum Shape { Circle(radius: f64[m]), Empty, }
 fn name(param: Type, ...) -> Ret uses io noalloc requires cond ensures cond { body }
 fn first[T](xs: [T]) -> Option[T] { body }   // generic (see Generics)
+fn Body.speed(self) -> f64[m/s] { body }     // a method (see Methods and interfaces)
+interface Moving { fn speed(self) -> f64[m/s]; }
 extern "lib/fast.c" fn mix(a: i64, b: i64) -> i64;   // written in C (see C functions)
 test "description" { body }
 allow untested "reason"       // before a fn: switches one lint off for it (see Projects)
@@ -28,8 +30,8 @@ allow untested "reason"       // before a fn: switches one lint off for it (see 
 
 Comments start with `//` and run to the end of the line. Identifiers are ASCII letters, digits
 and `_`, not starting with a digit. Keywords: `allow fn import let pub var if else while for in
-match return break continue struct enum unit test requires ensures uses noalloc extern true false
-result`. The names
+match return break continue struct enum unit test requires ensures uses noalloc extern interface
+self true false result`. The names
 `Some`, `None`, `Ok` and `Err` are reserved for the built-in enums.
 
 ## Modules
@@ -402,7 +404,8 @@ let leaf: Tree[str] = Tree.Leaf("a");
 | `text` | i64, f64, bool, str | print, interpolation |
 | `key` | i64, str | map keys |
 
-  `T: ordered + text` combines them. An operation the constraints do not allow is E0703 (its
+  An interface is a constraint too (see Methods and interfaces). `T: ordered + text` combines
+  them. An operation the constraints do not allow is E0703 (its
   fix adds the constraint); a call, literal or type whose arguments do not meet them is E0701,
   reported where it is used.
 - A generic body is checked once, against its constraints. Each set of type arguments then
@@ -410,6 +413,51 @@ let leaf: Tree[str] = Tree.Leaf("a");
   fast as code written for one type. A generic that calls itself with a larger type
   (`f[T]` calling `f[[T]]`) would need endless copies (E0704).
 - Generics can be pub and imported like any item.
+
+## Methods and interfaces
+
+```
+struct Circle { r: f64[m], }
+
+fn Circle.area(self) -> f64[m^2] {
+    return 3.0 * self.r * self.r;
+}
+
+fn Circle.scaled(self, by: f64) -> Circle {
+    return Circle { r: self.r * by };
+}
+
+interface Shape {
+    fn area(self) -> f64[m^2];
+    fn scaled(self, by: f64) -> Self;
+}
+
+fn doubled_area[T: Shape](x: T) -> f64[m^2] {
+    return x.scaled(2.0).area();
+}
+
+let a: f64[m^2] = Circle { r: 1.0[m] }.area();
+```
+
+- **A method** is a function declared on a struct or enum, `fn Type.name(self, ...)`, in the
+  module that declares the type (E0415; built-in types take none). `self` is the value it is
+  called on, immutable like any parameter, and may go unused. A generic type's methods name its
+  parameters: `fn Stack[T].push(self, x: T) -> Stack[T]`; a method may have type parameters of
+  its own after its name: `fn Circle.measure[U](self, f: fn(f64[m]) -> U) -> U`.
+- **Calls** are `x.name(args)`: the arguments after `self` follow the rule for calls (one is
+  unnamed, two or more are named). A value's methods are found by its type, so they need no
+  import; another module's methods are callable when they are `pub` (E0603). A method cannot
+  share a name with a field or variant of its type (E0201). Methods are plain functions:
+  values are passed in, a changed value is returned (`s = s.push(1)`), and traces name them
+  `Circle.area` (`Stack.push[i64]` for a generic type's).
+- **An interface** lists method signatures, with `self` first and `Self` for the type that has
+  them. It is a constraint on type parameters, alone or with others (`T: Shape + text`); a
+  generic body may call its methods on values of `T`. A type meets it when it has every method
+  with the same parameter and result types, `Self` being the type; its effects must be among
+  the interface method's, and it must be `noalloc` where the interface's is (E0701 says what
+  differs). Nothing declares that a type implements an interface: having the methods is enough.
+- Interfaces are constraints, not types: a list of different shapes is an enum whose variants
+  hold them. They can be `pub` and imported like types.
 
 ## Equality
 

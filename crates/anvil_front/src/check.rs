@@ -8,8 +8,11 @@ use crate::span::{SourceFile, Span};
 use crate::units::Unit;
 #[path = "check_generic.rs"]
 mod generic;
+#[path = "check_methods.rs"]
+mod methods;
 
 use generic::{Constraint, Generic, GenericKind, Pending, Scope};
+use methods::{InterfaceDef, Method, MethodFn};
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 
@@ -33,7 +36,7 @@ pub const BUILTINS: &[&str] = &[
 pub const EFFECTS: &[&str] = &["io", "fs", "clock", "random"];
 /// Constructors of the built-in Option and Result enums, usable without a type prefix.
 pub const CONSTRUCTORS: &[&str] = &["Some", "None", "Ok", "Err"];
-pub const TYPE_NAMES: &[&str] = &["i64", "f64", "bool", "str", "Option", "Result", "Map", "FileError"];
+pub const TYPE_NAMES: &[&str] = &["i64", "f64", "bool", "str", "Option", "Result", "Map", "FileError", "Self"];
 
 /// How completion shows each built-in function and constructor (same order as BUILTINS, then
 /// CONSTRUCTORS; a test keeps them in step).
@@ -126,6 +129,7 @@ struct Exports {
     units: HashMap<String, Unit>,
     generic_fns: HashMap<String, usize>,
     generic_types: HashMap<String, usize>,
+    interfaces: HashMap<String, usize>,
     public: HashSet<String>,
 }
 
@@ -247,6 +251,11 @@ pub struct Checker<'a> {
     file_error: EnumId,
     /// Function literals' bodies, lifted into functions of their own, by FuncId.
     lifted: Vec<(FuncId, Func)>,
+    /// Every interface, and the names the current module sees them by.
+    interfaces: Vec<InterfaceDef>,
+    interface_index: HashMap<String, usize>,
+    /// Methods by the type they are declared on (see `method_owner`), then by name.
+    methods: HashMap<String, HashMap<String, Method>>,
     sigs: Vec<FuncSig>,
     func_index: HashMap<String, FuncId>,
 }
@@ -365,6 +374,9 @@ pub fn analyze_modules<'a>(modules: &[Module<'a>], order: &[usize]) -> Analysis 
         builtin_enums: HashMap::new(),
         file_error: 0,
         lifted: Vec::new(),
+        interfaces: Vec::new(),
+        interface_index: HashMap::new(),
+        methods: HashMap::new(),
         sigs: Vec::new(),
         func_index: HashMap::new(),
     };
@@ -560,6 +572,7 @@ impl<'a> Checker<'a> {
         self.failed_imports.clear();
         self.generic_fns.clear();
         self.generic_types.clear();
+        self.interface_index.clear();
     }
 
     /// Checks one module: its imports, declarations and function bodies (and, for the root,
@@ -573,9 +586,11 @@ impl<'a> Checker<'a> {
         let mut fn_decls = Vec::new();
         let mut test_decls = Vec::new();
         let mut generic_decls = Vec::new();
+        let mut interface_decls = Vec::new();
         for item in &file.items {
             match item {
                 ast::Item::Import(i) => import_decls.push(i),
+                ast::Item::Interface(i) => interface_decls.push(i),
                 ast::Item::Unit(u) => unit_decls.push(u),
                 ast::Item::Struct(s) if !s.type_params.is_empty() => generic_decls.push(GenericKind::Struct(s)),
                 ast::Item::Enum(e) if !e.type_params.is_empty() => generic_decls.push(GenericKind::Enum(e)),
@@ -607,12 +622,19 @@ impl<'a> Checker<'a> {
             self.module_c.insert(written.clone(), entry);
         }
         self.declare_units(&unit_decls);
+        // Interface names before the type parameters that name them as constraints.
+        self.declare_interfaces(&interface_decls);
         // Generic names first, so other declarations can use them; their shapes once all names exist.
         let first_generic = self.generics.len();
-        self.declare_generics(&generic_decls);
+        let generic_methods = self.declare_generics(&generic_decls);
         self.declare_types(&struct_decls, &enum_decls);
+        // Generic methods are recorded on their types once every type of the module is declared.
+        for (d, g) in generic_methods {
+            self.register_method(d, MethodFn::Generic(g));
+        }
         let sig_base = self.sigs.len();
         self.declare_fns(&fn_decls);
+        self.resolve_interfaces(&interface_decls);
         let own_generics: Vec<usize> = (first_generic..self.generics.len()).collect();
         for &g in &own_generics {
             self.resolve_shape(g);
@@ -630,6 +652,9 @@ impl<'a> Checker<'a> {
         let mut funcs = Vec::new();
         for f in &fn_decls {
             let (id, mut func) = self.func(f);
+            if let Some(r) = &f.receiver {
+                func.name = format!("{}.{}", r.ty.name, func.name);
+            }
             if !me.name.is_empty() {
                 func.name = format!("{}.{}", me.name, func.name);
             }
@@ -676,12 +701,14 @@ impl<'a> Checker<'a> {
         ex.units = self.units.iter().filter(|(n, _)| own(n)).map(|(n, v)| (n.clone(), v.clone())).collect();
         ex.generic_fns = self.generic_fns.iter().filter(|(n, _)| own(n)).map(|(n, v)| (n.clone(), *v)).collect();
         ex.generic_types = self.generic_types.iter().filter(|(n, _)| own(n)).map(|(n, v)| (n.clone(), *v)).collect();
+        ex.interfaces = self.interface_index.iter().filter(|(n, _)| own(n)).map(|(n, v)| (n.clone(), *v)).collect();
         for item in &file.items {
             let name = match item {
                 ast::Item::Unit(d) if d.public => &d.name.name,
                 ast::Item::Struct(d) if d.public => &d.name.name,
                 ast::Item::Enum(d) if d.public => &d.name.name,
-                ast::Item::Fn(d) if d.public => &d.name.name,
+                ast::Item::Fn(d) if d.public && d.receiver.is_none() => &d.name.name,
+                ast::Item::Interface(d) if d.public => &d.name.name,
                 _ => continue,
             };
             ex.public.insert(name.clone());
@@ -735,6 +762,10 @@ impl<'a> Checker<'a> {
                 self.generic_types.insert(name.clone(), *g);
                 found = true;
             }
+            if let Some(i) = ex.interfaces.get(name) {
+                self.interface_index.insert(name.clone(), *i);
+                found = true;
+            }
             if !found {
                 self.failed_imports.insert(name.clone());
                 let names: Vec<String> = ex.public.iter().cloned().collect();
@@ -758,7 +789,7 @@ impl<'a> Checker<'a> {
             let decl = match (ex.funcs.get(name), ex.generic_fns.get(name).or(ex.generic_types.get(name))) {
                 (Some(&id), _) => Some(Loc { file: self.sigs[id].module, span: self.sigs[id].span }),
                 (_, Some(&g)) => Some(self.generic_loc(g)),
-                _ => type_span.or(unit_span),
+                _ => ex.interfaces.get(name).map(|&i| self.interface_loc(i)).or(type_span.or(unit_span)),
             };
             self.note_use(n.span, decl);
             if !ex.public.contains(name) {
@@ -1302,10 +1333,25 @@ impl<'a> Checker<'a> {
     }
 
     /// Registers generic functions, structs and enums by name; their shapes come later.
-    fn declare_generics(&mut self, decls: &[GenericKind<'a>]) {
+    /// Returns the generic methods, to be recorded on their types (`register_method`) once the
+    /// module's types are declared.
+    fn declare_generics(&mut self, decls: &[GenericKind<'a>]) -> Vec<(&'a ast::FnDecl, usize)> {
         let mut seen_types = HashMap::new();
         let mut seen_fns = HashMap::new();
+        let mut methods = Vec::new();
         for kind in decls {
+            if let GenericKind::Fn(d) = *kind {
+                if let Some(r) = &d.receiver {
+                    let full = format!("{}.{}", r.ty.name, d.name.name);
+                    let header = self.text(Span::new(d.span.start, d.body.span.start)).trim_end().to_string();
+                    let tps = self.type_params(&d.type_params);
+                    self.def(d.name.span, full.clone(), "method", header);
+                    let g = self.generics.len();
+                    self.add_generic(*kind, &ast::Ident { name: full, span: d.name.span }, tps, d.public);
+                    methods.push((d, g));
+                    continue;
+                }
+            }
             let (name, params, public, is_fn, header) = match *kind {
                 GenericKind::Fn(d) => {
                     let header = self.text(Span::new(d.span.start, d.body.span.start)).trim_end().to_string();
@@ -1326,11 +1372,31 @@ impl<'a> Checker<'a> {
             }
             self.add_generic(*kind, name, tps, public);
         }
+        methods
     }
 
     fn declare_fns(&mut self, decls: &[&ast::FnDecl]) {
         let mut seen = HashMap::new();
         for d in decls {
+            if let Some(r) = &d.receiver {
+                let params = d.params.iter().map(|p| (p.name.name.clone(), self.resolve_type(&p.ty))).collect();
+                let ret = d.ret.as_ref().map(|t| self.resolve_type(t)).unwrap_or(Ty::Void);
+                let effects = self.effects(&d.uses);
+                let header = self.text(Span::new(d.span.start, d.body.span.start)).trim_end().to_string();
+                self.def(d.name.span, format!("{}.{}", r.ty.name, d.name.name), "method", header);
+                let id = self.sigs.len();
+                self.sigs.push(FuncSig {
+                    params,
+                    ret,
+                    effects,
+                    noalloc: d.noalloc.is_some(),
+                    noalloc_insert: noalloc_insert(d),
+                    span: d.name.span,
+                    module: self.module,
+                });
+                self.register_method(d, MethodFn::Fn(id));
+                continue;
+            }
             if BUILTINS.contains(&d.name.name.as_str()) || CONSTRUCTORS.contains(&d.name.name.as_str()) {
                 self.err(Diagnostic::new("E0201", d.name.span, format!("`{}` is a built-in function", d.name.name)));
             }
@@ -1463,7 +1529,8 @@ impl<'a> Checker<'a> {
     fn finish_locals(&mut self, b: &Body) {
         for (id, m) in b.meta.iter().enumerate() {
             let name = &b.locals[id].name;
-            if !m.used && !name.starts_with('_') {
+            // A method may ignore `self` (an interface asks for the method, not for its use).
+            if !m.used && !name.starts_with('_') && name != "self" {
                 let mut d = Diagnostic::new("E0340", m.span, format!("`{name}` is never used"));
                 if m.is_param {
                     d = d.note(
@@ -1669,7 +1736,10 @@ impl<'a> Checker<'a> {
         let ret = self.sigs[id].ret.clone();
         let effects = self.sigs[id].effects;
         let mut b = self.new_body(ret.clone(), effects, &d.uses, d.uses_span, d.uses_insert, d.noalloc);
-        b.name = d.name.name.clone();
+        b.name = match &d.receiver {
+            Some(r) => format!("{}.{}", r.ty.name, d.name.name),
+            None => d.name.name.clone(),
+        };
         let mut params = Vec::new();
         for (i, p) in d.params.iter().enumerate() {
             let ty = self.sigs[id].params[i].1.clone();
@@ -3437,7 +3507,7 @@ impl<'a> Checker<'a> {
         }
         self.touch(name);
         if let (None, Some(&g)) = (self.func_index.get(name), self.generic_fns.get(name)) {
-            return self.generic_call(b, e, callee, args, g);
+            return self.generic_call(b, e, callee, args, g, None);
         }
         let Some(&fid) = self.func_index.get(name) else {
             if self.failed_imports.contains(name) {
@@ -4054,6 +4124,22 @@ impl<'a> Checker<'a> {
             return self.variant_ctor(b, e, (eid, receiver.span), method, Some(args));
         }
         let m = method.name.as_str();
+        // The receiver's type says whose method this is. Built-in mutating methods need the
+        // receiver as a place, so its type is learned quietly first.
+        let mutating = matches!(m, "push" | "pop" | "set" | "remove");
+        let pre = if mutating { None } else { Some(self.expr(b, receiver)) };
+        let rt = match &pre {
+            Some(x) => x.ty.clone(),
+            None => {
+                self.quiet += 1;
+                let t = self.expr(b, receiver).ty;
+                self.quiet -= 1;
+                t
+            }
+        };
+        if self.has_methods(&rt) {
+            return self.user_method(b, e, receiver, (rt, pre), method, args);
+        }
         // `set` names its two arguments, like any call with two parameters; the rest take one or none.
         if m != "set" {
             for a in args {
@@ -4085,10 +4171,10 @@ impl<'a> Checker<'a> {
                 return Self::err_expr();
             }
         }
-        if matches!(m, "push" | "pop" | "set" | "remove") {
+        if mutating {
             return self.mutating_method(b, e, receiver, method, args);
         }
-        let x = self.expr(b, receiver);
+        let x = pre.expect("a method that does not mutate has its receiver checked");
         if x.ty == Ty::Error {
             for a in args {
                 self.expr(b, &a.value);
