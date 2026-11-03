@@ -265,6 +265,7 @@ test "min and max by key" {
     };
     assert(min_by_key(xs: ["ccc", "a", "b"], key: len) == Some("a"));
     assert(max_by_key(xs: ["ccc", "a", "ddd"], key: len) == Some("ccc"));
+    assert(max_by_key(xs: ["a", "ccc", "bb"], key: len) == Some("ccc"));
     assert(min_by_key(xs: ["a"][0..0], key: len) == None);
     assert(max_by_key(xs: ["a"][0..0], key: len) == None);
 }

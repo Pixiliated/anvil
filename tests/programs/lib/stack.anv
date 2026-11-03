@@ -23,4 +23,6 @@ fn last_of[T](xs: [T]) -> Option[T] {
 test "top of a stack" {
     let s: Stack[i64] = push(s: Stack { items: [1] }, x: 2);
     assert(top(s) == Some(2));
+    let none: [i64] = [];
+    assert(top(Stack { items: none }) == None);
 }

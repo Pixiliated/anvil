@@ -284,6 +284,10 @@ pub struct Checker<'a> {
     file_error: EnumId,
     /// Function literals' bodies, lifted into functions of their own, by FuncId.
     lifted: Vec<(FuncId, Func)>,
+    /// Every branch so far, and each one's id by (module, start of its block): an instance's
+    /// body reuses its generic's.
+    branches: Vec<Branch>,
+    branch_ids: HashMap<(usize, usize), BranchId>,
     /// Every interface, and the names the current module sees them by.
     interfaces: Vec<InterfaceDef>,
     interface_index: HashMap<String, usize>,
@@ -334,6 +338,8 @@ struct Body {
     enclosing: Option<HashMap<String, (Ty, Span)>>,
     /// The locals made for captured values, in the order they were first read.
     captures: Vec<LocalId>,
+    /// The name of the declared function whose branches these are; None in a test.
+    owner: Option<Span>,
 }
 
 impl Body {
@@ -407,6 +413,8 @@ pub fn analyze_modules<'a>(modules: &[Module<'a>], order: &[usize]) -> Analysis 
         builtin_enums: HashMap::new(),
         file_error: 0,
         lifted: Vec::new(),
+        branches: Vec::new(),
+        branch_ids: HashMap::new(),
         interfaces: Vec::new(),
         interface_index: HashMap::new(),
         methods: HashMap::new(),
@@ -470,6 +478,7 @@ pub fn analyze_modules<'a>(modules: &[Module<'a>], order: &[usize]) -> Analysis 
         modules: modules.iter().map(|m| m.src.name.clone()).collect(),
         generic_fns,
         c_files: c.c_files.clone(),
+        branches: c.branches.clone(),
     };
     let program = c.diags.is_empty().then_some(program);
     Analysis { program, diags: c.diags, facts: c.facts }
@@ -1496,7 +1505,24 @@ impl<'a> Checker<'a> {
             name: String::new(),
             enclosing: None,
             captures: Vec::new(),
+            owner: None,
         }
+    }
+
+    /// `body` (the block at `at`) with a marker first that counts its runs, except in a test or in
+    /// a generic's abstract body, whose IR is dropped. An empty block is no branch: it has nothing
+    /// to test (`None => {}` where no value is missing).
+    fn marked(&mut self, b: &Body, at: Span, kind: BranchKind, mut body: Vec<Stmt>) -> Vec<Stmt> {
+        let Some(owner) = b.owner else { return body };
+        if self.abstract_body || body.is_empty() {
+            return body;
+        }
+        let id = *self.branch_ids.entry((self.module, at.start)).or_insert_with(|| {
+            self.branches.push(Branch { module: self.module, at, owner, kind });
+            self.branches.len() - 1
+        });
+        body.insert(0, Stmt::Reached(id));
+        body
     }
 
     fn declare_local(&mut self, b: &mut Body, name: &ast::Ident, ty: Ty, meta: LocalMeta) -> LocalId {
@@ -1770,6 +1796,7 @@ impl<'a> Checker<'a> {
         let ret = self.sigs[id].ret.clone();
         let effects = self.sigs[id].effects;
         let mut b = self.new_body(ret.clone(), effects, &d.uses, d.uses_span, d.uses_insert, d.noalloc);
+        b.owner = Some(d.name.span);
         b.name = match &d.receiver {
             Some(r) => format!("{}.{}", r.ty.name, d.name.name),
             None => d.name.name.clone(),
@@ -1893,6 +1920,7 @@ impl<'a> Checker<'a> {
         let owner = if module.is_empty() { b.name.clone() } else { format!("{module}.{}", b.name) };
         ib.name = format!("{owner}/fn@{line}:{col}");
         ib.enclosing = Some(names);
+        ib.owner = b.owner;
         let mut own = Vec::new();
         for (p, (_, t)) in d.params.iter().zip(&params) {
             let meta = LocalMeta {
@@ -2188,9 +2216,14 @@ impl<'a> Checker<'a> {
             StmtKind::If { cond, then, else_ } => {
                 let c = self.condition(b, cond);
                 let t = self.block(b, then);
+                let t = self.marked(b, then.span, BranchKind::Then, t);
+                // An `else if` is not a branch of its own: its blocks are.
                 let e = match else_.as_deref() {
                     None => Vec::new(),
-                    Some(Else::Block(blk)) => self.block(b, blk),
+                    Some(Else::Block(blk)) => {
+                        let e = self.block(b, blk);
+                        self.marked(b, blk.span, BranchKind::Else, e)
+                    }
                     Some(Else::If(st)) => self.stmt(b, st).into_iter().collect(),
                 };
                 Stmt::If(c, t, e)
@@ -2198,7 +2231,9 @@ impl<'a> Checker<'a> {
             StmtKind::While { cond, body } => {
                 let c = self.condition(b, cond);
                 b.loop_depth += 1;
+                let at = body.span;
                 let body = self.block(b, body);
+                let body = self.marked(b, at, BranchKind::Loop, body);
                 b.loop_depth -= 1;
                 Stmt::While(c, body)
             }
@@ -2218,8 +2253,9 @@ impl<'a> Checker<'a> {
                 };
                 let id = self.declare_local(b, var, Ty::I64, meta);
                 b.loop_depth += 1;
-                let end = body.span.end;
+                let (at, end) = (body.span, body.span.end);
                 let body = self.block(b, body);
+                let body = self.marked(b, at, BranchKind::Loop, body);
                 b.loop_depth -= 1;
                 self.close_scope(b, end);
                 Stmt::For(id, s0, e0, body)
@@ -2257,8 +2293,9 @@ impl<'a> Checker<'a> {
                 };
                 let id = self.declare_local(b, var, elem, meta);
                 b.loop_depth += 1;
-                let end = body.span.end;
+                let (at, end) = (body.span, body.span.end);
                 let body = self.block(b, body);
+                let body = self.marked(b, at, BranchKind::Loop, body);
                 b.loop_depth -= 1;
                 self.close_scope(b, end);
                 Stmt::ForEach { var: id, held, iter: it, body }
@@ -2358,6 +2395,7 @@ impl<'a> Checker<'a> {
             b.scopes.push(HashMap::new());
             let bindings = self.pattern(b, arm, (id, vi), &variants[vi]);
             let body = self.block(b, &arm.body);
+            let body = self.marked(b, arm.body.span, BranchKind::Arm(arm.variant.name.clone()), body);
             self.close_scope(b, arm.body.span.end);
             out.push(Arm { variant: vi, bindings, body });
         }

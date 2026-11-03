@@ -76,3 +76,7 @@ test "a set key reads back" for all m: Map[str, i64], k: str, v: i64 {
 fn main() uses io {
     print("{sort([3, 1, 2]) == [1, 2, 3]} {is_sorted([1, 2, 2])}");
 }
+
+test "an unsorted array is not sorted" {
+    assert(!is_sorted([2, 1]));
+}

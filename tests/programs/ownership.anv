@@ -127,3 +127,7 @@ fn main() uses io {
         None => {}
     }
 }
+
+test "free slots are skipped" {
+    assert(first_used([Slot.Free, Slot.Used(owner: "ann", items: [])]) == "ann");
+}

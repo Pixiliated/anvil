@@ -174,13 +174,38 @@ pub fn golden_approve(root: &Path, file: &str, max_steps: Option<u64>) -> Report
     ok(json, format!("approved {rel} ({change}):\n{}", out.to_text()))
 }
 
-/// What one file's runs covered, for the project-wide `untested` lint.
+/// Where a function or branch is declared: its file and the offset of its name (of its block's
+/// `{`, for a branch), the same from every file that imports it.
+type Key = (String, usize);
+
+/// What one file's runs covered, for the project-wide `untested` and `unreached` lints.
 struct Coverage {
     file: String,
-    /// The file's own functions as (name, key, line:col, allowed); main is left to its golden.
-    own: Vec<(String, (String, usize), String, bool)>,
-    /// The key (declaring file, offset of the name) of every function that ran, imported ones too.
-    ran: HashSet<(String, usize)>,
+    /// The file's own functions; main is left to its golden.
+    own: Vec<Own>,
+    /// The key of every function that ran, imported ones too.
+    ran: HashSet<Key>,
+    /// The file's own branches.
+    branches: Vec<Site>,
+    /// The key of every branch that ran, imported ones too.
+    reached: HashSet<Key>,
+}
+
+struct Own {
+    name: String,
+    key: Key,
+    /// line:col of its name.
+    at: String,
+    allows_untested: bool,
+    allows_unreached: bool,
+}
+
+/// A branch: its key, its function's key, line:col of its `{`, and what it is.
+struct Site {
+    key: Key,
+    owner: Key,
+    at: String,
+    what: String,
 }
 
 /// One verify pass over a file: compile errors (in it or in a module it imports), then failing
@@ -229,13 +254,15 @@ fn verify_file(
             None
         }
     };
-    let (results, mut ran) = anvil_interp::run_on_big_stack(move || {
+    let branches = program.branches.clone();
+    let (results, mut ran, mut reached) = anvil_interp::run_on_big_stack(move || {
         let mut ran = vec![false; p2.funcs.len()];
+        let mut reached = vec![false; p2.branches.len()];
         let mut rec = Recorder::new(&p2);
         let results =
             crate::testing::run_all(&p2, crate::PROPERTY_CASES, 0, max_steps, Some(&mut rec), &mut ffi, &root2);
-        mark_ran(&mut ran, &Counts::of(&rec));
-        (results, ran)
+        mark_ran(&mut ran, &mut reached, &Counts::of(&rec));
+        (results, ran, reached)
     });
     let mut test_failures = 0;
     for r in &results {
@@ -250,7 +277,7 @@ fn verify_file(
         add("golden", format!("{}: {}", g.status, g.detail.clone().unwrap_or_default()), String::new());
     }
     if let Some(c) = &g.counts {
-        mark_ran(&mut ran, c);
+        mark_ran(&mut ran, &mut reached, c);
     }
     // main runs only under its golden, and a missing golden is already a finding.
     let main = g.status != "no_main";
@@ -263,31 +290,60 @@ fn verify_file(
             continue;
         }
         let (l, c) = src.line_col(f.span.start);
-        let allowed = f.allows.iter().any(|(lint, _)| lint == "untested");
-        own.push((f.name.clone(), key(f), format!("{l}:{c}"), allowed));
+        own.push(Own {
+            name: f.name.clone(),
+            key: key(f),
+            at: format!("{l}:{c}"),
+            allows_untested: allows(&f.allows, "untested"),
+            allows_unreached: allows(&f.allows, "unreached"),
+        });
     }
     // Generic functions, called or not: one that no test or main instantiates and runs is untested.
     for g in generic_fns.iter().filter(|g| g.module == 0) {
         let (l, c) = src.line_col(g.span.start);
-        let allowed = g.allows.iter().any(|(lint, _)| lint == "untested");
-        own.push((g.name.clone(), (modules[0].clone(), g.span.start), format!("{l}:{c}"), allowed));
+        own.push(Own {
+            name: g.name.clone(),
+            key: (modules[0].clone(), g.span.start),
+            at: format!("{l}:{c}"),
+            allows_untested: allows(&g.allows, "untested"),
+            allows_unreached: allows(&g.allows, "unreached"),
+        });
     }
     let ran = funcs.iter().zip(&ran).filter(|(_, r)| **r).map(|(f, _)| key(f)).collect();
+    let site_key = |b: &anvil_front::ir::Branch| (modules[b.module].clone(), b.at.start);
+    let own_branches: Vec<Site> = branches
+        .iter()
+        .filter(|b| b.module == 0)
+        .map(|b| {
+            let (l, c) = src.line_col(b.at.start);
+            Site {
+                key: site_key(b),
+                owner: (modules[0].clone(), b.owner.start),
+                at: format!("{l}:{c}"),
+                what: b.kind.describe(),
+            }
+        })
+        .collect();
+    let reached = branches.iter().zip(&reached).filter(|(_, r)| **r).map(|(b, _)| site_key(b)).collect();
     let steps = g.counts.as_ref().map(|c| c.steps);
     let json = json!({
         "file": file, "errors": 0, "tests": tests.len(), "tests_failed": test_failures, "golden": g.status,
-        "steps": steps, "untested": [],
+        "steps": steps, "untested": [], "unreached": [],
     });
-    (json, Some(Coverage { file: file.to_string(), own, ran }))
+    (json, Some(Coverage { file: file.to_string(), own, ran, branches: own_branches, reached }))
+}
+
+fn allows(list: &[(String, String)], lint: &str) -> bool {
+    list.iter().any(|(l, _)| l == lint)
 }
 
 /// The `untested` lint over the whole project: a function counts as tested when a test or a
 /// golden-checked main of any project file runs it, so a module is covered by its importers.
 fn untested(coverage: &[Coverage], files: &mut [Value], seen: &mut Vec<Seen>) {
-    let ran: HashSet<&(String, usize)> = coverage.iter().flat_map(|c| &c.ran).collect();
+    let ran: HashSet<&Key> = coverage.iter().flat_map(|c| &c.ran).collect();
     for c in coverage {
         let mut names = Vec::new();
-        for (name, key, at, allowed) in &c.own {
+        for Own { name, key, at, allows_untested: allowed, .. } in &c.own {
             let mut add = |check: &str, message: String| {
                 seen.push(Seen { file: c.file.clone(), check: check.into(), message, at: at.clone() });
             };
@@ -311,9 +367,51 @@ fn untested(coverage: &[Coverage], files: &mut [Value], seen: &mut Vec<Seen>) {
     }
 }
 
-fn mark_ran(ran: &mut [bool], counts: &Counts) {
+/// The `unreached` lint over the whole project: a branch of a function that runs, which no test
+/// or golden-checked main of any project file takes. A function that never runs is `untested`
+/// instead, so its branches are not reported twice.
+fn unreached(coverage: &[Coverage], files: &mut [Value], seen: &mut Vec<Seen>) {
+    let ran: HashSet<&Key> = coverage.iter().flat_map(|c| &c.ran).collect();
+    let reached: HashSet<&Key> = coverage.iter().flat_map(|c| &c.reached).collect();
+    for c in coverage {
+        let mut list = Vec::new();
+        for f in c.own.iter().filter(|f| ran.contains(&f.key)) {
+            let missed: Vec<&Site> =
+                c.branches.iter().filter(|b| b.owner == f.key && !reached.contains(&b.key)).collect();
+            if f.allows_unreached {
+                if missed.is_empty() {
+                    let message = format!(
+                        "every branch of `{}` runs in a test or a golden-checked main, so its `allow unreached` is stale: remove it",
+                        f.name
+                    );
+                    seen.push(Seen { file: c.file.clone(), check: "allow".into(), message, at: f.at.clone() });
+                }
+                continue;
+            }
+            for b in missed {
+                let message = format!(
+                    "{} in `{}` never runs in a test or a golden-checked main; take it in a test, or write `allow unreached \"why\"` before the function",
+                    b.what, f.name
+                );
+                seen.push(Seen { file: c.file.clone(), check: "unreached".into(), message, at: b.at.clone() });
+                list.push(json!({ "function": f.name, "at": b.at, "branch": b.what }));
+            }
+        }
+        if let Some(v) = files.iter_mut().find(|v| v["file"] == c.file.as_str()) {
+            let total = c.branches.len();
+            let taken = c.branches.iter().filter(|b| reached.contains(&b.key)).count();
+            v["unreached"] = json!(list);
+            v["branches"] = json!({ "total": total, "taken": taken });
+        }
+    }
+}
+
+fn mark_ran(ran: &mut [bool], reached: &mut [bool], counts: &Counts) {
     for (r, f) in ran.iter_mut().zip(&counts.funcs) {
         *r |= f.calls > 0;
+    }
+    for (r, n) in reached.iter_mut().zip(&counts.branches) {
+        *r |= *n > 0;
     }
 }
 
@@ -336,6 +434,7 @@ fn run_verify(root: &Path, native: bool, max_steps: Option<u64>) -> Result<Verif
         coverage.extend(c);
     }
     untested(&coverage, &mut files, &mut seen);
+    unreached(&coverage, &mut files, &mut seen);
     let mut record = Record::open(&project.root)?;
     let now = anvil_record::now_utc();
     let sync = record.sync(&seen, &now)?;
@@ -406,6 +505,8 @@ pub fn review(root: &Path, native: bool, max_steps: Option<u64>) -> Report {
         count("golden", "missing"),
         count("golden", "differs")
     ));
+    let branches = |key: &str| v.files.iter().filter_map(|f| f["branches"][key].as_u64()).sum::<u64>();
+    md.push_str(&format!("- branches: {} of {} taken by a test or a golden\n", branches("taken"), branches("total")));
     md.push_str(&format!("- open findings: {}\n", v.open.len()));
     if let Some(c) = summary["current"].as_object() {
         md.push_str(&format!("- current milestone: {} {}\n", c["id"].as_str().unwrap(), c["title"].as_str().unwrap()));

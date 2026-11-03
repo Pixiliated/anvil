@@ -135,3 +135,12 @@ green and the interpreter and native backend agreeing on every program in `tests
 - [x] A panic reports the first element that panics, as a loop would; elements, results and
   captures of any type; nested parallel work; `ANVIL_THREADS` sets the number of workers
 - [x] The fuzzer uses it, so the backends are compared on it
+
+## M21: Branch coverage (v0.22)
+- [x] The `unreached` lint in verify: an `if` or `else` block, match arm or loop body of a function
+  that runs, which no test or golden-checked main takes; `allow unreached "why"` with stale allows
+- [x] Counted in the interpreter by markers the checker puts at the start of each branch (native
+  code ignores them); instances share their generic's branches, function literals count for the
+  function around them, empty blocks are not branches
+- [x] Per-file branch counts in `verify --json` and the review sheet; the gaps it found in the
+  standard library and the corpus are covered by new tests

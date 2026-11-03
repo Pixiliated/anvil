@@ -18,6 +18,7 @@ fn show_f64(xs: [f64]) -> str {
     return "[{parts.join(", ")}]";
 }
 
+allow unreached "a golden cannot make listing a directory fail"
 fn listing(path: str) -> str uses fs {
     var out: str = "";
     match list_dir(path) {

@@ -14,6 +14,7 @@ fn add_line(t: Tally, line: str) -> Tally {
     return out;
 }
 
+allow unreached "a golden cannot make the disk deny or fail a read, or a file stand in for a directory"
 fn describe(e: FileError) -> str {
     var s: str = "";
     match e {

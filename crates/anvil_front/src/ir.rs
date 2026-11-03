@@ -8,6 +8,8 @@ use std::fmt;
 
 pub type LocalId = usize;
 pub type FuncId = usize;
+/// An index into Program::branches.
+pub type BranchId = usize;
 pub type StructId = usize;
 pub type EnumId = usize;
 
@@ -226,8 +228,44 @@ pub struct Program {
     pub modules: Vec<String>,
     /// Every generic function, instantiated or not, so coverage can see the ones never called.
     pub generic_fns: Vec<GenericFn>,
+    /// Every branch of every function, for the `unreached` lint; Stmt::Reached counts a run.
+    pub branches: Vec<Branch>,
     /// The C files extern functions are defined in.
     pub c_files: Vec<CFile>,
+}
+
+/// A block of a function that runs only sometimes: an `if` or `else` block, a match arm or a
+/// loop body. An instance shares its generic's branches.
+#[derive(Clone, Debug)]
+pub struct Branch {
+    /// The module it is written in, and its block (which starts at its `{`).
+    pub module: usize,
+    pub at: Span,
+    /// The name of the declared function it is in; a function literal's branches belong to the
+    /// function it is written in.
+    pub owner: Span,
+    pub kind: BranchKind,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum BranchKind {
+    Then,
+    Else,
+    /// The arm of this variant.
+    Arm(String),
+    Loop,
+}
+
+impl BranchKind {
+    /// What the lint calls it.
+    pub fn describe(&self) -> String {
+        match self {
+            BranchKind::Then => "the `if` block (its condition is never true)".into(),
+            BranchKind::Else => "the `else` block".into(),
+            BranchKind::Arm(v) => format!("the `{v}` arm"),
+            BranchKind::Loop => "the loop body".into(),
+        }
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -285,6 +323,9 @@ pub enum Stmt {
     Return(Option<Expr>),
     Break,
     Continue,
+    /// Counts a run of a branch for coverage, at the start of its block; does nothing else, and
+    /// is not a step.
+    Reached(BranchId),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

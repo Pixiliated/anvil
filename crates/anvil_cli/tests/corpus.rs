@@ -814,6 +814,108 @@ test "twice" {
 }
 
 #[test]
+fn verify_reports_unreached_branches_and_stale_allows() {
+    let p = hello_project("unreached");
+    p.write(
+        "src/maths.anv",
+        r#"enum Shape {
+    Dot,
+    Line(n: i64),
+}
+
+fn classify(n: i64) -> str {
+    if n < 0 {
+        return "negative";
+    } else {
+        return "other";
+    }
+}
+
+fn size(s: Shape) -> i64 {
+    var out: i64 = 0;
+    match s {
+        Dot => {}
+        Line(n) => { out = n; }
+    }
+    return out;
+}
+
+fn total(xs: [i64]) -> i64 {
+    var t: i64 = 0;
+    for x in xs {
+        t = t + x;
+    }
+    return t;
+}
+
+fn pick[T](xs: [T], first: bool) -> T {
+    if first {
+        return xs[0];
+    }
+    return xs[xs.len() - 1];
+}
+
+fn apply(n: i64) -> i64 {
+    let f: fn(i64) -> i64 = fn(v: i64) -> i64 {
+        if v > 100 {
+            return 0;
+        }
+        return v;
+    };
+    return f(n);
+}
+
+allow unreached "kept for later"
+fn sign(n: i64) -> i64 {
+    if n < 0 {
+        return -1;
+    }
+    return 1;
+}
+
+test "some branches" {
+    assert(classify(5) == "other");
+    assert(size(Shape.Dot) == 0);
+    assert(total([]) == 0);
+    assert(pick(xs: [1, 2], first: false) == 2);
+    assert(apply(3) == 3);
+    assert(sign(-2) == -1);
+}
+"#,
+    );
+    let v = json_of(&p.anvil(&["verify", "--json"]));
+    let mut open: Vec<(&str, &str)> = v["open"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|f| f["file"] == "src/maths.anv")
+        .map(|f| (f["check"].as_str().unwrap(), f["at"].as_str().unwrap()))
+        .collect();
+    open.sort();
+    // The `if` never true, the arm never matched, the loop never entered, the branch of a
+    // generic and of a function literal; the empty `Dot` arm is no branch; `sign` is allowed,
+    // but all of its branches run.
+    assert_eq!(
+        open,
+        [
+            ("allow", "49:4"),
+            ("unreached", "18:20"),
+            ("unreached", "25:17"),
+            ("unreached", "32:14"),
+            ("unreached", "40:20"),
+            ("unreached", "7:14")
+        ],
+        "{v}"
+    );
+    let file = v["files"].as_array().unwrap().iter().find(|f| f["file"] == "src/maths.anv").unwrap();
+    assert_eq!(file["branches"], serde_json::json!({ "total": 7, "taken": 2 }), "{file}");
+    assert_eq!(file["unreached"][0]["function"], "classify", "{file}");
+    let msg = v["open"].as_array().unwrap().iter().find(|f| f["at"] == "40:20").unwrap()["message"].clone();
+    assert!(msg.as_str().unwrap().contains("in `apply`"), "a literal's branch belongs to its function: {msg}");
+    assert!(String::from_utf8(anvil(&["explain", "unreached"]).stdout).unwrap().starts_with("unreached: "));
+}
+
+#[test]
 fn a_differing_golden_leaves_the_actual_output_and_a_diff() {
     let p = hello_project("golden_diff");
     let program = |second: &str| {
@@ -988,11 +1090,12 @@ fn never[T: ordered](a: T, b: T) -> bool {
 }
 
 fn main() uses io {
-    print("{first([3, 4]) == Some(3)} {first(["a"]) == Some("a")}");
+    let none: [i64] = [];
+    print("{first([3, 4]) == Some(3)} {first(["a"]) == Some("a")} {first(none) == None}");
 }
 "#,
     );
-    assert_eq!(String::from_utf8_lossy(&p.anvil(&["run", "src/hello.anv"]).stdout), "true true\n");
+    assert_eq!(String::from_utf8_lossy(&p.anvil(&["run", "src/hello.anv"]).stdout), "true true true\n");
     // One instance per type, named by its types.
     let v = p.json(&["profile", "src/hello.anv"]);
     let mut names: Vec<&str> = v["functions"].as_array().unwrap().iter().map(|f| f["name"].as_str().unwrap()).collect();
@@ -1000,7 +1103,8 @@ fn main() uses io {
     assert_eq!(names, ["first[i64]", "first[str]", "main"], "{v}");
     let outline = p.json(&["outline", "src/hello.anv"]);
     assert_eq!(outline["items"][1]["signature"], "fn never[T: ordered](a: T, b: T) -> bool");
-    // A generic that nothing instantiates is untested; one that runs for any type is tested.
+    // A generic that nothing instantiates is untested; one that runs for any type is tested, and
+    // its branches count over all its instances.
     assert!(p.anvil(&["golden", "approve", "src/hello.anv"]).status.success());
     let v = p.json(&["verify"]);
     let open: Vec<&str> = v["open"].as_array().unwrap().iter().map(|f| f["message"].as_str().unwrap()).collect();

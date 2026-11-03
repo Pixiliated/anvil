@@ -1,4 +1,4 @@
-# Anvil language specification (v0.21)
+# Anvil language specification (v0.22)
 
 Anvil is a small, compiled, general-purpose language designed to be written mostly by AI agents
 and read by humans. Its rules aim at three things: one obvious way to write each thing, code
@@ -843,11 +843,23 @@ When a program no longer matches its golden, `golden check` writes what it print
 `out/golden/<file>.out` and a line diff to `out/golden/<file>.diff` (`.native.out` and
 `.native.diff` for the executable).
 
-**Lints** are checks `verify` makes beyond type errors. There is one: **`untested`**, a function
-that no test and no golden-checked `main` runs (`main` itself is left to its golden). Fix it with
-a test; where no test can reach the function, write `allow untested "reason"` on its own line
-before the `fn`. The reason is required, an unknown lint or a repeated allow is an error, and
-an allow on a function that does run is reported as stale.
+**Lints** are checks `verify` makes beyond type errors. Each counts what the project's tests
+and golden-checked `main`s run, in the interpreter, across every project file (a module is
+covered by the files that import it):
+
+- **`untested`**: a function that none of them runs (`main` itself is left to its golden).
+- **`unreached`**: a branch of a function that does run, which none of them takes: an `if`
+  block whose condition is never true, an `else` block, a match arm, or a loop body that never
+  runs. An empty block is no branch (it has nothing to test, like `None => {}` where no value
+  is missing), and an `else if` is not a branch of its own; its blocks are. A function
+  literal's branches belong to the function it is written in, and a generic's are counted over
+  all its instances. `&&`, `||` and `?` are not branches.
+
+Fix a finding with a test; where no test can reach it, write `allow untested "reason"` or
+`allow unreached "reason"` on its own line before the `fn`. The reason is required, an unknown
+lint or a repeated allow is an error, and an allow that switches nothing off is reported as
+stale. `verify --json` gives each file's `untested` functions, `unreached` branches and
+`branches` (`total` and `taken`); the review sheet sums them.
 
 `anvil-mcp` serves the same commands, except `watch` and `lsp`, as MCP tools over stdio (`type-at` is
 `type_at`, `golden check` is `golden_check`), with the same arguments and the same JSON; a

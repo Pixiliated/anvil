@@ -1046,6 +1046,8 @@ impl<'a, 'b> Gen<'a, 'b> {
                 self.b.ins().jump(cont, &[]);
                 self.dead_block();
             }
+            // Coverage is measured in the interpreter.
+            Stmt::Reached(_) => {}
         }
     }
 

@@ -155,3 +155,9 @@ test "methods of a generic type" {
     assert(s.len() == 3);
     assert(s.push(4).top() == Some(4));
 }
+
+test "scaling a square, and the top of an empty stack" {
+    assert(Tile.Square(2.0[m]).scaled(1.5) == Tile.Square(3.0[m]));
+    let none: [i64] = [];
+    assert(Stack { items: none }.top() == None);
+}

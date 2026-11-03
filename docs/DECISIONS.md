@@ -396,3 +396,18 @@ Short records of choices that are not obvious from the code. Newest last.
   panic is the loop's. Workers still busy past it are ended by the exit.
 - **`ANVIL_THREADS`** pins the worker count (for measuring and for tests); it is read only by
   native programs, and never changes a result.
+
+## M21 (v0.22)
+
+- **Branch coverage is a lint, not a report**: an agent acts on findings, and a percentage
+  invites "good enough". Like `untested`, it is switched off per function with a reason.
+- **Branches are blocks** (then, else, arm, loop body), marked by a statement the checker puts
+  first in each; the interpreter counts it without a step, so step counts, profiles and goldens
+  do not change, and native code drops it.
+- **An empty block is not a branch.** Exhaustive `match` makes arms like `None => {}` exist where
+  no value is missing; reaching nothing tests nothing, so requiring a test would only add allows.
+- **Functions that never run are left to `untested`** and main to its golden, so one gap is one
+  finding. `&&`, `||` and `?` are not branches yet: their paths have no block to point at.
+- On its first run the lint found real gaps: four standard-library branches no test took
+  (`max_by_key` replacing its best, `ceil`/`round` of huge values, `round` of a fraction over a
+  half, `words` ending without a space), all now tested.

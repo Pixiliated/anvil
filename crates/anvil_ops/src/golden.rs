@@ -172,11 +172,13 @@ fn lines_differ(what: &str, want: &str, got: &str) -> Option<String> {
 pub struct Counts {
     pub steps: u64,
     pub funcs: Vec<FuncStats>,
+    /// Runs of each branch, by BranchId.
+    pub branches: Vec<u64>,
 }
 
 impl Counts {
     pub fn of(rec: &Recorder) -> Counts {
-        Counts { steps: rec.steps, funcs: rec.funcs.clone() }
+        Counts { steps: rec.steps, funcs: rec.funcs.clone(), branches: rec.branches.clone() }
     }
 }
 

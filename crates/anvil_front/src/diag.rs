@@ -416,12 +416,23 @@ pub fn explain(code: &str) -> Option<&'static str> {
 
 /// Lints: checks `anvil verify` makes beyond type errors, each switched off for one function by
 /// `allow LINT "reason"` before its `fn`. An allow that switches off nothing is a finding too.
-pub const LINTS: &[(&str, &str)] = &[(
-    "untested",
-    "A function that no test and no golden-checked main ever runs. Add a test that calls it, or, \
-     if a test cannot reach it, write `allow untested \"why\"` before its `fn`. An allow on a \
-     function that does run is reported as stale.",
-)];
+pub const LINTS: &[(&str, &str)] = &[
+    (
+        "untested",
+        "A function that no test and no golden-checked main ever runs. Add a test that calls it, or, \
+         if a test cannot reach it, write `allow untested \"why\"` before its `fn`. An allow on a \
+         function that does run is reported as stale.",
+    ),
+    (
+        "unreached",
+        "A branch of a function that does run, which no test and no golden-checked main takes: an \
+         `if` block whose condition is never true, an `else` block, a match arm, or a loop body \
+         that never runs. Add a test that takes it, or, if no test can, write \
+         `allow unreached \"why\"` before the function's `fn`. Functions that never run are left \
+         to `untested`, and main to its golden. An allow on a function whose branches all run is \
+         reported as stale.",
+    ),
+];
 
 pub fn lint(name: &str) -> Option<&'static str> {
     LINTS.iter().find(|(n, _)| *n == name).map(|(_, text)| *text)

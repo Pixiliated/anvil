@@ -3,6 +3,12 @@
 Each version is one roadmap milestone (docs/ROADMAP.md); docs/DECISIONS.md says why things are
 the way they are.
 
+## 0.22.0
+- The `unreached` lint: `verify` reports each `if`/`else` block, match arm and loop body of a
+  tested function that no test or golden-checked main takes; `allow unreached "why"` switches it
+  off for a function. `verify --json` and the review sheet count branches taken.
+- New tests for the standard-library branches it found untested.
+
 ## 0.21.0
 - `xs.parallel_map(f)`: a pure map on worker threads, with the same result as a loop; the first
   panicking element is the one reported. `ANVIL_THREADS` sets the number of workers.

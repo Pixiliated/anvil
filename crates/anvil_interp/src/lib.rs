@@ -173,6 +173,8 @@ pub struct Recorder {
     stack: Vec<(FuncId, u64, u64)>,
     /// Frames of each function on the stack, so recursion counts inclusive steps once.
     active: Vec<u32>,
+    /// Runs of each branch, by BranchId.
+    pub branches: Vec<u64>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -222,7 +224,14 @@ pub enum Event {
 impl Recorder {
     pub fn new(program: &Program) -> Recorder {
         let n = program.funcs.len();
-        Recorder { steps: 0, funcs: vec![FuncStats::default(); n], trace: None, stack: Vec::new(), active: vec![0; n] }
+        Recorder {
+            steps: 0,
+            funcs: vec![FuncStats::default(); n],
+            trace: None,
+            stack: Vec::new(),
+            active: vec![0; n],
+            branches: vec![0; program.branches.len()],
+        }
     }
 
     /// A recorder that also keeps a timeline of at most `limit` events, of the functions in
@@ -661,6 +670,12 @@ impl<'p, 'h> Interp<'p, 'h> {
     }
 
     fn stmt(&mut self, s: &Stmt, frame: &mut Vec<Value>) -> R<Flow> {
+        if let Stmt::Reached(id) = s {
+            if let Some(rec) = &mut self.rec {
+                rec.branches[*id] += 1;
+            }
+            return Ok(Flow::Normal);
+        }
         self.step()?;
         match s {
             Stmt::Let(l, e) => {
@@ -727,6 +742,7 @@ impl<'p, 'h> Interp<'p, 'h> {
             }
             Stmt::Break => return Ok(Flow::Break),
             Stmt::Continue => return Ok(Flow::Continue),
+            Stmt::Reached(_) => unreachable!("handled above"),
         }
         Ok(Flow::Normal)
     }
