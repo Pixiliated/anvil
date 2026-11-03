@@ -1,4 +1,4 @@
-# Anvil language specification (v0.20)
+# Anvil language specification (v0.21)
 
 Anvil is a small, compiled, general-purpose language designed to be written mostly by AI agents
 and read by humans. Its rules aim at three things: one obvious way to write each thing, code
@@ -267,7 +267,8 @@ allocation is too slow or must not fail. The checker holds it to that (E0333): i
 joining strings or bytes, array and map literals, slices, `split`, `trim`, `keys`, `values`,
 `push`, `pop`, `set`, `remove`, `args`, `read_line`, `read_file`, `read_bytes`, `bytes_of`,
 `to_bytes`, `to_str`, `hex`, `to_array`, `replace`, `to_upper`, `to_lower`, `chars`, `join`,
-`fixed`, `sorted`, `reversed`, `env`, `list_dir` and assigning to an array element may allocate;
+`fixed`, `sorted`, `reversed`, `parallel_map`, `env`, `list_dir` and assigning to an array
+element may allocate;
 arithmetic, bit operations, comparisons, struct fields, indexing, `len`, the str searches,
 `parse_i64`, `parse_f64`, `get`, `has`, `print`, `write_file`, `write_bytes` and the other
 built-ins (`eprint` and `exit` among them) never do. A
@@ -354,6 +355,28 @@ let mid: [i64] = xs[1..3];   // a copy of elements 1 and 2
 - `xs.reversed()` is a reversed copy. `xs.sorted()`, on `[i64]`, `[f64]` and `[str]`, is a
   sorted copy, ascending (str bytewise) and stable, so equal values keep their order (`0.0` and
   `-0.0` too); a NaN panics. To sort by anything else, write the sort with a function value.
+
+### Parallel work
+
+`xs.parallel_map(f)` is `[f(xs[0]), f(xs[1]), ...]`: the same array a loop calling `f` on each
+element in order would build, with the work spread over the machine's processors.
+
+```
+let steps: [i64] = numbers.parallel_map(collatz);
+let shouted: [str] = words.parallel_map(fn(w: str) -> str { return w.to_upper(); });
+```
+
+- `f` is a function value of type `fn(T) -> U` for `xs: [T]`, and must be **pure** (E0416): with
+  no effects there is nothing the order of the work could change, so the result is the same on
+  every run and every machine, and the same as the interpreter's (which runs the loop).
+- If `f` panics on some elements, the program panics with the panic of the **first** of them,
+  as the loop would: elements after it may have run, but nothing they did can be seen.
+- Elements and results can be of any type, `f` can capture values, and `f` can itself use
+  `parallel_map`. Native code gives every worker its own copies of `f` and of its share of
+  `xs`, so workers share nothing.
+- Native executables start at most one worker per processor (at most 64); the environment
+  variable `ANVIL_THREADS` (1 to 64) sets the number instead. Anything else there is a runtime
+  error.
 
 ## Text
 

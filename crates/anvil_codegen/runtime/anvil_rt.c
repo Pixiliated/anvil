@@ -30,10 +30,29 @@ __declspec(dllimport) int __stdcall MultiByteToWideChar(unsigned int code_page, 
 __declspec(dllimport) int __stdcall WideCharToMultiByte(unsigned int code_page, unsigned long flags, const wchar_t *w,
                                                          int wn, char *s, int n, const char *fallback, int *used);
 __declspec(dllimport) unsigned long __stdcall GetFileAttributesW(const wchar_t *path);
+#include <process.h>
+#include <intrin.h>
+__declspec(dllimport) unsigned long __stdcall GetActiveProcessorCount(unsigned short group);
+__declspec(dllimport) void __stdcall Sleep(unsigned long ms);
+__declspec(dllimport) int __stdcall CloseHandle(void *handle);
+#define ATOMIC_ADD(p, v) _InterlockedExchangeAdd64((volatile long long *)(p), (v))
+#define ATOMIC_CAS(p, expected, desired) _InterlockedCompareExchange64((volatile long long *)(p), (desired), (expected))
+#define ATOMIC_SET(p, v) _InterlockedExchange64((volatile long long *)(p), (v))
+#define THREAD_LOCAL __declspec(thread)
 #else
 #include <time.h>
 #include <sys/stat.h>
 #include <dirent.h>
+#include <pthread.h>
+#include <unistd.h>
+#define ATOMIC_ADD(p, v) __atomic_fetch_add((p), (v), __ATOMIC_SEQ_CST)
+static int64_t atomic_cas(int64_t *p, int64_t expected, int64_t desired) {
+    __atomic_compare_exchange_n(p, &expected, desired, 0, __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST);
+    return expected;
+}
+#define ATOMIC_CAS(p, expected, desired) atomic_cas((p), (expected), (desired))
+#define ATOMIC_SET(p, v) __atomic_store_n((p), (v), __ATOMIC_SEQ_CST)
+#define THREAD_LOCAL _Thread_local
 #endif
 
 #define ANVIL_PANIC_EXIT 101
@@ -79,7 +98,9 @@ typedef struct {
     char env[];
 } AnvFn;
 
-/* Objects allocated and not yet freed; checked at exit when ANVIL_CHECK_LEAKS is set. */
+/* Objects allocated and not yet freed; checked at exit when ANVIL_CHECK_LEAKS is set. Counted
+ * atomically, since parallel_map's workers allocate at once (reference counts are not: workers
+ * never share an object). */
 static int64_t live_objects = 0;
 
 /* Output is byte-exact on every platform: no newline translation. */
@@ -129,7 +150,7 @@ void anvil_release(AnvObj *o) {
         AnvFn *f = (AnvFn *)o;
         for (int64_t k = 0; k < f->ti->nptrs; k++) anvil_release(*(AnvObj **)(f->env + f->ti->offsets[k]));
     }
-    live_objects--;
+    ATOMIC_ADD(&live_objects, -1);
     free(o);
 }
 
@@ -140,7 +161,7 @@ AnvFn *anvil_fn_new(const AnvTypeInfo *ti, void *code) {
     f->kind = KIND_FN;
     f->ti = ti;
     f->code = code;
-    live_objects++;
+    ATOMIC_ADD(&live_objects, 1);
     return f;
 }
 
@@ -152,7 +173,7 @@ static AnvStr *str_new(int64_t len) {
     s->kind = KIND_STR;
     s->len = len;
     s->bytes[len] = 0;
-    live_objects++;
+    ATOMIC_ADD(&live_objects, 1);
     return s;
 }
 
@@ -263,9 +284,55 @@ void anvil_print_f64(double v, const AnvStr *unit, int64_t stream) {
     fputc('\n', f);
 }
 
+/* ---- the workers of parallel_map ---- */
+
+typedef void (*AnvWorker)(void *f, AnvArr *in, AnvArr *out, int64_t base);
+
+/* One worker's share: its own deep copies of the function and of elements base.., and where a
+ * panic it met is kept. */
+typedef struct {
+    AnvWorker work;
+    void *f;
+    AnvArr *in;
+    AnvArr *out;
+    int64_t base;
+    int64_t current;     /* the element being worked on */
+    int64_t done;        /* 1 once finished or parked */
+    int64_t panic_index; /* -1: none */
+    char *message;
+    int64_t message_len;
+    int64_t *first_panic; /* the smallest index that panicked so far */
+} Job;
+
+static THREAD_LOCAL Job *current_job = NULL;
+
+/* A panic in a worker: keep it, and stop this thread here without unwinding (the program
+ * panics once the other workers are done, with the panic of the smallest index). */
+static void worker_panic(const char *p, int64_t len) {
+    Job *job = current_job;
+    job->message = xmalloc((size_t)len + 1);
+    memcpy(job->message, p, (size_t)len);
+    job->message_len = len;
+    job->panic_index = job->current;
+    for (;;) {
+        int64_t seen = ATOMIC_ADD(job->first_panic, 0);
+        if (job->current >= seen || ATOMIC_CAS(job->first_panic, seen, job->current) == seen) break;
+    }
+    current_job = NULL;
+    ATOMIC_SET(&job->done, 1);
+    for (;;) {
+#ifdef _WIN32
+        Sleep(0xFFFFFFFFul);
+#else
+        pause();
+#endif
+    }
+}
+
 /* ---- panics and exit ---- */
 
 static void panic_bytes(const char *p, int64_t len) {
+    if (current_job) worker_panic(p, len);
     init_stdout();
     fflush(stdout);
     fputs("panic: ", stderr);
@@ -316,7 +383,7 @@ AnvArr *anvil_arr_new(const AnvTypeInfo *ti, int64_t cap) {
     a->cap = cap;
     a->ti = ti;
     a->data = cap ? xmalloc((size_t)(cap * ti->elem_size)) : NULL;
-    live_objects++;
+    ATOMIC_ADD(&live_objects, 1);
     return a;
 }
 
@@ -1002,6 +1069,155 @@ AnvArr *anvil_arr_sorted(const AnvArr *a, int64_t kind, const AnvStr *message) {
     return b;
 }
 
+/* ---- parallel_map: a map on worker threads, with the result of a map in order ---- */
+
+/* A copy sharing nothing with `o` (static objects are shared: they never change). */
+static AnvObj *deep_copy(AnvObj *o) {
+    if (!o || o->rc < 0) return o;
+    if (o->kind == KIND_STR) {
+        const AnvStr *s = (const AnvStr *)o;
+        return (AnvObj *)str_from(s->bytes, s->len);
+    }
+    if (o->kind == KIND_ARR) {
+        const AnvArr *a = (const AnvArr *)o;
+        AnvArr *b = anvil_arr_new(a->ti, a->len);
+        b->len = a->len;
+        if (b->len) memcpy(b->data, a->data, (size_t)(b->len * a->ti->elem_size));
+        for (int64_t i = 0; i < b->len; i++) {
+            char *elem = b->data + i * b->ti->elem_size;
+            for (int64_t k = 0; k < b->ti->nptrs; k++) {
+                AnvObj **slot = (AnvObj **)(elem + b->ti->offsets[k]);
+                *slot = deep_copy(*slot);
+            }
+        }
+        return (AnvObj *)b;
+    }
+    const AnvFn *f = (const AnvFn *)o;
+    AnvFn *g = anvil_fn_new(f->ti, f->code);
+    memcpy(g->env, f->env, (size_t)f->ti->elem_size);
+    for (int64_t k = 0; k < f->ti->nptrs; k++) {
+        AnvObj **slot = (AnvObj **)(g->env + f->ti->offsets[k]);
+        *slot = deep_copy(*slot);
+    }
+    return (AnvObj *)g;
+}
+
+/* Elements from..to of `a`, deep-copied. */
+static AnvArr *slice_copy(const AnvArr *a, int64_t from, int64_t to) {
+    AnvArr *part = anvil_arr_new(a->ti, to - from);
+    part->len = to - from;
+    if (part->len) memcpy(part->data, a->data + from * a->ti->elem_size, (size_t)(part->len * a->ti->elem_size));
+    for (int64_t i = 0; i < part->len; i++) {
+        char *elem = part->data + i * part->ti->elem_size;
+        for (int64_t k = 0; k < part->ti->nptrs; k++) {
+            AnvObj **slot = (AnvObj **)(elem + part->ti->offsets[k]);
+            *slot = deep_copy(*slot);
+        }
+    }
+    return part;
+}
+
+/* Called by the generated worker before element j of its share: 0 when an element before it
+ * has panicked, so this one need not run. */
+int64_t anvil_parallel_at(int64_t j) {
+    Job *job = current_job;
+    int64_t i = job->base + j;
+    if (i > ATOMIC_ADD(job->first_panic, 0)) return 0;
+    ATOMIC_SET(&job->current, i);
+    return 1;
+}
+
+#ifdef _WIN32
+static unsigned __stdcall job_main(void *arg) {
+#else
+static void *job_main(void *arg) {
+#endif
+    Job *job = arg;
+    current_job = job;
+    job->work(job->f, job->in, job->out, job->base);
+    current_job = NULL;
+    ATOMIC_SET(&job->done, 1);
+    return 0;
+}
+
+/* Workers to start: ANVIL_THREADS when set (1..=64), else the machine's processors (at most 64). */
+static int64_t thread_count(void) {
+    const char *given = getenv("ANVIL_THREADS");
+    if (given) {
+        char *end;
+        long long v = strtoll(given, &end, 10);
+        if (*given == 0 || *end != 0 || v < 1 || v > 64) runtime_error("ANVIL_THREADS must be a whole number in 1..=64");
+        return v;
+    }
+#ifdef _WIN32
+    int64_t n = (int64_t)GetActiveProcessorCount(0xFFFF);
+#else
+    int64_t n = (int64_t)sysconf(_SC_NPROCESSORS_ONLN);
+#endif
+    return n < 1 ? 1 : n > 64 ? 64 : n;
+}
+
+AnvArr *anvil_parallel_map(AnvArr *in, void *f, const AnvTypeInfo *out_ti, AnvWorker work) {
+    int64_t n = in->len;
+    AnvArr *out = anvil_arr_new(out_ti, n);
+    if (n) memset(out->data, 0, (size_t)(n * out_ti->elem_size));
+    out->len = n;
+    if (n == 0) return out;
+    int64_t workers = thread_count();
+    if (workers > n) workers = n;
+    Job *jobs = xmalloc(sizeof(Job) * (size_t)workers);
+    int64_t first_panic = INT64_MAX;
+    /* A worker can itself call parallel_map: it waits here like the main thread does. */
+    Job *outer = current_job;
+    current_job = NULL;
+    for (int64_t k = 0; k < workers; k++) {
+        int64_t lo = n * k / workers, hi = n * (k + 1) / workers;
+        Job job = {work, deep_copy((AnvObj *)f), slice_copy(in, lo, hi), out, lo, lo, 0, -1, NULL, 0, &first_panic};
+        jobs[k] = job;
+    }
+    for (int64_t k = 0; k < workers; k++) {
+#ifdef _WIN32
+        uintptr_t h = _beginthreadex(NULL, (unsigned)(64u << 20), job_main, &jobs[k], 0x10000 /* reserve */, NULL);
+        if (h == 0) runtime_error("cannot start a worker thread");
+        CloseHandle((void *)h);
+#else
+        pthread_attr_t attr;
+        pthread_t thread;
+        if (pthread_attr_init(&attr) != 0 || pthread_attr_setstacksize(&attr, (size_t)64 << 20) != 0 ||
+            pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_DETACHED) != 0 ||
+            pthread_create(&thread, &attr, job_main, &jobs[k]) != 0)
+            runtime_error("cannot start a worker thread");
+        pthread_attr_destroy(&attr);
+#endif
+    }
+    /* Wait until every worker is finished or parked, or works past an element that panicked
+     * (what it would do no longer counts: a loop would have stopped at that panic). */
+    for (;;) {
+        int64_t panicked = ATOMIC_ADD(&first_panic, 0), waiting = 0;
+        for (int64_t k = 0; k < workers; k++)
+            if (!ATOMIC_ADD(&jobs[k].done, 0) && ATOMIC_ADD(&jobs[k].current, 0) <= panicked) waiting++;
+        if (waiting == 0) break;
+#ifdef _WIN32
+        Sleep(1);
+#else
+        struct timespec ms = {0, 1000000};
+        nanosleep(&ms, NULL);
+#endif
+    }
+    current_job = outer;
+    const Job *failed = NULL;
+    for (int64_t k = 0; k < workers; k++)
+        if (jobs[k].panic_index >= 0 && (!failed || jobs[k].panic_index < failed->panic_index)) failed = &jobs[k];
+    /* Workers past the panic may still run; exit ends them. */
+    if (failed) panic_bytes(failed->message, failed->message_len);
+    for (int64_t k = 0; k < workers; k++) {
+        anvil_release((AnvObj *)jobs[k].in);
+        anvil_release((AnvObj *)jobs[k].f);
+    }
+    free(jobs);
+    return out;
+}
+
 /* The amount of a shift, which must be in 0..=63; same text as ir::shift_message. */
 int64_t anvil_check_shift(int64_t n, const AnvStr *site) {
     if (n < 0 || n > 63) {
@@ -1100,7 +1316,7 @@ AnvStr *anvil_str_trim(const AnvStr *s) {
 }
 
 /* Whether the last parse succeeded. */
-static int64_t parse_ok = 0;
+static THREAD_LOCAL int64_t parse_ok = 0;
 
 int64_t anvil_parse_ok(void) { return parse_ok; }
 
@@ -1336,8 +1552,6 @@ int wmain(int argc, wchar_t **wargv) {
     return 0;
 }
 #else
-#include <pthread.h>
-
 static void *run_program(void *unused) {
     (void)unused;
     anvil_program();

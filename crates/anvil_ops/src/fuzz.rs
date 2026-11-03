@@ -240,6 +240,7 @@ impl Gen {
                     let (a, b) = (self.rng.below(3), self.rng.below(4));
                     format!("{}[{a}..{b}]", self.atom(T::Ai, d))
                 }
+                2 => self.parallel(T::I, d).unwrap_or_else(|| self.leaf(T::Ai)),
                 _ => self.call(T::Ai, d).unwrap_or_else(|| self.leaf(T::Ai)),
             },
             T::As => match self.rng.below(3) {
@@ -247,6 +248,7 @@ impl Gen {
                     let sep = *self.pick(&[",", "a", "é"]);
                     format!("{}.split(\"{sep}\")", self.atom(T::S, d))
                 }
+                1 => self.parallel(T::S, d).unwrap_or_else(|| self.leaf(T::As)),
                 _ => self.call(T::As, d).unwrap_or_else(|| self.leaf(T::As)),
             },
         }
@@ -310,6 +312,25 @@ impl Gen {
             })
             .collect();
         Some(format!("{name}({})", args.join(", ")))
+    }
+
+    /// `xs.parallel_map(f)` with a function value in scope or a one-parameter helper that gives
+    /// `elem`, over an array of its parameter's type ([i64] or [str]).
+    fn parallel(&mut self, elem: T, d: u32) -> Option<String> {
+        let values: Vec<(String, T)> = self
+            .closures
+            .iter()
+            .map(|(n, pt, rt)| (n, *pt, *rt))
+            .chain(self.fns.iter().filter(|f| f.params.len() == 1).map(|f| (&f.name, f.params[0].1, f.ret)))
+            .filter(|(_, pt, rt)| *rt == elem && matches!(pt, T::I | T::S))
+            .map(|(n, pt, _)| (n.clone(), pt))
+            .collect();
+        if values.is_empty() {
+            return None;
+        }
+        let (name, pt) = self.pick(&values).clone();
+        let xs = self.atom(if pt == T::I { T::Ai } else { T::As }, d);
+        Some(format!("{xs}.parallel_map({name})"))
     }
 
     /// A few statements binding new variables, one of them maybe a counted loop.
@@ -411,11 +432,21 @@ impl Gen {
         let n = 3 + self.rng.below(5);
         self.statements(&mut body, "    ", n);
         // Every function value is called once more, and what it gives is printed below.
+        // Some also go through parallel_map, on an array of arguments, printed at once.
         for (f, pt, rt) in self.closures.clone() {
             let x = self.fresh("x");
             let arg = self.leaf(pt);
             body.push_str(&format!("    let {x}: {} = {f}({arg});\n", rt.name()));
             self.vars.push((x, rt));
+            if matches!(pt, T::I | T::S) && self.rng.below(2) == 0 {
+                let (ys, y) = (self.fresh("x"), self.fresh("x"));
+                let xs = self.leaf(if pt == T::I { T::Ai } else { T::As });
+                let each = if rt.printable() { format!("{{{y}}}") } else { format!("{{{y}.len()}}") };
+                body.push_str(&format!(
+                    "    let {ys}: [{}] = {xs}.parallel_map({f});\n    for {y} in {ys} {{\n        print(\"{each}\");\n    }}\n",
+                    rt.name()
+                ));
+            }
         }
         let uses = if self.used_random { "io, random" } else { "io" };
         out.push_str(&format!("\nfn main() uses {uses} {{\n{body}"));
@@ -540,5 +571,11 @@ mod tests {
     fn some_programs_draw_random_numbers() {
         let n = (1..=50).filter(|s| super::program_for(*s).contains("random_")).count();
         assert!(n >= 5, "only {n} of 50 fuzz programs draw random numbers");
+    }
+
+    #[test]
+    fn some_programs_work_in_parallel() {
+        let n = (1..=50).filter(|s| super::program_for(*s).contains(".parallel_map(")).count();
+        assert!(n >= 5, "only {n} of 50 fuzz programs use parallel_map");
     }
 }

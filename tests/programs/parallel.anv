@@ -1,0 +1,134 @@
+// parallel_map: the same results as a map in order, computed on worker threads. Elements and
+// results of every kind (numbers, text, arrays, structs, enums, functions), captured values,
+// nested parallel work, and more elements than threads.
+
+struct Point {
+    x: i64,
+    y: i64,
+}
+
+enum Shape {
+    Circle(r: f64),
+    Rect(w: f64, h: f64),
+}
+
+fn collatz(n: i64) -> i64 {
+    var steps: i64 = 0;
+    var v: i64 = n;
+    while v != 1 {
+        if v % 2 == 0 {
+            v = v / 2;
+        } else {
+            v = 3 * v + 1;
+        }
+        steps = steps + 1;
+    }
+    return steps;
+}
+
+fn area(s: Shape) -> f64 {
+    match s {
+        Circle(r) => { return 3.0 * r * r; }
+        Rect(w, h) => { return w * h; }
+    }
+}
+
+fn label(p: Point) -> str {
+    return "({p.x}, {p.y})";
+}
+
+fn ints(xs: [i64]) -> str {
+    var parts: [str] = [];
+    for x in xs {
+        parts.push("{x}");
+    }
+    return "[" + parts.join(", ") + "]";
+}
+
+fn floats(xs: [f64]) -> str {
+    var parts: [str] = [];
+    for x in xs {
+        parts.push("{x}");
+    }
+    return "[" + parts.join(", ") + "]";
+}
+
+fn main() uses io {
+    var ns: [i64] = [];
+    for i in 1..2001 {
+        ns.push(i);
+    }
+    let steps: [i64] = ns.parallel_map(collatz);
+    var total: i64 = 0;
+    var longest: i64 = 0;
+    for s in steps {
+        total = total + s;
+        if s > longest {
+            longest = s;
+        }
+    }
+    print("collatz steps for 1..=2000: total {total}, longest {longest}");
+    print("first ten: {ints(steps[0..10])}");
+
+    let base: i64 = 100;
+    let shifted: [i64] = [1, 2, 3].parallel_map(fn(x: i64) -> i64 {
+        return x + base;
+    });
+    print("captured: {ints(shifted)}");
+
+    let words: [str] = ["anvil", "hammer", "tongs", "", "quench"];
+    let loud: [str] = words.parallel_map(fn(w: str) -> str {
+        return w.to_upper() + "!";
+    });
+    print("text: {loud.join(" ")}");
+    let lens: [i64] = words.parallel_map(fn(w: str) -> i64 {
+        return w.len();
+    });
+    print("lengths: {ints(lens)}");
+
+    let points: [Point] = [Point { x: 1, y: 2 }, Point { x: -3, y: 4 }];
+    let labels: [str] = points.parallel_map(label);
+    print("structs: {labels.join(" ")}");
+    let flipped: [Point] = points.parallel_map(fn(p: Point) -> Point {
+        return Point { x: p.y, y: p.x };
+    });
+    print("flipped: {flipped[1].x} {flipped[1].y}");
+
+    let shapes: [Shape] = [Shape.Circle(1.0), Shape.Rect(w: 2.0, h: 3.5), Shape.Circle(0.5)];
+    let areas: [f64] = shapes.parallel_map(area);
+    print("areas: {floats(areas)}");
+
+    let rows: [[i64]] = [[1, 2], [], [3, 4, 5]];
+    let sums: [i64] = rows.parallel_map(fn(r: [i64]) -> i64 {
+        var t: i64 = 0;
+        for v in r {
+            t = t + v;
+        }
+        return t;
+    });
+    print("arrays: {ints(sums)}");
+    let doubled: [[i64]] = rows.parallel_map(fn(r: [i64]) -> [i64] {
+        return r.parallel_map(fn(v: i64) -> i64 {
+            return v * 2;
+        });
+    });
+    print("nested: {ints(doubled[0])} {ints(doubled[1])} {ints(doubled[2])}");
+
+    let adders: [fn(i64) -> i64] = [1, 10].parallel_map(fn(k: i64) -> (fn(i64) -> i64) {
+        return fn(v: i64) -> i64 {
+            return v + k;
+        };
+    });
+    let add_ten: fn(i64) -> i64 = adders[1];
+    print("functions: {add_ten(5)}");
+
+    let none: [i64] = [];
+    let still_none: [str] = none.parallel_map(fn(v: i64) -> str {
+        return "{v}";
+    });
+    print("empty: {still_none.len()}");
+    let flags: [bool] = [3, 4].parallel_map(fn(v: i64) -> bool {
+        return v % 2 == 0;
+    });
+    print("bools: {flags[0]} {flags[1]}");
+}

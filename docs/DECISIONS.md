@@ -382,3 +382,17 @@ Short records of choices that are not obvious from the code. Newest last.
 - **`Set` is a struct over `Map[T, bool]`**, so its members are the map's key types; an empty one
   is written with its type, since nothing else tells its element type.
 - **`\r` became an escape**, because text that handles "\r\n" line endings has to write it.
+
+## M20 (v0.21)
+
+- **Parallelism is one pure map**, not threads, tasks or locks: pure functions cannot observe
+  each other, so `parallel_map` keeps every program deterministic and the interpreter (a plain
+  loop) stays the reference. Effects are refused (E0416) rather than ordered.
+- **Workers share nothing.** Each gets deep copies of the function and of its contiguous share of
+  the array, so reference counts stay plain (non-atomic) and fast; only the count of live
+  objects is atomic. Copying costs O(input), small next to the work worth spreading.
+- **The first panic wins**: a panicking worker records its message and parks, workers skip
+  elements after the smallest panicking index, and the program panics with that one, so the
+  panic is the loop's. Workers still busy past it are ended by the exit.
+- **`ANVIL_THREADS`** pins the worker count (for measuring and for tests); it is read only by
+  native programs, and never changes a result.

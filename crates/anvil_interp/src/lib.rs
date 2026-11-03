@@ -1132,6 +1132,18 @@ impl<'p, 'h> Interp<'p, 'h> {
                 option(value.map(|v| Value::Str(v.into())))
             }
             Builtin::ListDir => file_result(self.list_dir(x.as_str())),
+            // The reference meaning: a map in order (native code runs it on worker threads).
+            Builtin::ParallelMap => {
+                let Value::Fn(c) = self.eval(&args[1], frame)? else { unreachable!("parallel_map of a non-function") };
+                let Value::Array(items) = x else { unreachable!() };
+                let mut out = Vec::with_capacity(items.len());
+                for item in items.iter() {
+                    let mut vals = c.captures.clone();
+                    vals.push(item.clone());
+                    out.push(self.call(c.func, vals)?);
+                }
+                Value::Array(Rc::new(out))
+            }
             Builtin::Assert { message } => {
                 if !x.as_bool() {
                     return panic(message.clone());

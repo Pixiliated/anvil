@@ -1,0 +1,4 @@
+exit: 101
+panic: index 7 out of bounds for length 1 at tests/programs/panic_parallel.anv:5:16
+---
+before

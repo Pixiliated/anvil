@@ -439,6 +439,9 @@ pub enum Builtin {
     Env,
     /// The names in a directory, sorted: Result[[str], FileError].
     ListDir,
+    /// `xs.parallel_map(f)`: the same as calling the pure `f` on each element in order, computed
+    /// on worker threads; args: the array and the function value.
+    ParallelMap,
 }
 
 #[derive(Clone, Debug)]

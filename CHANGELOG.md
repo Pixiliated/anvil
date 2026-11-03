@@ -3,6 +3,11 @@
 Each version is one roadmap milestone (docs/ROADMAP.md); docs/DECISIONS.md says why things are
 the way they are.
 
+## 0.21.0
+- `xs.parallel_map(f)`: a pure map on worker threads, with the same result as a loop; the first
+  panicking element is the one reported. `ANVIL_THREADS` sets the number of workers.
+- E0416: the function given to `parallel_map` has effects.
+
 ## 0.20.0
 - A standard library written in Anvil and built in: `std.list`, `std.set`, `std.text`,
   `std.math`, imported as `import std.list.{map};`; `anvil std` lists it, and the docs site has a

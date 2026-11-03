@@ -128,3 +128,10 @@ green and the interpreter and native backend agreeing on every program in `tests
 - [x] Each has tests and property tests, and is part of the repository's project, so verify holds
   it to the same rules as any code (every function tested, canonical layout)
 - [x] `anvil std` (modules and their pub items, or one module's source), a docs page, `\r` in strings
+
+## M20: Parallel work (v0.21)
+- [x] `xs.parallel_map(f)`: a map over worker threads with the result of a map in order; `f` must
+  be pure (E0416), so the result is the same on every run and on both backends
+- [x] A panic reports the first element that panics, as a loop would; elements, results and
+  captures of any type; nested parallel work; `ANVIL_THREADS` sets the number of workers
+- [x] The fuzzer uses it, so the backends are compared on it

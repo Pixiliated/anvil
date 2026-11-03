@@ -1,0 +1,18 @@
+// Two elements panic; the program reports the one a loop would reach first, every time.
+fn check(v: i64) -> i64 {
+    let only: [i64] = [v];
+    if v % 250 == 7 {
+        return only[v];
+    }
+    return v * v;
+}
+
+fn main() uses io {
+    var ns: [i64] = [];
+    for i in 0..1000 {
+        ns.push(i);
+    }
+    print("before");
+    let squares: [i64] = ns.parallel_map(check);
+    print("never: {squares.len()}");
+}

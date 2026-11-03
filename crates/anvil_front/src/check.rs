@@ -94,6 +94,7 @@ pub const METHODS: &[(&str, &str, &str)] = &[
     ("str", "chars", "chars() -> [str]"),
     ("array", "reversed", "reversed() -> [T]"),
     ("array", "sorted", "sorted() -> [T]"),
+    ("array", "parallel_map", "parallel_map(f: fn(T) -> U) -> [U]"),
     ("strings", "join", "join(sep: str) -> str"),
     ("f64", "fixed", "fixed(digits: i64) -> str"),
     ("i64", "xor", "xor(other: i64) -> i64"),
@@ -4307,7 +4308,8 @@ impl<'a> Checker<'a> {
             "pop" | "len" | "keys" | "values" | "trim" | "parse_i64" | "parse_f64" | "to_bytes" | "to_str" | "hex"
             | "to_array" | "to_upper" | "to_lower" | "chars" | "sorted" | "reversed" => Some(0),
             "push" | "remove" | "has" | "get" | "contains" | "find" | "starts_with" | "ends_with" | "split" | "xor"
-            | "unsigned_shr" | "wrapping_add" | "wrapping_sub" | "wrapping_mul" | "join" | "fixed" => Some(1),
+            | "unsigned_shr" | "wrapping_add" | "wrapping_sub" | "wrapping_mul" | "join" | "fixed"
+            | "parallel_map" => Some(1),
             "replace" => Some(2),
             _ => None,
         };
@@ -4346,6 +4348,40 @@ impl<'a> Checker<'a> {
             self.note_alloc(b, e.span, "`replace`");
             let builtin = Builtin::StrReplace { message: replace_message(&site) };
             return Expr { kind: ExprKind::Builtin(builtin, vals), ty: Ty::Str };
+        }
+        if let ("parallel_map", Ty::Array(elem)) = (m, &x.ty) {
+            let elem = (**elem).clone();
+            let f = self.expr(b, &args[0].value);
+            let want = format!("fn({}) -> U", self.show(&elem));
+            let ret = match &f.ty {
+                Ty::Error => return Self::err_expr(),
+                Ty::Fn(ft) if ft.params == [elem.clone()] && ft.ret != Ty::Void => {
+                    if !ft.effects.is_pure() {
+                        let used: Vec<&str> = ft.effects.iter().map(Effect::name).collect();
+                        self.err(
+                            Diagnostic::new(
+                                "E0416",
+                                args[0].value.span,
+                                format!("parallel work must be pure, and this function uses {}", used.join(", ")),
+                            )
+                            .note("the workers run at once, in no fixed order; do the effects before or after parallel_map", None),
+                        );
+                        return Self::err_expr();
+                    }
+                    ft.ret.clone()
+                }
+                other => {
+                    let t = self.show(other);
+                    self.err(Diagnostic::new(
+                        "E0300",
+                        args[0].value.span,
+                        format!("parallel_map takes {want} for each element, found {t}"),
+                    ));
+                    return Self::err_expr();
+                }
+            };
+            self.note_alloc(b, e.span, "`parallel_map`");
+            return Expr { kind: ExprKind::Builtin(Builtin::ParallelMap, vec![x, f]), ty: Ty::Array(Box::new(ret)) };
         }
         let (builtin, ty) = match (m, x.ty.clone()) {
             ("len", Ty::Str | Ty::Bytes | Ty::Array(_) | Ty::Map(..)) => (Builtin::Len, Ty::I64),
@@ -4390,7 +4426,8 @@ impl<'a> Checker<'a> {
                 let t = self.show(&x.ty);
                 let have = match x.ty {
                     Ty::Array(_) => {
-                        "arrays have len, push, pop and reversed; sorted on [i64], [f64] and [str]; join on [str]"
+                        "arrays have len, push, pop, reversed and parallel_map; sorted on [i64], [f64] and [str]; \
+                         join on [str]"
                     }
                     Ty::F64(_) => "f64 has fixed",
                     Ty::Str => {

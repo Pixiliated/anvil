@@ -21,14 +21,20 @@ fn every_listed_method_checks_with_its_signature() {
             "f64" => "f",
             other => panic!("unknown receiver kind {other}"),
         };
-        let fill = |t: &str| t.replace('T', "i64").replace('K', "str").replace('V', "i64");
-        let params = &sig[sig.find('(').unwrap() + 1..sig.find(')').unwrap()];
+        let fill = |t: &str| t.replace('T', "i64").replace('K', "str").replace('V', "i64").replace('U', "i64");
+        // The last `) -> ` ends the parameters: a parameter can be a function type.
+        let end = sig.rfind(") -> ").unwrap_or_else(|| sig.rfind(')').unwrap());
+        let params = &sig[sig.find('(').unwrap() + 1..end];
         let args: Vec<String> = params
             .split(", ")
             .filter(|p| !p.is_empty())
             .map(|p| {
                 let (pname, ty) = p.split_once(": ").unwrap();
-                let value = if fill(ty) == "str" { "\"k\"".to_string() } else { "2".to_string() };
+                let value = match fill(ty).as_str() {
+                    "str" => "\"k\"".to_string(),
+                    "fn(i64) -> i64" => "same".to_string(),
+                    _ => "2".to_string(),
+                };
                 if *name == "set" || *name == "replace" {
                     format!("{pname}: {value}")
                 } else {
@@ -37,12 +43,12 @@ fn every_listed_method_checks_with_its_signature() {
             })
             .collect();
         let call = format!("{receiver}.{name}({})", args.join(", "));
-        match sig.split_once(" -> ") {
+        match sig.rsplit_once(") -> ") {
             Some((_, ret)) => body.push_str(&format!("    let _r{n}: {} = {call};\n", fill(ret))),
             None => body.push_str(&format!("    {call};\n")),
         }
     }
-    let text = format!("fn main() {{\n{body}}}\n");
+    let text = format!("fn main() {{\n{body}}}\n\nfn same(v: i64) -> i64 {{\n    return v;\n}}\n");
     let src = SourceFile::new("methods.anv", text.clone());
     let a = anvil_front::analyze(&src);
     let errors: Vec<String> = a.diags.iter().map(|d| format!("{} {}", d.code, d.message)).collect();

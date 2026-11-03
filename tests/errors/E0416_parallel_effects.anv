@@ -1,0 +1,9 @@
+// expect: E0416
+fn main() uses io {
+    let xs: [i64] = [1, 2, 3];
+    let ys: [i64] = xs.parallel_map(fn(x: i64) -> i64 uses io {
+        print("{x}");
+        return x;
+    });
+    print("{ys.len()}");
+}

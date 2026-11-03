@@ -336,6 +336,11 @@ pub fn explain(code: &str) -> Option<&'static str> {
         "E0413" => {
             "Calling something that is not a function. Only a local holding a function value can be                     called by its name; this local holds another type."
         }
+        "E0416" => {
+            "Parallel work that has effects. parallel_map runs the function on several threads at \
+                    once, in no fixed order, so it must be pure: then its results are the same as a \
+                    loop's every time. Print, read or write after parallel_map returns."
+        }
         "E0415" => {
             "A method on a type this module does not declare. Methods are declared next to their                     type, in the module that declares the struct or enum, so a value's methods are                     found by its type wherever it goes. Built-in types and imported types take no new                     methods: write a function instead."
         }
@@ -427,7 +432,7 @@ pub const ALL_CODES: &[&str] = &[
     "E0302", "E0303", "E0304", "E0305", "E0306", "E0307", "E0308", "E0310", "E0311", "E0320", "E0321", "E0322",
     "E0323", "E0330", "E0331", "E0332", "E0333", "E0334", "E0340", "E0341", "E0350", "E0360", "E0370", "E0380",
     "E0390", "E0391", "E0392", "E0393", "E0400", "E0401", "E0402", "E0403", "E0404", "E0405", "E0406", "E0407",
-    "E0408", "E0410", "E0411", "E0412", "E0413", "E0414", "E0415", "E0500", "E0501", "E0502", "E0601", "E0602",
+    "E0408", "E0410", "E0411", "E0412", "E0413", "E0414", "E0415", "E0416", "E0500", "E0501", "E0502", "E0601", "E0602",
     "E0603", "E0604", "E0605", "E0606", "E0607", "E0700", "E0701", "E0702", "E0703", "E0704", "E0800", "E0801",
     "E0802", "E0803",
 ];

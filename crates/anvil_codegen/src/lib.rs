@@ -131,6 +131,8 @@ const RUNTIME: &[(&str, &[Type], &[Type])] = &[
     ("anvil_f64_fixed", &[types::F64, I, I], &[I]),
     ("anvil_arr_reversed", &[I], &[I]),
     ("anvil_arr_sorted", &[I, I, I], &[I]),
+    ("anvil_parallel_map", &[I, I, I, I], &[I]),
+    ("anvil_parallel_at", &[I], &[I]),
     ("anvil_panic", &[I], &[]),
     ("anvil_panic_index", &[I, I, I], &[]),
     ("anvil_arr_new", &[I, I], &[I]),
@@ -181,6 +183,9 @@ struct Backend {
     thunks: HashMap<FuncId, ClFuncId>,
     pending_thunks: Vec<(FuncId, ClFuncId)>,
     fn_objects: HashMap<ClFuncId, DataId>,
+    /// parallel_map's workers by (element, result) type, and those declared but not yet generated.
+    workers: HashMap<String, ClFuncId>,
+    pending_workers: Vec<(ClFuncId, Ty, Ty)>,
 }
 
 pub fn compile_object(program: &Program, asm: bool) -> Result<(Vec<u8>, String), String> {
@@ -214,6 +219,8 @@ fn compile(program: &Program, asm: bool, entry: Entry) -> Result<(Vec<u8>, Strin
         thunks: HashMap::new(),
         pending_thunks: Vec::new(),
         fn_objects: HashMap::new(),
+        workers: HashMap::new(),
+        pending_workers: Vec::new(),
     };
 
     for (name, params, rets) in RUNTIME {
@@ -257,6 +264,18 @@ fn compile(program: &Program, asm: bool, entry: Entry) -> Result<(Vec<u8>, Strin
             let code = ctx.compiled_code().and_then(|c| c.vcode.clone()).unwrap_or_default();
             listing.push_str(&format!("; fn {}\n{code}\n", f.name));
         }
+    }
+    while let Some((id, elem, ret)) = be.pending_workers.pop() {
+        let mut ctx = Context::new();
+        ctx.func.signature = be.worker_signature();
+        ctx.func.name = UserFuncName::user(4, id.as_u32());
+        {
+            let b = FunctionBuilder::new(&mut ctx.func, &mut fbc);
+            Gen::new(&mut be, program, b, &[]).worker_function(&elem, &ret);
+        }
+        be.module.define_function(id, &mut ctx).map_err(|e| {
+            format!("codegen of parallel_map for {} -> {} failed: {e:?}", show(program, &elem), show(program, &ret))
+        })?;
     }
     while let Some((fid, id)) = be.pending_thunks.pop() {
         let mut ctx = Context::new();
@@ -452,6 +471,13 @@ impl Backend {
         self.module.define_data(id, &desc).expect("define string");
         self.strings.insert(s.to_string(), id);
         id
+    }
+
+    /// A parallel_map worker: (the function, its share of the input, the output, the share's first index).
+    fn worker_signature(&self) -> Signature {
+        let mut sig = self.module.make_signature();
+        sig.params.extend([AbiParam::new(I); 4]);
+        sig
     }
 
     fn eq_signature(&self) -> Signature {
@@ -1713,6 +1739,69 @@ impl<'a, 'b> Gen<'a, 'b> {
         self.be.module.declare_func_in_func(id, self.b.func)
     }
 
+    /// The worker of parallel_map for `elem` -> `ret`, declared now and generated after the functions.
+    fn worker(&mut self, elem: &Ty, ret: &Ty) -> FuncRef {
+        let key = format!("{elem:?} -> {ret:?}");
+        let id = match self.be.workers.get(&key) {
+            Some(id) => *id,
+            None => {
+                let sig = self.be.worker_signature();
+                let name = format!("anvil_worker_{}", self.be.workers.len());
+                let id = self.be.module.declare_function(&name, Linkage::Local, &sig).expect("declare worker");
+                self.be.workers.insert(key, id);
+                self.be.pending_workers.push((id, elem.clone(), ret.clone()));
+                id
+            }
+        };
+        self.be.module.declare_func_in_func(id, self.b.func)
+    }
+
+    /// The body of a worker: the function on each element of its share, in order, each result
+    /// stored at its index in the output; it stops when the runtime says an earlier element panicked.
+    fn worker_function(mut self, elem: &Ty, ret: &Ty) {
+        let entry = self.b.create_block();
+        self.b.append_block_params_for_function_params(entry);
+        self.b.switch_to_block(entry);
+        self.b.seal_block(entry);
+        let p = self.b.block_params(entry).to_vec();
+        let (f, input, out, base) = (p[0], p[1], p[2], p[3]);
+        let lay = self.layout(elem);
+        let ret_size = flat_len(self.program, ret) as i64 * SLOT;
+        let mut sig = self.be.signature(self.program, std::iter::once(elem), ret);
+        sig.params.insert(0, AbiParam::new(I));
+        let sig = self.b.import_signature(sig);
+        let limit = self.b.declare_var(I);
+        let n = self.b.ins().load(I, self.trusted, input, OBJ_LEN);
+        self.b.def_var(limit, n);
+        let zero = self.b.ins().iconst(I, 0);
+        self.counted_loop(zero, limit, &[], |g, j| {
+            let go = g.call_rt("anvil_parallel_at", &[j]).unwrap();
+            let work = g.b.create_block();
+            let stop = g.b.create_block();
+            g.b.ins().brif(go, work, &[], stop, &[]);
+            g.b.switch_to_block(stop);
+            g.b.seal_block(stop);
+            g.b.ins().return_(&[]);
+            g.b.switch_to_block(work);
+            g.b.seal_block(work);
+            let addr = g.elem_at(input, j, lay.len() as i64 * SLOT);
+            let vals = g.load(addr, &lay);
+            g.retain(&lay, &vals);
+            let code = g.b.ins().load(I, g.trusted, f, FN_CODE);
+            let mut args = vec![f];
+            args.extend(vals);
+            let call = g.b.ins().call_indirect(sig, code, &args);
+            let results = g.b.inst_results(call).to_vec();
+            let i = g.b.ins().iadd(base, j);
+            let dst = g.elem_at(out, i, ret_size);
+            g.store(dst, &results);
+        });
+        self.b.ins().return_(&[]);
+        self.b.seal_all_blocks();
+        let config = self.be.module.isa().frontend_config();
+        self.b.finalize(config);
+    }
+
     /// The body of an `==` helper: same object, else same length and every element equal.
     fn eq_function(mut self, ty: &Ty) {
         let parts: Vec<Ty> = match ty {
@@ -2078,6 +2167,20 @@ impl<'a, 'b> Gen<'a, 'b> {
                 self.call_rt("anvil_release", &[x]);
                 return vec![out];
             }
+            // Each worker gets its own copies of the function and of its share of xs (see anvil_rt.c).
+            Builtin::ParallelMap => {
+                let xs = self.expr(&bargs[0])[0];
+                let f = self.expr(&bargs[1])[0];
+                let (Ty::Array(elem), Ty::Array(ret)) = (&bargs[0].ty, ty) else { unreachable!() };
+                let worker = self.worker(elem, ret);
+                let work = self.b.ins().func_addr(I, worker);
+                let info = self.be.type_info(self.program, ret);
+                let ti = self.data_ptr(info);
+                let out = self.call_rt("anvil_parallel_map", &[xs, f, ti, work]).unwrap();
+                self.call_rt("anvil_release", &[xs]);
+                self.call_rt("anvil_release", &[f]);
+                return vec![out];
+            }
             Builtin::ArrJoin => {
                 let xs = self.expr(&bargs[0])[0];
                 let sep = self.expr(&bargs[1])[0];
@@ -2184,7 +2287,8 @@ impl<'a, 'b> Gen<'a, 'b> {
             | Builtin::EPrint
             | Builtin::Exit { .. }
             | Builtin::Env
-            | Builtin::ListDir => unreachable!(),
+            | Builtin::ListDir
+            | Builtin::ParallelMap => unreachable!(),
             Builtin::RandomBelow { site } => {
                 let site = self.str_obj(site);
                 vec![self.call_rt("anvil_random_below", &[x, site]).unwrap()]

@@ -1,0 +1,15 @@
+exit: 0
+---
+collatz steps for 1..=2000: total 134100, longest 181
+first ten: [0, 1, 7, 2, 5, 8, 16, 3, 19, 6]
+captured: [101, 102, 103]
+text: ANVIL! HAMMER! TONGS! ! QUENCH!
+lengths: [5, 6, 5, 0, 6]
+structs: (1, 2) (-3, 4)
+flipped: 4 -3
+areas: [3.0, 7.0, 0.75]
+arrays: [3, 0, 12]
+nested: [2, 4] [] [6, 8, 10]
+functions: 15
+empty: 0
+bools: false true
