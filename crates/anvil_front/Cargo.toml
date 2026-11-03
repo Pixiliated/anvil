@@ -1,8 +1,15 @@
 [package]
-name = "anvil_front"
+name = "anvil-lang-front"
+description = "The Anvil language: lexer, parser, formatter and type checker, from source to typed IR."
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+keywords.workspace = true
+categories.workspace = true
+readme = "README.md"
+
+[lib]
+name = "anvil_front"
 
 [dependencies]
 serde = { version = "1.0.229", features = ["derive"] }

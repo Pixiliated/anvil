@@ -18,18 +18,18 @@ dependencies = [
 ]
 
 [[package]]
-name = "anvil_cli"
-version = "0.18.0"
+name = "anvil-lang"
+version = "0.19.0"
 dependencies = [
- "anvil_ops",
+ "anvil-lang-ops",
  "serde_json",
 ]
 
 [[package]]
-name = "anvil_codegen"
-version = "0.18.0"
+name = "anvil-lang-codegen"
+version = "0.19.0"
 dependencies = [
- "anvil_front",
+ "anvil-lang-front",
  "cc",
  "cranelift-codegen",
  "cranelift-frontend",
@@ -39,25 +39,25 @@ dependencies = [
 ]
 
 [[package]]
-name = "anvil_front"
-version = "0.18.0"
+name = "anvil-lang-front"
+version = "0.19.0"
 dependencies = [
  "serde",
  "serde_json",
 ]
 
 [[package]]
-name = "anvil_interp"
-version = "0.18.0"
+name = "anvil-lang-interp"
+version = "0.19.0"
 dependencies = [
- "anvil_front",
+ "anvil-lang-front",
 ]
 
 [[package]]
-name = "anvil_mcp"
-version = "0.18.0"
+name = "anvil-lang-mcp"
+version = "0.19.0"
 dependencies = [
- "anvil_ops",
+ "anvil-lang-ops",
  "rmcp",
  "schemars",
  "serde",
@@ -66,21 +66,22 @@ dependencies = [
 ]
 
 [[package]]
-name = "anvil_ops"
-version = "0.18.0"
+name = "anvil-lang-ops"
+version = "0.19.0"
 dependencies = [
- "anvil_codegen",
- "anvil_front",
- "anvil_interp",
- "anvil_record",
+ "anvil-lang-codegen",
+ "anvil-lang-front",
+ "anvil-lang-interp",
+ "anvil-lang-record",
+ "pulldown-cmark",
  "serde",
  "serde_json",
  "toml",
 ]
 
 [[package]]
-name = "anvil_record"
-version = "0.18.0"
+name = "anvil-lang-record"
+version = "0.19.0"
 dependencies = [
  "rusqlite",
  "serde_json",
@@ -718,6 +719,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "pulldown-cmark"
+version = "0.13.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3db2be46835f013dd3f4fa7f5f7402c537787b54ebb6fe2b94bbdd7e2669bb7b"
+dependencies = [
+ "bitflags",
+ "memchr",
+ "pulldown-cmark-escape",
+ "unicase",
+]
+
+[[package]]
+name = "pulldown-cmark-escape"
+version = "0.11.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "007d8adb5ddab6f8e3f491ac63566a7d5002cc7ed73901f72057943fa71ae1ae"
+
+[[package]]
 name = "quote"
 version = "1.0.47"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1138,6 +1157,12 @@ checksum = "db97caf9d906fbde555dd62fa95ddba9eecfd14cb388e4f491a66d74cd5fb79a"
 dependencies = [
  "once_cell",
 ]
+
+[[package]]
+name = "unicase"
+version = "2.10.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "357cc3acc6a036009fd6c973ed009037c732d60d0b4f6c673e9041497482a28f"
 
 [[package]]
 name = "unicode-ident"

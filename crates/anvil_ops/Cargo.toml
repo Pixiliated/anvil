@@ -1,14 +1,22 @@
 [package]
-name = "anvil_ops"
+name = "anvil-lang-ops"
+description = "Every command of the Anvil language tools, shared by the CLI, the MCP server and the language server."
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+keywords.workspace = true
+categories.workspace = true
+readme = "README.md"
+
+[lib]
+name = "anvil_ops"
 
 [dependencies]
-anvil_front = { path = "../anvil_front" }
-anvil_interp = { path = "../anvil_interp" }
-anvil_codegen = { path = "../anvil_codegen" }
-anvil_record = { path = "../anvil_record" }
+anvil_front = { package = "anvil-lang-front", version = "0.19.0", path = "../anvil_front" }
+anvil_interp = { package = "anvil-lang-interp", version = "0.19.0", path = "../anvil_interp" }
+anvil_codegen = { package = "anvil-lang-codegen", version = "0.19.0", path = "../anvil_codegen" }
+anvil_record = { package = "anvil-lang-record", version = "0.19.0", path = "../anvil_record" }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.154"
 toml = "1.1.8"
+pulldown-cmark = { version = "0.13.0", default-features = false, features = ["html"] }

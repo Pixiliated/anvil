@@ -8,7 +8,7 @@ cd "$(dirname "$0")/.."
 
 version=$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -n 1)
 target=$(rustc -vV | sed -n 's/^host: //p')
-cargo build --release --locked -p anvil_cli -p anvil_mcp
+cargo build --release --locked -p anvil-lang -p anvil-lang-mcp
 
 ext=""
 case "$target" in *windows*) ext=".exe" ;; esac

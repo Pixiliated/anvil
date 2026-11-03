@@ -1,4 +1,4 @@
-# Anvil language specification (v0.18)
+# Anvil language specification (v0.19)
 
 Anvil is a small, compiled, general-purpose language designed to be written mostly by AI agents
 and read by humans. Its rules aim at three things: one obvious way to write each thing, code
@@ -719,6 +719,8 @@ anvil complete file.anv LINE COL       what can be written at a position
 anvil lsp                              a language server on stdio for editors
 anvil explain [CODE]                   long explanation of an error code or a lint
 anvil spec                             print this document
+anvil docs    [--out DIR]              write a static site (default out/docs): this
+                                       document, every error code and lint, the built-ins
 ```
 
 Every command takes `--json`. Every error has a stable code (`E0301`), an exact range and,

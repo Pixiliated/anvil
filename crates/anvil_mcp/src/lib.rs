@@ -46,6 +46,13 @@ switches it off). Every CLI command except `watch` and `lsp` is a tool with the 
 /// Tool argument structs reject unknown fields, so a misspelt argument is an error, not ignored.
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
+pub struct DocsArgs {
+    /// Directory for the pages, relative to the server's root (default out/docs).
+    pub out: Option<String>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct FileArgs {
     /// Path of the .anv file, relative to the server's root or absolute.
     pub file: String,
@@ -392,6 +399,13 @@ impl AnvilServer {
     #[tool(description = "The whole Anvil language specification (Markdown).")]
     async fn spec(&self, Parameters(_): Parameters<NoArgs>) -> Result<CallToolResult, ErrorData> {
         self.op(|_| anvil_ops::spec()).await
+    }
+
+    #[tool(
+        description = "Write a static site under the server's root: the specification, every error         code and lint with its explanation, and the built-in functions and methods. Returns the files."
+    )]
+    async fn docs(&self, Parameters(a): Parameters<DocsArgs>) -> Result<CallToolResult, ErrorData> {
+        self.op(move |root| anvil_ops::docs(root, a.out.as_deref())).await
     }
 
     #[tool(description = "The project's files (from anvil.toml): functions, tests, whether each has a main \

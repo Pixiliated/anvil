@@ -1,15 +1,19 @@
 [package]
-name = "anvil_cli"
+name = "anvil-lang"
+description = "Anvil, a compiled language built to be written by AI agents: the `anvil` command."
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+keywords.workspace = true
+categories.workspace = true
+readme = "README.md"
 
 [[bin]]
 name = "anvil"
 path = "src/main.rs"
 
 [dependencies]
-anvil_ops = { path = "../anvil_ops" }
+anvil_ops = { package = "anvil-lang-ops", version = "0.19.0", path = "../anvil_ops" }
 
 [dev-dependencies]
 serde_json = "1.0.154"

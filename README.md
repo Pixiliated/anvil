@@ -83,7 +83,7 @@ in full (`anvil spec` prints it).
 
 ## Status
 
-v0.18: programs of one or more files (modules with explicit imports and `pub`), generic
+v0.19: programs of one or more files (modules with explicit imports and `pub`), generic
 functions, structs and enums with built-in constraints, i64, f64 with units, bool, strings with interpolation,
 search and split, growable arrays and slices, maps in key order, structs, enums with
 exhaustive `match`, structural `==`, `Option` and `Result` with `?`, function values and
@@ -109,6 +109,14 @@ the Visual Studio C++ build tools on Windows x64, a C compiler (`cc`, or `$CC`) 
 macOS. A program with C functions (`extern "x.c" fn`) also compiles them with that compiler, for
 the interpreter as well as for executables. Windows x64 and Linux x86-64 are tested; ARM64 Linux and macOS are built and tested by
 the release workflow. `scripts/release.sh` packs the binaries of the host into `dist/`.
+
+From crates.io, once it is published:
+
+```bash
+cargo install anvil-lang
+```
+
+From this repository:
 
 ```bash
 cargo build --release
@@ -140,6 +148,7 @@ target/release/anvil build examples/orders.anv -o orders.exe
 | `anvil profile f.anv [--test NAME]` | calls and steps per function |
 | `anvil explain [CODE]` | explain an error code or a lint |
 | `anvil spec` | print the language specification |
+| `anvil docs [--out DIR]` | write a static site: the specification, every error code, the built-ins |
 
 Every command takes `--json`.
 
@@ -198,15 +207,17 @@ An agent starts with `spec` (the whole language), writes a file, then loops on `
 
 | Path | Contents |
 |---|---|
-| `crates/anvil_front` | lexer, parser, checker, diagnostics, typed IR |
-| `crates/anvil_interp` | reference interpreter |
-| `crates/anvil_codegen` | Cranelift backend, C runtime, linker driver |
-| `crates/anvil_ops` | every command, returning the JSON the CLI and MCP server send |
-| `crates/anvil_cli` | the `anvil` command and end-to-end tests |
-| `crates/anvil_mcp` | the `anvil-mcp` server, its stdio and parity tests |
-| `crates/anvil_record` | the project record (SQLite) |
+| `crates/anvil_front` (`anvil-lang-front`) | lexer, parser, checker, diagnostics, typed IR |
+| `crates/anvil_interp` (`anvil-lang-interp`) | reference interpreter |
+| `crates/anvil_codegen` (`anvil-lang-codegen`) | Cranelift backend, C runtime, linker driver |
+| `crates/anvil_ops` (`anvil-lang-ops`) | every command, returning the JSON the CLI and MCP server send |
+| `crates/anvil_cli` (`anvil-lang`) | the `anvil` command and end-to-end tests |
+| `crates/anvil_mcp` (`anvil-lang-mcp`) | the `anvil-mcp` server, its stdio and parity tests |
+| `crates/anvil_record` (`anvil-lang-record`) | the project record (SQLite) |
 | `tests/programs` | programs whose approved output is in `golden/`, run on both backends; `lib/` holds the modules they import |
 | `tests/errors` | one file per error code, with expected codes and fix checks |
+
+Contributing: CONTRIBUTING.md. Changes by version: CHANGELOG.md.
 
 ## License
 

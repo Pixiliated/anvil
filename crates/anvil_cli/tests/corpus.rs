@@ -56,6 +56,24 @@ fn every_program_matches_its_golden_on_both_backends() {
     assert_eq!(v["checked"].as_u64().unwrap() as usize, files("tests/programs").len() + files("examples").len());
 }
 
+/// A package ships only what is inside its crate, so these files are copied there; the copies
+/// must stay the repository's.
+#[test]
+fn packaged_copies_match_the_repository() {
+    let r = root();
+    let mut copies = vec![("docs/SPEC.md", "crates/anvil_ops/SPEC.md".to_string())];
+    copies.push(("README.md", "crates/anvil_cli/README.md".to_string()));
+    for c in ["front", "interp", "codegen", "record", "ops", "cli", "mcp"] {
+        for f in ["LICENSE-MIT", "LICENSE-APACHE"] {
+            copies.push((f, format!("crates/anvil_{c}/{f}")));
+        }
+    }
+    for (from, copy) in copies {
+        let same = std::fs::read(r.join(from)).unwrap() == std::fs::read(r.join(&copy)).unwrap();
+        assert!(same, "{copy} differs from {from}: copy {from} over it");
+    }
+}
+
 #[test]
 fn run_reports_panics_exactly() {
     let out = anvil(&["run", "tests/programs/panic_index.anv"]);

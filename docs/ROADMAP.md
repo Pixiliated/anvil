@@ -115,5 +115,9 @@ green and the interpreter and native backend agreeing on every program in `tests
 - [x] The system: `eprint` (stderr kept in goldens), `exit`, `env` (given by a golden's `.in`)
   and `list_dir` (with writes kept in memory), on both backends
 
-## M18: Publishing
-- [ ] crates.io as `anvil-lang` (`anvil` is taken), docs site, contribution guide
+## M18: Publishing (v0.19)
+- [x] Every crate packages for crates.io (`anvil-lang` and `anvil-lang-*`) and passes
+  `cargo publish --dry-run`; a binary built from the packages alone works
+- [x] Docs site (`anvil docs`), contribution guide, changelog, CI workflow (Windows and Linux)
+- [ ] Publish: a repository URL, the commit email in the history, and the upload itself are the
+  owner's decisions; the CI workflow has not run yet

@@ -1,8 +1,15 @@
 [package]
-name = "anvil_record"
+name = "anvil-lang-record"
+description = "The project record of the Anvil language tools: milestones, decisions and findings in SQLite."
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+keywords.workspace = true
+categories.workspace = true
+readme = "README.md"
+
+[lib]
+name = "anvil_record"
 
 [dependencies]
 rusqlite = { version = "0.40.2", features = ["bundled"] }

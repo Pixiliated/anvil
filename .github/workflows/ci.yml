@@ -1,0 +1,36 @@
+# On every push and pull request: the checks a milestone needs (CLAUDE.md), on Windows and
+# Linux, and that every crate still packages for crates.io.
+name: ci
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  check:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, ubuntu-latest]
+    runs-on: ${{ matrix.os }}
+    env:
+      ANVIL_CHECK_LEAKS: "1"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+      - name: Layout of the Rust code
+        run: cargo fmt --all -- --check
+      - name: Lints
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+      - name: Tests (both backends, every program and error code)
+        run: cargo test --workspace --locked
+      - name: Layout of the Anvil code
+        run: cargo run -q --locked -p anvil-lang -- fmt --check
+      - name: Every golden, natively too
+        run: cargo run -q --locked -p anvil-lang -- golden check --native
+      - name: Fuzz the backends
+        run: cargo run -q --release --locked -p anvil-lang -- fuzz --count 50
+      - name: Every crate packages
+        run: cargo package --workspace --locked

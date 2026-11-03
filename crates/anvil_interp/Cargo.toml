@@ -1,8 +1,15 @@
 [package]
-name = "anvil_interp"
+name = "anvil-lang-interp"
+description = "The Anvil language's reference interpreter, which defines what programs mean."
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+keywords.workspace = true
+categories.workspace = true
+readme = "README.md"
+
+[lib]
+name = "anvil_interp"
 
 [dependencies]
-anvil_front = { path = "../anvil_front" }
+anvil_front = { package = "anvil-lang-front", version = "0.19.0", path = "../anvil_front" }

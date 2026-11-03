@@ -12,7 +12,7 @@ Anvil is a compiled language designed to be written by AI agents. The compiler i
 - Linux works the same way (`cc` links). After a change to the backend, linker or runtime, run
   the suite on Linux too (a WSL distribution with Rust will do).
 - `cargo test --workspace` must pass before any milestone is called done.
-- `cargo run -p anvil_cli -- <command> <file.anv>` drives the compiler; `anvil-mcp` serves the
+- `cargo run -p anvil-lang -- <command> <file.anv>` drives the compiler; `anvil-mcp` serves the
   same commands as MCP tools.
 - Every `.anv` file must be in canonical layout: run `anvil fmt` (or `anvil fix`) after editing.
 
@@ -38,5 +38,7 @@ Anvil is a compiled language designed to be written by AI agents. The compiler i
    those commands. A new command or option needs a tool parameter too, or the parity test fails.
 8. **Lints are fixed, not silenced.** Every function runs in a test or a golden-checked main. Use
    `allow untested "reason"` only where a test cannot reach the function, with a real reason.
-9. **Small docs.** Tick ROADMAP checkboxes; add a few lines to DECISIONS per milestone.
+9. **Small docs.** Tick ROADMAP checkboxes; add a few lines to DECISIONS per milestone and an
+   entry to CHANGELOG.md. Packages hold copies of docs/SPEC.md, README.md and the licenses
+   (CONTRIBUTING.md, Copies); after changing an original, copy it over its copies.
 10. Commit only when the human asks.

@@ -3,6 +3,7 @@
 //! is the one list of commands and their arguments: the CLI parses with it and a test checks
 //! that the MCP server has a tool for each, with the same parameters.
 
+mod docs;
 mod fuzz;
 pub mod golden;
 mod inspect;
@@ -12,6 +13,7 @@ pub mod project;
 mod query;
 mod testing;
 
+pub use docs::docs;
 pub use fuzz::{fuzz, program_for};
 pub use inspect::{profile, trace, TRACE_LIMIT};
 pub use lsp::lsp;
@@ -125,6 +127,12 @@ pub const COMMANDS: &[Command] = &[
         summary: "explain an error code (no code: list all)",
     },
     Command { name: "spec", positionals: &[], options: &[], summary: "the language specification" },
+    Command {
+        name: "docs",
+        positionals: &[],
+        options: &[("out", "DIR", "where to write the pages (default out/docs)")],
+        summary: "a static site: the specification, every error code and lint, the built-ins",
+    },
     Command {
         name: "trace",
         positionals: &["file", "args*"],
@@ -252,7 +260,8 @@ impl ProgramInput {
     }
 }
 
-pub const SPEC: &str = include_str!("../../../docs/SPEC.md");
+/// docs/SPEC.md, copied into this crate so it ships with the package (a test keeps them equal).
+pub const SPEC: &str = include_str!("../SPEC.md");
 
 /// `0.11.0 (x86_64-unknown-linux-gnu)`: the version and the target native builds produce.
 pub fn version() -> String {

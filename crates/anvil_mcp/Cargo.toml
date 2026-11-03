@@ -1,15 +1,22 @@
 [package]
-name = "anvil_mcp"
+name = "anvil-lang-mcp"
+description = "Anvil's commands as MCP tools for AI agents: the `anvil-mcp` server."
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+keywords.workspace = true
+categories.workspace = true
+readme = "README.md"
+
+[lib]
+name = "anvil_mcp"
 
 [[bin]]
 name = "anvil-mcp"
 path = "src/main.rs"
 
 [dependencies]
-anvil_ops = { path = "../anvil_ops" }
+anvil_ops = { package = "anvil-lang-ops", version = "0.19.0", path = "../anvil_ops" }
 rmcp = { version = "3.6.0", features = ["server", "transport-io"] }
 schemars = "1"
 serde = { version = "1.0.229", features = ["derive"] }

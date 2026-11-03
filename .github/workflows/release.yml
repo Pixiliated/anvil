@@ -21,7 +21,7 @@ jobs:
       - name: Test (both backends, every program)
         run: cargo test --workspace --locked
       - name: Fuzz the backends
-        run: cargo run --release --locked -p anvil_cli -- fuzz --count 50
+        run: cargo run --release --locked -p anvil-lang -- fuzz --count 50
       - name: Package
         shell: bash
         run: bash scripts/release.sh
