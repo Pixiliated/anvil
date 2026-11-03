@@ -20,6 +20,7 @@ pub enum Value {
     F64(f64),
     Bool(bool),
     Str(Rc<str>),
+    Bytes(Rc<[u8]>),
     Struct(Vec<Value>),
     Array(Rc<Vec<Value>>),
     /// Variant index and that variant's fields.
@@ -134,7 +135,7 @@ pub struct Interp<'p, 'h> {
     started: std::time::Instant,
     random: Random,
     /// Files written in this run when writes are kept in memory, by `memory_file_key`.
-    written: HashMap<String, Rc<str>>,
+    written: HashMap<String, Rc<[u8]>>,
     depth: usize,
     /// Statements and loop iterations left before the run stops; None is unlimited.
     steps_left: Option<u64>,
@@ -744,6 +745,7 @@ impl<'p, 'h> Interp<'p, 'h> {
                 let len = match &v {
                     Value::Array(items) => items.len() as i64,
                     Value::Str(s) => s.len() as i64,
+                    Value::Bytes(b) => b.len() as i64,
                     other => unreachable!("slice of {other:?}"),
                 };
                 if f < 0 || t > len || f > t {
@@ -752,6 +754,7 @@ impl<'p, 'h> Interp<'p, 'h> {
                 let (f, t) = (f as usize, t as usize);
                 match v {
                     Value::Array(items) => Value::Array(Rc::new(items[f..t].to_vec())),
+                    Value::Bytes(b) => Value::Bytes(b[f..t].into()),
                     Value::Str(s) if s.is_char_boundary(f) && s.is_char_boundary(t) => Value::Str(s[f..t].into()),
                     _ => return panic(slice_char_message(f as i64, t as i64, site)),
                 }
@@ -801,12 +804,19 @@ impl<'p, 'h> Interp<'p, 'h> {
             ExprKind::Index { base, index, site } => {
                 let items = self.eval(base, frame)?;
                 let i = self.eval(index, frame)?.as_i64();
-                let Value::Array(items) = items else { unreachable!("index of {items:?}") };
-                let len = items.len() as i64;
+                let len = match &items {
+                    Value::Array(items) => items.len() as i64,
+                    Value::Bytes(b) => b.len() as i64,
+                    other => unreachable!("index of {other:?}"),
+                };
                 if i < 0 || i >= len {
                     return panic(index_message(i, len, site));
                 }
-                items[i as usize].clone()
+                match items {
+                    Value::Array(items) => items[i as usize].clone(),
+                    Value::Bytes(b) => Value::I64(b[i as usize] as i64),
+                    _ => unreachable!(),
+                }
             }
             ExprKind::Interp(parts) => {
                 let mut text = String::new();
@@ -816,11 +826,10 @@ impl<'p, 'h> Interp<'p, 'h> {
                 }
                 Value::Str(text.into())
             }
-            ExprKind::StrConcat(l, r) => {
-                let a = self.eval(l, frame)?;
-                let b = self.eval(r, frame)?;
-                Value::Str(format!("{}{}", a.as_str(), b.as_str()).into())
-            }
+            ExprKind::StrConcat(l, r) => match (self.eval(l, frame)?, self.eval(r, frame)?) {
+                (Value::Bytes(a), Value::Bytes(b)) => Value::Bytes([&a[..], &b[..]].concat().into()),
+                (a, b) => Value::Str(format!("{}{}", a.as_str(), b.as_str()).into()),
+            },
             ExprKind::Push { local, path, value } => {
                 let v = self.eval(value, frame)?;
                 let indices = self.indices(path, frame)?;
@@ -906,6 +915,22 @@ impl<'p, 'h> Interp<'p, 'h> {
                 None => return panic(overflow.clone()),
             },
             ExprKind::FNeg(x) => Value::F64(-self.eval(x, frame)?.as_f64()),
+            ExprKind::BitNot(x) => Value::I64(!self.eval(x, frame)?.as_i64()),
+            ExprKind::Bits { op, l, r, site } => {
+                let (a, n) = (self.eval(l, frame)?.as_i64(), self.eval(r, frame)?.as_i64());
+                let shift = matches!(op, BitOp::Shl | BitOp::Shr | BitOp::UShr);
+                if shift && !(0..=63).contains(&n) {
+                    return panic(shift_message(n, site));
+                }
+                Value::I64(match op {
+                    BitOp::And => a & n,
+                    BitOp::Or => a | n,
+                    BitOp::Xor => a ^ n,
+                    BitOp::Shl => ((a as u64) << n) as i64,
+                    BitOp::Shr => a >> n,
+                    BitOp::UShr => ((a as u64) >> n) as i64,
+                })
+            }
             ExprKind::Builtin(b, args) => self.builtin(b, args, frame)?,
         })
     }
@@ -939,10 +964,53 @@ impl<'p, 'h> Interp<'p, 'h> {
         let x = self.eval(&args[0], frame)?;
         Ok(match b {
             Builtin::ClockNs | Builtin::RandomF64 | Builtin::Args | Builtin::ReadLine { .. } => unreachable!(),
-            Builtin::ReadFile => file_result(self.read_file(x.as_str()).map(Value::Str)),
-            Builtin::WriteFile => {
-                let text = self.eval(&args[1], frame)?;
-                file_result(self.write_file(x.as_str(), text.as_str()))
+            Builtin::ReadFile => {
+                file_result(self.read_file(x.as_str()).and_then(|b| match String::from_utf8(b.to_vec()) {
+                    Ok(s) => Ok(Value::Str(s.into())),
+                    Err(_) => Err(FILE_NOT_TEXT),
+                }))
+            }
+            Builtin::ReadBytes => file_result(self.read_file(x.as_str()).map(Value::Bytes)),
+            Builtin::WriteFile | Builtin::WriteBytes => {
+                let data = match self.eval(&args[1], frame)? {
+                    Value::Str(s) => s.as_bytes().into(),
+                    Value::Bytes(b) => b,
+                    other => unreachable!("write {other:?}"),
+                };
+                file_result(self.write_file(x.as_str(), data))
+            }
+            Builtin::WrappingAdd | Builtin::WrappingSub | Builtin::WrappingMul => {
+                let (a, c) = (x.as_i64(), self.eval(&args[1], frame)?.as_i64());
+                Value::I64(match b {
+                    Builtin::WrappingAdd => a.wrapping_add(c),
+                    Builtin::WrappingSub => a.wrapping_sub(c),
+                    _ => a.wrapping_mul(c),
+                })
+            }
+            Builtin::BytesOf { site } => {
+                let Value::Array(items) = x else { unreachable!("bytes_of {x:?}") };
+                let mut out = Vec::with_capacity(items.len());
+                for v in items.iter() {
+                    let v = v.as_i64();
+                    if !(0..=255).contains(&v) {
+                        return panic(byte_message(v, site));
+                    }
+                    out.push(v as u8);
+                }
+                Value::Bytes(out.into())
+            }
+            Builtin::StrToBytes => Value::Bytes(x.as_str().as_bytes().into()),
+            Builtin::BytesToStr => {
+                let Value::Bytes(bs) = x else { unreachable!() };
+                option(String::from_utf8(bs.to_vec()).ok().map(|s| Value::Str(s.into())))
+            }
+            Builtin::BytesHex => {
+                let Value::Bytes(bs) = x else { unreachable!() };
+                Value::Str(hex_text(&bs).into())
+            }
+            Builtin::BytesToArray => {
+                let Value::Bytes(bs) = x else { unreachable!() };
+                Value::Array(Rc::new(bs.iter().map(|b| Value::I64(*b as i64)).collect()))
             }
             Builtin::StrTrim => Value::Str(trim_text(x.as_str()).into()),
             Builtin::StrParseI64 => option(parse_i64_text(x.as_str()).map(Value::I64)),
@@ -990,6 +1058,7 @@ impl<'p, 'h> Interp<'p, 'h> {
             }
             Builtin::Len => match x {
                 Value::Str(s) => Value::I64(s.len() as i64),
+                Value::Bytes(b) => Value::I64(b.len() as i64),
                 Value::Array(items) => Value::I64(items.len() as i64),
                 Value::Map(entries) => Value::I64(entries.len() as i64),
                 other => unreachable!("len of {other:?}"),
@@ -1055,7 +1124,8 @@ impl Interp<'_, '_> {
         }
     }
 
-    fn read_file(&mut self, path: &str) -> Result<Rc<str>, usize> {
+    /// The file's bytes; read_file checks they are UTF-8.
+    fn read_file(&mut self, path: &str) -> Result<Rc<[u8]>, usize> {
         // An empty path names no file, on every platform.
         if path.is_empty() {
             return Err(FILE_NOT_FOUND);
@@ -1069,12 +1139,11 @@ impl Interp<'_, '_> {
         if p.is_dir() {
             return Err(FILE_IS_DIRECTORY);
         }
-        let bytes = std::fs::read(&p).map_err(file_error)?;
-        String::from_utf8(bytes).map(Rc::from).map_err(|_| FILE_NOT_TEXT)
+        std::fs::read(&p).map(Rc::from).map_err(file_error)
     }
 
     /// Ok of the bytes written.
-    fn write_file(&mut self, path: &str, text: &str) -> Result<Value, usize> {
+    fn write_file(&mut self, path: &str, data: Rc<[u8]>) -> Result<Value, usize> {
         if path.is_empty() {
             return Err(FILE_NOT_FOUND);
         }
@@ -1087,11 +1156,12 @@ impl Interp<'_, '_> {
             if p.parent().is_some_and(|d| !d.as_os_str().is_empty() && !d.is_dir()) {
                 return Err(FILE_NOT_FOUND);
             }
-            self.written.insert(memory_file_key(path), text.into());
-        } else {
-            std::fs::write(&p, text).map_err(file_error)?;
+            let n = data.len();
+            self.written.insert(memory_file_key(path), data);
+            return Ok(Value::I64(n as i64));
         }
-        Ok(Value::I64(text.len() as i64))
+        std::fs::write(&p, &data).map_err(file_error)?;
+        Ok(Value::I64(data.len() as i64))
     }
 }
 

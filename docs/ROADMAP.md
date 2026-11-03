@@ -102,5 +102,12 @@ green and the interpreter and native backend agreeing on every program in `tests
 - [x] Interfaces as constraints (`T: Shape`), met by having the methods, with `Self`
 - [x] Outline, completion, refs and traces name methods `Type.name`
 
-## M16: Publishing
+## M16: Bytes and bits (v0.17)
+- [x] Bit operators `& | << >> ~`, `xor`, `unsigned_shr` and wrapping arithmetic on i64; hex and
+  binary literals; `^` refused with a fix (E0393)
+- [x] The `bytes` type: `bytes_of`, indexing, slices, joining, `to_str`, `hex`, `to_array`, and
+  binary files (`read_bytes`, `write_bytes`), on both backends
+- [x] The fuzzer uses bit operations; property tests generate bytes
+
+## M17: Publishing
 - [ ] crates.io as `anvil-lang` (`anvil` is taken), docs site, contribution guide

@@ -31,12 +31,15 @@ pub const BUILTINS: &[&str] = &[
     "read_line",
     "read_file",
     "write_file",
+    "bytes_of",
+    "read_bytes",
+    "write_bytes",
 ];
 /// The effects `uses` can list, in the order it lists them.
 pub const EFFECTS: &[&str] = &["io", "fs", "clock", "random"];
 /// Constructors of the built-in Option and Result enums, usable without a type prefix.
 pub const CONSTRUCTORS: &[&str] = &["Some", "None", "Ok", "Err"];
-pub const TYPE_NAMES: &[&str] = &["i64", "f64", "bool", "str", "Option", "Result", "Map", "FileError", "Self"];
+pub const TYPE_NAMES: &[&str] = &["i64", "f64", "bool", "str", "bytes", "Option", "Result", "Map", "FileError", "Self"];
 
 /// How completion shows each built-in function and constructor (same order as BUILTINS, then
 /// CONSTRUCTORS; a test keeps them in step).
@@ -55,6 +58,9 @@ pub const BUILTIN_SIGNATURES: &[(&str, &str)] = &[
     ("read_line", "read_line() -> Option[str] uses io: the next line of stdin, None at the end"),
     ("read_file", "read_file(path: str) -> Result[str, FileError] uses fs: the whole file"),
     ("write_file", "write_file(path: str, text: str) -> Result[i64, FileError] uses fs: replaces the file"),
+    ("bytes_of", "bytes_of(xs: [i64]) -> bytes: each value 0..=255 as a byte"),
+    ("read_bytes", "read_bytes(path: str) -> Result[bytes, FileError] uses fs: the whole file"),
+    ("write_bytes", "write_bytes(path: str, data: bytes) -> Result[i64, FileError] uses fs: replaces the file"),
     ("Some", "Some(value) -> Option[T]"),
     ("None", "None: Option[T]"),
     ("Ok", "Ok(value) -> Result[T, E]"),
@@ -73,6 +79,16 @@ pub const METHODS: &[(&str, &str, &str)] = &[
     ("str", "trim", "trim() -> str"),
     ("str", "parse_i64", "parse_i64() -> Option[i64]"),
     ("str", "parse_f64", "parse_f64() -> Option[f64]"),
+    ("str", "to_bytes", "to_bytes() -> bytes"),
+    ("i64", "xor", "xor(other: i64) -> i64"),
+    ("i64", "unsigned_shr", "unsigned_shr(n: i64) -> i64"),
+    ("i64", "wrapping_add", "wrapping_add(other: i64) -> i64"),
+    ("i64", "wrapping_sub", "wrapping_sub(other: i64) -> i64"),
+    ("i64", "wrapping_mul", "wrapping_mul(other: i64) -> i64"),
+    ("bytes", "len", "len() -> i64"),
+    ("bytes", "to_str", "to_str() -> Option[str]"),
+    ("bytes", "hex", "hex() -> str"),
+    ("bytes", "to_array", "to_array() -> [i64]"),
     ("array", "len", "len() -> i64"),
     ("array", "push", "push(x: T)"),
     ("array", "pop", "pop() -> T"),
@@ -1082,6 +1098,7 @@ impl<'a> Checker<'a> {
             "i64" => Ty::I64,
             "bool" => Ty::Bool,
             "str" => Ty::Str,
+            "bytes" => Ty::Bytes,
             "FileError" => Ty::Enum(self.file_error),
             "f64" => match unit {
                 None => Ty::F64(Unit::dimensionless()),
@@ -2655,6 +2672,13 @@ impl<'a> Checker<'a> {
                         Some((local, path, *elem))
                     }
                     Ty::Error => None,
+                    Ty::Bytes => {
+                        self.err(
+                            Diagnostic::new("E0310", target.span, "bytes cannot be changed in place")
+                                .note("make new bytes: from an array with bytes_of, or by joining slices with +", None),
+                        );
+                        None
+                    }
                     other => {
                         let t = self.show(&other);
                         self.err(Diagnostic::new("E0302", target.span, format!("only arrays can be indexed, not {t}")));
@@ -2945,10 +2969,15 @@ impl<'a> Checker<'a> {
                         let site = self.site(e.span);
                         (ExprKind::Index { base: Box::new(x), index: Box::new(i), site }, *elem)
                     }
+                    Ty::Bytes => {
+                        let site = self.site(e.span);
+                        (ExprKind::Index { base: Box::new(x), index: Box::new(i), site }, Ty::I64)
+                    }
                     Ty::Error => return Self::err_expr(),
                     other => {
                         let t = self.show(&other);
-                        let mut d = Diagnostic::new("E0302", e.span, format!("only arrays can be indexed, not {t}"));
+                        let mut d =
+                            Diagnostic::new("E0302", e.span, format!("only arrays and bytes can be indexed, not {t}"));
                         if other == Ty::Str {
                             d = d.note("strings are not indexed by position in Anvil", None);
                         }
@@ -2962,7 +2991,7 @@ impl<'a> Checker<'a> {
                 let f = self.expect(b, from, &Ty::I64);
                 let t = self.expect(b, to, &Ty::I64);
                 match x.ty.clone() {
-                    ty @ (Ty::Array(_) | Ty::Str) => {
+                    ty @ (Ty::Array(_) | Ty::Str | Ty::Bytes) => {
                         self.note_alloc(b, e.span, "a slice");
                         let site = self.site(e.span);
                         (ExprKind::Slice { base: Box::new(x), from: Box::new(f), to: Box::new(t), site }, ty)
@@ -2973,7 +3002,7 @@ impl<'a> Checker<'a> {
                         self.err(Diagnostic::new(
                             "E0302",
                             e.span,
-                            format!("only arrays and str can be sliced, not {t}"),
+                            format!("only arrays, str and bytes can be sliced, not {t}"),
                         ));
                         return Self::err_expr();
                     }
@@ -3117,8 +3146,13 @@ impl<'a> Checker<'a> {
                         (ExprKind::FNeg(Box::new(x)), Ty::F64(u))
                     }
                     (UnOp::Not, Ty::Bool) => (ExprKind::Not(Box::new(x)), Ty::Bool),
+                    (UnOp::BitNot, Ty::I64) => (ExprKind::BitNot(Box::new(x)), Ty::I64),
                     (op, t) => {
-                        let o = if *op == UnOp::Neg { "-" } else { "!" };
+                        let o = match op {
+                            UnOp::Neg => "-",
+                            UnOp::Not => "!",
+                            UnOp::BitNot => "~",
+                        };
                         let t = self.show(t);
                         self.err(Diagnostic::new("E0302", e.span, format!("`{o}` is not defined for {t}")));
                         return Self::err_expr();
@@ -3143,6 +3177,62 @@ impl<'a> Checker<'a> {
         };
         if x.ty == Ty::Error || y.ty == Ty::Error {
             return Self::err_expr();
+        }
+        if op == BinOp::Caret {
+            let (ls, rs) = (self.text(l.span), self.text(r.span));
+            let wrap =
+                |s: String| if s.chars().all(|c| c.is_alphanumeric() || c == '_') { s } else { format!("({s})") };
+            self.err(
+                Diagnostic::new("E0393", e.span, "`^` is not an operator in Anvil expressions")
+                    .note("`^` is a power in units (m/s^2); exclusive or is a.xor(b), and a square is x * x", None)
+                    .fix1(FixKind::ChangesMeaning, "exclusive or", e.span, format!("{}.xor({rs})", wrap(ls))),
+            );
+            return Self::err_expr();
+        }
+        if matches!(op, BinOp::BitAnd | BinOp::BitOr | BinOp::Shl | BinOp::Shr) {
+            if x.ty == Ty::I64 && y.ty == Ty::I64 {
+                let bop = match op {
+                    BinOp::BitAnd => BitOp::And,
+                    BinOp::BitOr => BitOp::Or,
+                    BinOp::Shl => BitOp::Shl,
+                    _ => BitOp::Shr,
+                };
+                let site = self.site(e.span);
+                return Expr { kind: ExprKind::Bits { op: bop, l: Box::new(x), r: Box::new(y), site }, ty: Ty::I64 };
+            }
+            let (lt, rt) = (self.show(&x.ty), self.show(&y.ty));
+            let mut d = Diagnostic::new("E0302", e.span, format!("`{}` is not defined for {lt} and {rt}", op.text()))
+                .note("bit operators take i64", None);
+            if x.ty == Ty::Bool && y.ty == Ty::Bool && matches!(op, BinOp::BitAnd | BinOp::BitOr) {
+                let logical = if op == BinOp::BitAnd { "&&" } else { "||" };
+                let text = format!("{} {logical} {}", self.text(l.span), self.text(r.span));
+                d = d.fix1(
+                    FixKind::ChangesMeaning,
+                    format!("logical {}: `{logical}`", if logical == "&&" { "and" } else { "or" }),
+                    e.span,
+                    text,
+                );
+            }
+            self.err(d);
+            return Self::err_expr();
+        }
+        if x.ty == Ty::Bytes && y.ty == Ty::Bytes {
+            match op {
+                BinOp::Add => {
+                    self.note_alloc(b, e.span, "joining bytes");
+                    return Expr { kind: ExprKind::StrConcat(Box::new(x), Box::new(y)), ty: Ty::Bytes };
+                }
+                BinOp::Eq | BinOp::Ne => {
+                    return Expr { kind: ExprKind::Cmp(cmp_op(op), Box::new(x), Box::new(y)), ty: Ty::Bool };
+                }
+                _ => {
+                    self.err(
+                        Diagnostic::new("E0302", e.span, format!("`{}` is not defined for bytes", op.text()))
+                            .note("bytes have + (joining), == and !=", None),
+                    );
+                    return Self::err_expr();
+                }
+            }
         }
         if matches!(op, BinOp::Eq | BinOp::Ne) && (self.has_fn(&x.ty) || self.has_fn(&y.ty)) {
             let t = self.show(if self.has_fn(&x.ty) { &x.ty } else { &y.ty });
@@ -3669,7 +3759,7 @@ impl<'a> Checker<'a> {
 
     fn builtin(&mut self, b: &mut Body, e: &ast::Expr, callee: &ast::Ident, args: &[ast::Arg]) -> Expr {
         let name = callee.name.as_str();
-        if name == "write_file" {
+        if name == "write_file" || name == "write_bytes" {
             return self.write_file(b, e, callee, args);
         }
         for a in args {
@@ -3692,10 +3782,10 @@ impl<'a> Checker<'a> {
                 self.note_effect(b, Effect::Random, callee.span, &format!("`{name}`"))
             }
             "args" | "read_line" => self.note_effect(b, Effect::Io, callee.span, &format!("`{name}`")),
-            "read_file" => self.note_effect(b, Effect::Fs, callee.span, "`read_file`"),
+            "read_file" | "read_bytes" => self.note_effect(b, Effect::Fs, callee.span, &format!("`{name}`")),
             _ => {}
         }
-        if matches!(name, "args" | "read_line" | "read_file") {
+        if matches!(name, "args" | "read_line" | "read_file" | "read_bytes" | "bytes_of") {
             self.note_alloc(b, callee.span, &format!("`{name}`"));
         }
         let vals: Vec<Expr> = args.iter().map(|a| self.expr(b, &a.value)).collect();
@@ -3724,6 +3814,7 @@ impl<'a> Checker<'a> {
                     Ty::Array(_) => "print the elements in a loop",
                     Ty::Enum(_) => "match on it and print each case",
                     Ty::Map(..) => "print the entries in a loop over m.keys()",
+                    Ty::Bytes => "print b.hex(), or b.to_str() when they are text",
                     _ => "only values have text",
                 };
                 self.err(
@@ -3835,33 +3926,48 @@ impl<'a> Checker<'a> {
                 }
                 Expr { kind: ExprKind::Builtin(Builtin::RandomSeed, vec![x]), ty: Ty::Void }
             }
-            "read_file" => {
+            "read_file" | "read_bytes" => {
                 if t != Ty::Str {
                     return bad(self, "a str path");
                 }
-                let ty = self.result_of(Ty::Str, Ty::Enum(self.file_error));
-                Expr { kind: ExprKind::Builtin(Builtin::ReadFile, vec![x]), ty }
+                let (content, b) =
+                    if name == "read_file" { (Ty::Str, Builtin::ReadFile) } else { (Ty::Bytes, Builtin::ReadBytes) };
+                let ty = self.result_of(content, Ty::Enum(self.file_error));
+                Expr { kind: ExprKind::Builtin(b, vec![x]), ty }
+            }
+            "bytes_of" => {
+                if t != Ty::Array(Box::new(Ty::I64)) {
+                    return bad(self, "[i64]");
+                }
+                Expr { kind: ExprKind::Builtin(Builtin::BytesOf { site }, vec![x]), ty: Ty::Bytes }
             }
             _ => unreachable!("builtin {name}"),
         }
     }
 
-    /// `write_file(path: p, text: t)`: two parameters, so named like any call with two.
+    /// `write_file(path: p, text: t)` and `write_bytes(path: p, data: d)`: two parameters, so
+    /// named like any call with two.
     fn write_file(&mut self, b: &mut Body, e: &ast::Expr, callee: &ast::Ident, args: &[ast::Arg]) -> Expr {
-        self.note_effect(b, Effect::Fs, callee.span, "`write_file`");
-        let params = vec![("path".to_string(), Ty::Str), ("text".to_string(), Ty::Str)];
-        let Some(ok) = self.check_args("write_file", e.span, args, &params, None) else {
+        let name = callee.name.as_str();
+        self.note_effect(b, Effect::Fs, callee.span, &format!("`{name}`"));
+        let (content, builtin) = if name == "write_file" {
+            (("text", Ty::Str), Builtin::WriteFile)
+        } else {
+            (("data", Ty::Bytes), Builtin::WriteBytes)
+        };
+        let params = vec![("path".to_string(), Ty::Str), (content.0.to_string(), content.1)];
+        let Some(ok) = self.check_args(name, e.span, args, &params, None) else {
             for a in args {
                 self.expr(b, &a.value);
             }
             return Self::err_expr();
         };
-        let vals: Vec<Expr> = args.iter().map(|a| self.expect(b, &a.value, &Ty::Str)).collect();
+        let vals: Vec<Expr> = args.iter().zip(&params).map(|(a, (_, t))| self.expect(b, &a.value, t)).collect();
         if !ok || vals.iter().any(|v| v.ty == Ty::Error) {
             return Self::err_expr();
         }
         let ty = self.result_of(Ty::I64, Ty::Enum(self.file_error));
-        Expr { kind: ExprKind::Builtin(Builtin::WriteFile, vals), ty }
+        Expr { kind: ExprKind::Builtin(builtin, vals), ty }
     }
 }
 
@@ -4154,8 +4260,10 @@ impl<'a> Checker<'a> {
             }
         }
         let want_args = match m {
-            "pop" | "len" | "keys" | "values" | "trim" | "parse_i64" | "parse_f64" => Some(0),
-            "push" | "remove" | "has" | "get" | "contains" | "find" | "starts_with" | "ends_with" | "split" => Some(1),
+            "pop" | "len" | "keys" | "values" | "trim" | "parse_i64" | "parse_f64" | "to_bytes" | "to_str" | "hex"
+            | "to_array" => Some(0),
+            "push" | "remove" | "has" | "get" | "contains" | "find" | "starts_with" | "ends_with" | "split" | "xor"
+            | "unsigned_shr" | "wrapping_add" | "wrapping_sub" | "wrapping_mul" => Some(1),
             _ => None,
         };
         if let Some(want) = want_args {
@@ -4183,7 +4291,20 @@ impl<'a> Checker<'a> {
         }
         let site = self.site(e.span);
         let (builtin, ty) = match (m, x.ty.clone()) {
-            ("len", Ty::Str | Ty::Array(_) | Ty::Map(..)) => (Builtin::Len, Ty::I64),
+            ("len", Ty::Str | Ty::Bytes | Ty::Array(_) | Ty::Map(..)) => (Builtin::Len, Ty::I64),
+            ("xor" | "unsigned_shr", Ty::I64) => {
+                let other = self.expect(b, &args[0].value, &Ty::I64);
+                let op = if m == "xor" { BitOp::Xor } else { BitOp::UShr };
+                let kind = ExprKind::Bits { op, l: Box::new(x), r: Box::new(other), site };
+                return Expr { kind, ty: Ty::I64 };
+            }
+            ("wrapping_add", Ty::I64) => (Builtin::WrappingAdd, Ty::I64),
+            ("wrapping_sub", Ty::I64) => (Builtin::WrappingSub, Ty::I64),
+            ("wrapping_mul", Ty::I64) => (Builtin::WrappingMul, Ty::I64),
+            ("to_bytes", Ty::Str) => (Builtin::StrToBytes, Ty::Bytes),
+            ("to_str", Ty::Bytes) => (Builtin::BytesToStr, self.option_of(Ty::Str)),
+            ("hex", Ty::Bytes) => (Builtin::BytesHex, Ty::Str),
+            ("to_array", Ty::Bytes) => (Builtin::BytesToArray, Ty::Array(Box::new(Ty::I64))),
             ("contains", Ty::Str) => (Builtin::StrContains, Ty::Bool),
             ("starts_with", Ty::Str) => (Builtin::StrStartsWith, Ty::Bool),
             ("ends_with", Ty::Str) => (Builtin::StrEndsWith, Ty::Bool),
@@ -4204,8 +4325,10 @@ impl<'a> Checker<'a> {
                 let have = match x.ty {
                     Ty::Array(_) => "arrays have len, push and pop",
                     Ty::Str => {
-                        "str has len, contains, find, starts_with, ends_with, split, trim, parse_i64 and parse_f64"
+                        "str has len, contains, find, starts_with, ends_with, split, trim, parse_i64, parse_f64 and to_bytes"
                     }
+                    Ty::I64 => "i64 has xor, unsigned_shr, wrapping_add, wrapping_sub and wrapping_mul",
+                    Ty::Bytes => "bytes have len, to_str, hex and to_array",
                     Ty::Map(..) => "maps have len, has, get, set, remove, keys and values",
                     _ => "only arrays, str and maps have methods; write a function that takes the value",
                 };
@@ -4213,11 +4336,22 @@ impl<'a> Checker<'a> {
                 return Self::err_expr();
             }
         };
-        if matches!(builtin, Builtin::StrSplit { .. } | Builtin::StrTrim | Builtin::MapKeys | Builtin::MapValues) {
+        if matches!(
+            builtin,
+            Builtin::StrSplit { .. }
+                | Builtin::StrTrim
+                | Builtin::MapKeys
+                | Builtin::MapValues
+                | Builtin::StrToBytes
+                | Builtin::BytesToStr
+                | Builtin::BytesHex
+                | Builtin::BytesToArray
+        ) {
             self.note_alloc(b, e.span, &format!("`{m}`"));
         }
         let arg_ty = match &x.ty {
             Ty::Map(k, _) => (**k).clone(),
+            Ty::I64 => Ty::I64,
             _ => Ty::Str,
         };
         let mut vals = vec![x];

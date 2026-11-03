@@ -8,13 +8,15 @@ use anvil_front::span::SourceFile;
 fn every_listed_method_checks_with_its_signature() {
     // One program calling every method, with the result bound to the type the table gives.
     let mut body = String::from(
-        "    let s: str = \"a,b\";\n    var xs: [i64] = [1, 2];\n    var m: Map[str, i64] = [\"k\": 1];\n",
+        "    let s: str = \"a,b\";\n    var xs: [i64] = [1, 2];\n    var m: Map[str, i64] = [\"k\": 1];\n    let n: i64 = 7;\n    let bs: bytes = bytes_of([1, 2]);\n",
     );
     for (n, (on, name, sig)) in METHODS.iter().enumerate() {
         let receiver = match *on {
             "str" => "s",
             "array" => "xs",
             "map" => "m",
+            "i64" => "n",
+            "bytes" => "bs",
             other => panic!("unknown receiver kind {other}"),
         };
         let fill = |t: &str| t.replace('T', "i64").replace('K', "str").replace('V', "i64");

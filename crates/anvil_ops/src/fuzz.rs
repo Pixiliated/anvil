@@ -135,7 +135,27 @@ impl Gen {
         }
         let d = d - 1;
         match t {
-            T::I => match self.rng.below(9) {
+            T::I => match self.rng.below(12) {
+                9 => {
+                    let op = *self.pick(&["&", "|"]);
+                    format!("({} {op} {})", self.expr(T::I, d), self.expr(T::I, d))
+                }
+                10 => {
+                    // Mostly an amount that works; sometimes any value, which may panic.
+                    let n = if self.rng.below(4) == 0 { self.expr(T::I, d) } else { self.rng.below(64).to_string() };
+                    match self.rng.below(3) {
+                        0 => format!("({} << {n})", self.atom(T::I, d)),
+                        1 => format!("({} >> {n})", self.atom(T::I, d)),
+                        _ => format!("{}.unsigned_shr({n})", self.atom(T::I, d)),
+                    }
+                }
+                11 => {
+                    let m = *self.pick(&["xor", "wrapping_add", "wrapping_sub", "wrapping_mul"]);
+                    match self.rng.below(4) {
+                        0 => format!("(~{})", self.atom(T::I, d)),
+                        _ => format!("{}.{m}({})", self.atom(T::I, d), self.expr(T::I, d)),
+                    }
+                }
                 0..=2 => {
                     let op = *self.pick(&["+", "-", "*", "/", "%"]);
                     format!("({} {op} {})", self.expr(T::I, d), self.expr(T::I, d))
@@ -500,6 +520,16 @@ fn check_one(text: &str, seed: u64) -> (&'static str, String) {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn some_programs_use_bit_operations() {
+        let n = (1..=50)
+            .filter(|s| {
+                ["<<", ">>", ".xor(", "unsigned_shr", "wrapping_"].iter().any(|o| super::program_for(*s).contains(o))
+            })
+            .count();
+        assert!(n >= 10, "only {n} of 50 fuzz programs use bit operations");
+    }
+
     #[test]
     fn some_programs_make_function_values() {
         let n = (1..=50).filter(|s| super::program_for(*s).contains("= fn(")).count();

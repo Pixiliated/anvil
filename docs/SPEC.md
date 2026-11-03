@@ -1,4 +1,4 @@
-# Anvil language specification (v0.16)
+# Anvil language specification (v0.17)
 
 Anvil is a small, compiled, general-purpose language designed to be written mostly by AI agents
 and read by humans. Its rules aim at three things: one obvious way to write each thing, code
@@ -99,6 +99,7 @@ an expression or a signature, has no place in the layout and is an error (E0111)
 | `f64` | IEEE 754 doubles, optionally with a unit: `f64[m/s]` |
 | `bool` | `true`, `false` |
 | `str` | immutable UTF-8 text: `"text"`, `"x = {x}"` |
+| `bytes` | immutable bytes, each 0..=255 (see Bytes) |
 | `[T]` | growable array of `T`: `[1, 2, 3]`, `[]` |
 | `Map[K, V]` | keys of type `i64` or `str`, each with one value: `["a": 1]`, `[:]` |
 | structs | declared with `struct` |
@@ -112,7 +113,9 @@ an `f64`. Convert with `to_f64(i)` and `to_i64(x)` (truncates toward zero; panic
 infinity or out-of-range).
 
 Float literals need digits on both sides of the point (`1.0`, `2.5e-3`). Integer literals may
-use `_` separators (`1_000_000`).
+use `_` separators (`1_000_000`). `0xff` and `0b1010` write an integer's bits in hex or binary,
+all 64 of them at most, so `0xffff_ffff_ffff_ffff` is -1 and `0x8000_0000_0000_0000` the
+minimum. An integer literal takes methods: `6.xor(3)`.
 
 **Everything is a value.** Assigning, passing or returning any value (including arrays and
 structs holding arrays) gives the receiver its own copy; changing one copy never changes
@@ -245,10 +248,12 @@ effects gives the same result for the same arguments. `uses` lists them in the o
 
 **`noalloc`** after the effects promises that a function never allocates, so it can run where
 allocation is too slow or must not fail. The checker holds it to that (E0333): interpolation,
-joining strings, array and map literals, slices, `split`, `trim`, `keys`, `values`, `push`,
-`pop`, `set`, `remove`, `args`, `read_line`, `read_file` and assigning to an array element may
-allocate; arithmetic, comparisons, struct fields, indexing, `len`, the str searches,
-`parse_i64`, `parse_f64`, `get`, `has`, `print`, `write_file` and the other built-ins never do. A
+joining strings or bytes, array and map literals, slices, `split`, `trim`, `keys`, `values`,
+`push`, `pop`, `set`, `remove`, `args`, `read_line`, `read_file`, `read_bytes`, `bytes_of`,
+`to_bytes`, `to_str`, `hex`, `to_array` and assigning to an array element may allocate;
+arithmetic, bit operations, comparisons, struct fields, indexing, `len`, the str searches,
+`parse_i64`, `parse_f64`, `get`, `has`, `print`, `write_file`, `write_bytes` and the other
+built-ins never do. A
 noalloc function may only call functions that are noalloc too (E0334). Allocation is not an
 effect: most functions allocate, so it is the promise not to that a signature carries.
 
@@ -352,6 +357,27 @@ Each `{...}` holds one expression of type `i64`, `f64`, `bool` or `str` and inse
 (the same text `print` writes). The expression must close on the same line and contain no
 braces; it may contain other strings (`"{greet("Ada")}"`). Write `{{` and `}}` for literal
 braces. Escapes: `\n \t \" \\`.
+
+## Bytes
+
+`bytes` are immutable bytes of any value, for binary data and hashing; `str` is bytes that are
+UTF-8.
+
+| Operation | Gives |
+|---|---|
+| `bytes_of(xs)` | the `[i64]` as bytes; panics on a value outside 0..=255 |
+| `s.to_bytes()` | a `str`'s UTF-8 bytes |
+| `b.len()`, `b[i]` | the length; byte `i` as an `i64` 0..=255 (bounds-checked) |
+| `b[from..to]`, `a + b` | a slice; the two joined |
+| `a == b`, `a != b` | same bytes |
+| `b.to_str()` | `Option[str]`: `Some` when the bytes are UTF-8 |
+| `b.hex()` | two lowercase hex digits per byte: `"00ff"` |
+| `b.to_array()` | each byte as an `i64` |
+| `read_bytes(path)` | `Result[bytes, FileError]`: the whole file, any bytes; needs `uses fs` |
+| `write_bytes(path: p, data: d)` | like `write_file`; needs `uses fs` |
+
+Bytes cannot be changed in place (E0310) or printed: print `b.hex()`. Traces show them as
+`bytes_of([104, 105])`, and property tests generate them.
 
 ## Maps
 
@@ -521,19 +547,28 @@ fn total(texts: [str]) -> Result[i64, str] {
 
 ## Expressions
 
-Precedence, lowest first: `||`, `&&`, comparisons (`== != < <= > >=`, not chainable),
-`+ -`, `* / %`, unary `- !`, then postfix: field `.f`, index `[i]`, method `.m()`, `?`.
+Precedence, lowest first: `||`, `&&`, comparisons (`== != < <= > >=`, not chainable), `|`,
+`&`, `<< >>`, `+ -`, `* / %`, unary `- ! ~`, then postfix: field `.f`, index `[i]`, method
+`.m()`, `?`. So `x & mask == 0` compares the masked value and `1 + 2 << 3` is 24, as in C and
+Rust.
 
 - `+ - * /` on `i64` (checked: overflow and division by zero panic) and `f64` (IEEE: division
   by zero gives inf or nan). `%` is `i64` only, with the sign of the dividend. `+` also joins
   two `str`.
 - `==` and `!=` on any two values of one type (see Equality). Ordering on `i64`, `f64`, `str`.
 - `&&` and `||` short-circuit.
+- **Bits** of `i64`: `a & b`, `a | b`, `~a`, `a << n` and `a >> n` (which keeps the sign);
+  methods `a.xor(b)` and `a.unsigned_shr(n)` (which fills with zeros). A shift amount outside
+  0..=63 panics; bits shifted out are dropped. `^` is not an operator (E0393): it is a power in
+  units, and `x ^ 2` would be read both ways.
+- **Wrapping arithmetic**, for hashes and generators: `a.wrapping_add(b)`, `a.wrapping_sub(b)`
+  and `a.wrapping_mul(b)` wrap around at the ends of i64 instead of panicking.
 - Struct literal: `Body { mass: 1.0[kg], pos: 0.0[m] }`, every field once, in declaration
   order.
-- Methods exist only on built-in types: `len()` on `str`, arrays and maps; `push(x)` and
-  `pop()` on arrays; the search methods on `str` (see Text); `get`, `has`, `set`, `remove`,
-  `keys` and `values` on maps. Everything else is a function.
+- Built-in types have built-in methods: `len()` on `str`, `bytes`, arrays and maps; `push(x)`
+  and `pop()` on arrays; the str methods (see Text); `get`, `has`, `set`, `remove`, `keys` and
+  `values` on maps; the bit and wrapping methods on `i64`; the bytes methods (see Bytes).
+  Structs and enums have the methods declared for them (see Methods and interfaces).
 - No operator overloading, no implicit conversions, no truthiness.
 
 **Evaluation order** is left to right. For an assignment or `push`, the value on the right is

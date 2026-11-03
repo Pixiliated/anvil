@@ -383,8 +383,8 @@ fn members(a: &Analysis, base: &str, kind: &'static str) -> Vec<Item> {
 
 /// The built-in methods of a type shown as `ty`, with its element, key and value types filled in.
 fn methods(ty: &str) -> Vec<Item> {
-    let (kind, subst): (&str, Vec<(&str, String)>) = if ty == "str" {
-        ("str", Vec::new())
+    let (kind, subst): (&str, Vec<(&str, String)>) = if matches!(ty, "str" | "i64" | "bytes") {
+        (ty, Vec::new())
     } else if let Some(elem) = ty.strip_prefix('[').and_then(|t| t.strip_suffix(']')) {
         ("array", vec![("T", elem.to_string())])
     } else if let Some(kv) = ty.strip_prefix("Map[").and_then(|t| t.strip_suffix(']')) {

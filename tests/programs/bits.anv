@@ -1,0 +1,116 @@
+// Bits and bytes: operators, hex and binary literals, wrapping arithmetic, a hash, a random
+// generator, a little-endian encoding, and binary files (kept in memory under golden check).
+fn fnv1a(data: bytes) -> i64 {
+    var h: i64 = 0xcbf29ce484222325;
+    for i in 0..data.len() {
+        h = h.xor(data[i]).wrapping_mul(0x100000001b3);
+    }
+    return h;
+}
+
+// An xorshift generator: a sequence of its own, separate from random_below.
+fn next(state: i64) -> i64 {
+    var x: i64 = state;
+    x = x.xor(x.unsigned_shr(12));
+    x = x.xor(x << 25);
+    x = x.xor(x.unsigned_shr(27));
+    return x;
+}
+
+fn popcount(x: i64) -> i64 {
+    var n: i64 = 0;
+    var v: i64 = x;
+    while v != 0 {
+        v = v & (v - 1);
+        n = n + 1;
+    }
+    return n;
+}
+
+// Eight bytes, lowest first.
+fn encode(x: i64) -> bytes {
+    var out: [i64] = [];
+    for i in 0..8 {
+        out.push(x.unsigned_shr(i * 8) & 0xff);
+    }
+    return bytes_of(out);
+}
+
+fn decode(b: bytes) -> i64 {
+    var x: i64 = 0;
+    for i in 0..8 {
+        x = x | b[i] << (i * 8);
+    }
+    return x;
+}
+
+fn main() uses io, fs {
+    print(0xff);
+    print(0b1010_1010);
+    print(0xffff_ffff_ffff_ffff);
+    print(0x8000_0000_0000_0000);
+    print(6 & 3);
+    print(6 | 3);
+    print(6.xor(3));
+    print(~0);
+    print(1 << 62);
+    print(1 << 63);
+    print(-16 >> 2);
+    print((-16).unsigned_shr(60));
+    print(9223372036854775807.wrapping_add(1));
+    print((-9223372036854775807 - 1).wrapping_sub(1));
+    print(0x7fffffffffffffff.wrapping_mul(2));
+    print(popcount(0xf0f0) == 8);
+    print(1 + 2 << 3);
+    print(5 & 4 == 4);
+
+    print(fnv1a("".to_bytes()).unsigned_shr(32));
+    print(fnv1a("a".to_bytes()) == 0xaf63dc4c8601ec8c);
+    print(fnv1a("hello".to_bytes()).xor(fnv1a("hellp".to_bytes())) != 0);
+    var s: i64 = 88172645463325252;
+    for _i in 0..3 {
+        s = next(s);
+        print(s);
+    }
+
+    let x: i64 = -123456789012345;
+    let e: bytes = encode(x);
+    print(e.hex());
+    print("round trip {decode(e) == x}, {e.len()} bytes, first {e[0]}");
+    let raw: bytes = bytes_of([104, 105, 0, 255]);
+    print(raw.hex());
+    match raw[0..2].to_str() {
+        Some(value: t) => { print("text [{t}]"); }
+        None => { print("not text"); }
+    }
+    match raw.to_str() {
+        Some(value: all) => { print("text [{all}]"); }
+        None => { print("not text"); }
+    }
+    print(raw[2..4] + "é".to_bytes() == bytes_of([0, 255, 195, 169]));
+    print(raw.to_array().len());
+
+    match write_bytes(path: "tests/programs/data/raw.bin", data: raw + e) {
+        Ok(value: n) => { print("wrote {n} bytes"); }
+        Err(error: _) => { print("write failed"); }
+    }
+    match read_bytes("tests/programs/data/raw.bin") {
+        Ok(value: back) => {
+            print("read {back.len()} bytes, last eight decode {decode(back[4..12]) == x}");
+        }
+        Err(error: _) => { print("read failed"); }
+    }
+    match read_file("tests/programs/data/raw.bin") {
+        Ok(value: _) => { print("read as text"); }
+        Err(error) => { print("as text: {error == FileError.NotText}"); }
+    }
+}
+
+test "encoding round-trips" for all x: i64 {
+    assert(decode(encode(x)) == x);
+}
+
+test "bytes compare by content" for all b: bytes {
+    assert(bytes_of(b.to_array()) == b);
+    assert(b.hex().len() == 2 * b.len());
+}

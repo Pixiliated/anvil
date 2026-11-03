@@ -289,6 +289,9 @@ pub fn explain(code: &str) -> Option<&'static str> {
             "Unused value. An expression statement must be a call; the value of a call that returns \
                     something cannot be dropped silently. Bind it: let _unused: T = f(...);"
         }
+        "E0393" => {
+            "`^` in an expression. In units `^` is a power (m/s^2), and in many languages it is                     exclusive or, so `x ^ 2` would be read both ways. Anvil writes exclusive or as                     a.xor(b), and a square as x * x."
+        }
         "E0400" => {
             "Match is not exhaustive. A match lists one arm per variant; there is no catch-all arm, so \
                     adding a variant to an enum makes every match that forgets it an error."
@@ -423,8 +426,8 @@ pub const ALL_CODES: &[&str] = &[
     "E0001", "E0002", "E0003", "E0004", "E0100", "E0110", "E0111", "E0200", "E0201", "E0202", "E0300", "E0301",
     "E0302", "E0303", "E0304", "E0305", "E0306", "E0307", "E0308", "E0310", "E0311", "E0320", "E0321", "E0322",
     "E0323", "E0330", "E0331", "E0332", "E0333", "E0334", "E0340", "E0341", "E0350", "E0360", "E0370", "E0380",
-    "E0390", "E0391", "E0392", "E0400", "E0401", "E0402", "E0403", "E0404", "E0405", "E0406", "E0407", "E0408",
-    "E0410", "E0411", "E0412", "E0413", "E0414", "E0415", "E0500", "E0501", "E0502", "E0601", "E0602", "E0603",
-    "E0604", "E0605", "E0606", "E0607", "E0700", "E0701", "E0702", "E0703", "E0704", "E0800", "E0801", "E0802",
-    "E0803",
+    "E0390", "E0391", "E0392", "E0393", "E0400", "E0401", "E0402", "E0403", "E0404", "E0405", "E0406", "E0407",
+    "E0408", "E0410", "E0411", "E0412", "E0413", "E0414", "E0415", "E0500", "E0501", "E0502", "E0601", "E0602",
+    "E0603", "E0604", "E0605", "E0606", "E0607", "E0700", "E0701", "E0702", "E0703", "E0704", "E0800", "E0801",
+    "E0802", "E0803",
 ];

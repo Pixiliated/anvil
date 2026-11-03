@@ -1,0 +1,6 @@
+// expect: E0310
+fn main() uses io {
+    var b: bytes = bytes_of([1, 2]);
+    b[0] = 3;
+    print(b.hex());
+}

@@ -1,0 +1,5 @@
+// expect: E0393
+fn main() uses io {
+    let x: i64 = 6;
+    print(x ^ 3);
+}

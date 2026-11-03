@@ -856,14 +856,58 @@ impl Parser {
     }
 
     fn cmp(&mut self, s: bool) -> PResult<Expr> {
-        let l = self.add_s(s)?;
+        let l = self.bit_or(s)?;
         if let Some(op) = self.cmp_op() {
             self.bump();
-            let r = self.add_s(s)?;
+            let r = self.bit_or(s)?;
             if self.cmp_op().is_some() {
                 return Err(Diagnostic::new("E0391", l.span.to(self.span()), "comparisons cannot be chained"));
             }
             return Ok(Self::bin(op, l, r));
+        }
+        Ok(l)
+    }
+
+    // Bit operators bind as in C and Rust: shifts tighter than `&`, then `^`, then `|`, all tighter
+    // than comparisons (so `x & mask == 0` compares the masked value).
+    fn bit_or(&mut self, s: bool) -> PResult<Expr> {
+        let mut l = self.bit_xor(s)?;
+        while self.eat(&Tok::Pipe) {
+            let r = self.bit_xor(s)?;
+            l = Self::bin(BinOp::BitOr, l, r);
+        }
+        Ok(l)
+    }
+
+    fn bit_xor(&mut self, s: bool) -> PResult<Expr> {
+        let mut l = self.bit_and(s)?;
+        while self.eat(&Tok::Caret) {
+            let r = self.bit_and(s)?;
+            l = Self::bin(BinOp::Caret, l, r);
+        }
+        Ok(l)
+    }
+
+    fn bit_and(&mut self, s: bool) -> PResult<Expr> {
+        let mut l = self.shift(s)?;
+        while self.eat(&Tok::Amp) {
+            let r = self.shift(s)?;
+            l = Self::bin(BinOp::BitAnd, l, r);
+        }
+        Ok(l)
+    }
+
+    fn shift(&mut self, s: bool) -> PResult<Expr> {
+        let mut l = self.add_s(s)?;
+        loop {
+            let op = match self.peek() {
+                Tok::Shl => BinOp::Shl,
+                Tok::Shr => BinOp::Shr,
+                _ => break,
+            };
+            self.bump();
+            let r = self.add_s(s)?;
+            l = Self::bin(op, l, r);
         }
         Ok(l)
     }
@@ -907,6 +951,7 @@ impl Parser {
         let op = match self.peek() {
             Tok::Minus => UnOp::Neg,
             Tok::Bang => UnOp::Not,
+            Tok::Tilde => UnOp::BitNot,
             _ => return self.postfix(s),
         };
         let start = self.bump().span;

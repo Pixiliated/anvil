@@ -258,6 +258,13 @@ pub enum BinOp {
     Ge,
     And,
     Or,
+    /// `&`, `|`, `<<`, `>>` on i64.
+    BitAnd,
+    BitOr,
+    Shl,
+    Shr,
+    /// `^`, which Anvil refuses in expressions (it means a power in units): `a.xor(b)`.
+    Caret,
 }
 
 impl BinOp {
@@ -276,6 +283,11 @@ impl BinOp {
             BinOp::Ge => ">=",
             BinOp::And => "&&",
             BinOp::Or => "||",
+            BinOp::BitAnd => "&",
+            BinOp::BitOr => "|",
+            BinOp::Shl => "<<",
+            BinOp::Shr => ">>",
+            BinOp::Caret => "^",
         }
     }
     pub fn is_comparison(self) -> bool {
@@ -287,6 +299,8 @@ impl BinOp {
 pub enum UnOp {
     Neg,
     Not,
+    /// `~x`: every bit of an i64 flipped.
+    BitNot,
 }
 
 #[derive(Clone, Debug)]

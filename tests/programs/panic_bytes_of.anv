@@ -1,0 +1,7 @@
+// bytes_of panics on a value that is not a byte.
+fn main() uses io {
+    let b: bytes = bytes_of([1, 2, 255]);
+    print(b.hex());
+    let c: bytes = bytes_of([0, 256]);
+    print(c.hex());
+}

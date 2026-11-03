@@ -1,0 +1,9 @@
+// A shift by 64 or more, or by a negative amount, panics: it would mean different things on
+// different machines.
+fn main() uses io {
+    var n: i64 = 60;
+    while n < 70 {
+        print(1 << n);
+        n = n + 1;
+    }
+}

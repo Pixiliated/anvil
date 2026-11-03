@@ -72,6 +72,14 @@ pub fn generate(ty: &Ty, program: &Program, rng: &mut Rng, size: u64) -> Value {
             let s: String = (0..n).map(|_| CHARS[rng.below(CHARS.len() as u64) as usize]).collect();
             Value::Str(s.into())
         }
+        // Mostly small values, sometimes the extremes.
+        Ty::Bytes => {
+            let n = rng.below(size + 1);
+            let b: Vec<u8> = (0..n)
+                .map(|_| if rng.chance(4) { [0, 255][rng.below(2) as usize] } else { rng.below(64) as u8 })
+                .collect();
+            Value::Bytes(b.into())
+        }
         Ty::Array(elem) => {
             let n = rng.below(size.min(8) + 1);
             Value::Array(Rc::new((0..n).map(|_| generate(elem, program, rng, size / 2)).collect()))
@@ -133,6 +141,17 @@ pub fn shrink(v: &Value, ty: &Ty, program: &Program) -> Vec<Value> {
             let plain: String = chars.iter().map(|_| 'a').collect();
             if plain != **s {
                 out.push(Value::Str(plain.into()));
+            }
+        }
+        (Value::Bytes(b), _) if !b.is_empty() => {
+            out.push(Value::Bytes(Rc::from(&[][..])));
+            if b.len() > 1 {
+                out.push(Value::Bytes(b[..b.len() / 2].into()));
+                out.push(Value::Bytes(b[1..].into()));
+                out.push(Value::Bytes(b[..b.len() - 1].into()));
+            }
+            if b.iter().any(|x| *x != 0) {
+                out.push(Value::Bytes(vec![0u8; b.len()].into()));
             }
         }
         (Value::Array(items), Ty::Array(elem)) if !items.is_empty() => {

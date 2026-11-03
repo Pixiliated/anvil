@@ -1,0 +1,4 @@
+exit: 101
+panic: bytes_of got 256, which is not a byte (0..=255), at tests/programs/panic_bytes_of.anv:5:20
+---
+0102ff

@@ -18,6 +18,8 @@ pub enum Ty {
     F64(Unit),
     Bool,
     Str,
+    /// Immutable bytes, any values 0..=255 (str is bytes that are UTF-8).
+    Bytes,
     Struct(StructId),
     /// `[T]`: a growable array with value semantics (copied on write).
     Array(Box<Ty>),
@@ -293,6 +295,17 @@ pub enum IOp {
     Rem,
 }
 
+/// Bit operations on i64. `Shr` keeps the sign; `UShr` (`unsigned_shr`) fills with zeros.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BitOp {
+    And,
+    Or,
+    Xor,
+    Shl,
+    Shr,
+    UShr,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum FOp {
     Add,
@@ -371,6 +384,26 @@ pub enum Builtin {
     /// `parse_i64_text` and `parse_f64_text` as an Option.
     StrParseI64,
     StrParseF64,
+    /// i64 arithmetic that wraps around instead of panicking; args: the receiver and the other.
+    WrappingAdd,
+    WrappingSub,
+    WrappingMul,
+    /// `bytes_of([i64])`; panics naming `site` on a value outside 0..=255 (`byte_message`).
+    BytesOf {
+        site: String,
+    },
+    /// The whole file: Result[bytes, FileError]. Args: the path.
+    ReadBytes,
+    /// Like WriteFile, with bytes. Args: the path and the data.
+    WriteBytes,
+    /// `s.to_bytes()`: the str's UTF-8 bytes.
+    StrToBytes,
+    /// `b.to_str()`: Some when the bytes are UTF-8.
+    BytesToStr,
+    /// `b.hex()`: two lowercase hex digits per byte (`hex_text`).
+    BytesHex,
+    /// `b.to_array()`: each byte as an i64.
+    BytesToArray,
 }
 
 #[derive(Clone, Debug)]
@@ -477,6 +510,16 @@ pub enum ExprKind {
         overflow: String,
     },
     FNeg(Box<Expr>),
+    /// A bit operation on two i64s; a shift panics naming `site` unless its amount is in 0..=63
+    /// (`shift_message`). Bits shifted out are dropped.
+    Bits {
+        op: BitOp,
+        l: Box<Expr>,
+        r: Box<Expr>,
+        site: String,
+    },
+    /// `~x`
+    BitNot(Box<Expr>),
     Builtin(Builtin, Vec<Expr>),
 }
 
@@ -514,6 +557,21 @@ pub fn split_message(site: &str) -> String {
 pub fn duplicate_key_message(site: &str) -> String {
     format!("duplicate key in the map literal at {site}")
 }
+/// Mirrors anvil_check_shift in the C runtime.
+pub fn shift_message(n: i64, site: &str) -> String {
+    format!("shift by {n} at {site}; shifts take 0..=63")
+}
+
+/// Mirrors anvil_bytes_of in the C runtime.
+pub fn byte_message(v: i64, site: &str) -> String {
+    format!("bytes_of got {v}, which is not a byte (0..=255), at {site}")
+}
+
+/// Mirrors anvil_bytes_hex.
+pub fn hex_text(bytes: &[u8]) -> String {
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
+}
+
 /// Mirrors anvil_read_line in the C runtime.
 pub fn read_line_message(site: &str) -> String {
     format!("read_line read text that is not UTF-8 at {site}")
@@ -705,6 +763,7 @@ impl fmt::Display for TyDisplay<'_> {
             Ty::F64(u) => write!(f, "f64[{u}]"),
             Ty::Bool => write!(f, "bool"),
             Ty::Str => write!(f, "str"),
+            Ty::Bytes => write!(f, "bytes"),
             Ty::Struct(id) => write!(f, "{}", self.structs[*id].name),
             Ty::Array(t) => write!(f, "[{}]", TyDisplay { ty: t, structs: self.structs, enums: self.enums }),
             Ty::Map(k, v) => write!(

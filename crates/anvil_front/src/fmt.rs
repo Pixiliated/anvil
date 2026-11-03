@@ -577,6 +577,7 @@ impl Printer<'_> {
             }
             ExprKind::Unary(UnOp::Neg, x) => format!("-{}", self.expr(x)),
             ExprKind::Unary(UnOp::Not, x) => format!("!{}", self.expr(x)),
+            ExprKind::Unary(UnOp::BitNot, x) => format!("~{}", self.expr(x)),
             ExprKind::Binary(op, l, r) => format!("{} {} {}", self.expr(l), op.text(), self.expr(r)),
             ExprKind::Paren(x) => format!("({})", self.expr(x)),
             ExprKind::Lambda(f) => self.lambda(f),

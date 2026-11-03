@@ -70,6 +70,11 @@ pub enum Tok {
     Bang,
     AndAnd,
     OrOr,
+    Amp,
+    Pipe,
+    Tilde,
+    Shl,
+    Shr,
     Eof,
 }
 
@@ -146,6 +151,11 @@ impl Tok {
             Tok::Bang => "!",
             Tok::AndAnd => "&&",
             Tok::OrOr => "||",
+            Tok::Amp => "&",
+            Tok::Pipe => "|",
+            Tok::Tilde => "~",
+            Tok::Shl => "<<",
+            Tok::Shr => ">>",
             Tok::Ident(_) | Tok::Int(_) | Tok::Float(_) | Tok::Str(_) | Tok::Interp(_) | Tok::Eof => "",
         }
     }
@@ -281,6 +291,8 @@ fn lex_range(text: &str, start: usize, end: usize) -> Result<Vec<Token>, Diagnos
             ">=" => Some(Tok::Ge),
             "&&" => Some(Tok::AndAnd),
             "||" => Some(Tok::OrOr),
+            "<<" => Some(Tok::Shl),
+            ">>" => Some(Tok::Shr),
             _ => None,
         };
         if let Some(tok) = tok2 {
@@ -310,15 +322,13 @@ fn lex_range(text: &str, start: usize, end: usize) -> Result<Vec<Token>, Diagnos
             b'^' => Tok::Caret,
             b'!' => Tok::Bang,
             b'?' => Tok::Question,
+            b'&' => Tok::Amp,
+            b'|' => Tok::Pipe,
+            b'~' => Tok::Tilde,
             _ => {
                 let ch = text[i..].chars().next().unwrap();
                 let span = Span::new(i, i + ch.len_utf8());
-                let d = Diagnostic::new("E0001", span, format!("unexpected character `{ch}`"));
-                return Err(match ch {
-                    '&' => d.fix1(FixKind::ChangesMeaning, "logical and is `&&`", span, "&&"),
-                    '|' => d.fix1(FixKind::ChangesMeaning, "logical or is `||`", span, "||"),
-                    _ => d,
-                });
+                return Err(Diagnostic::new("E0001", span, format!("unexpected character `{ch}`")));
             }
         };
         i += 1;
@@ -484,6 +494,26 @@ fn lex_string(text: &str, i: &mut usize) -> Result<Token, Diagnostic> {
 fn lex_number(text: &str, i: &mut usize) -> Result<Token, Diagnostic> {
     let bytes = text.as_bytes();
     let start = *i;
+    // `0xFF`, `0b1010`: 64 bits written out, read as the i64 with those bits.
+    if bytes[start] == b'0' && matches!(bytes.get(start + 1), Some(b'x' | b'X' | b'b' | b'B')) {
+        let radix = if matches!(bytes[start + 1], b'x' | b'X') { 16 } else { 2 };
+        *i += 2;
+        while *i < bytes.len() && ((bytes[*i] as char).is_digit(radix) || bytes[*i] == b'_') {
+            *i += 1;
+        }
+        let span = Span::new(start, *i);
+        if bytes.get(*i).is_some_and(|b| b.is_ascii_alphanumeric()) {
+            return Err(Diagnostic::new("E0003", span, "this digit does not belong to the literal")
+                .note("hex literals use 0-9 and a-f, binary literals 0 and 1", None));
+        }
+        let clean: String = text[start + 2..*i].chars().filter(|c| *c != '_').collect();
+        if clean.is_empty() {
+            return Err(Diagnostic::new("E0003", span, "the literal has no digits"));
+        }
+        let bits = u64::from_str_radix(&clean, radix)
+            .map_err(|_| Diagnostic::new("E0003", span, "the literal has more than 64 bits"))?;
+        return Ok(Token { tok: Tok::Int(bits as i64), span });
+    }
     let digits = |i: &mut usize| {
         while *i < bytes.len() && (bytes[*i].is_ascii_digit() || bytes[*i] == b'_') {
             *i += 1;
@@ -491,8 +521,12 @@ fn lex_number(text: &str, i: &mut usize) -> Result<Token, Diagnostic> {
     };
     digits(i);
     let mut is_float = false;
-    // `1..5` is a range, not a float.
-    if bytes.get(*i) == Some(&b'.') && bytes.get(*i + 1) != Some(&b'.') {
+    // `1..5` is a range and `6.xor(3)` a method call, not floats.
+    let after = bytes.get(*i + 1).copied();
+    if bytes.get(*i) == Some(&b'.')
+        && after != Some(b'.')
+        && !after.is_some_and(|c| c.is_ascii_alphabetic() || c == b'_')
+    {
         is_float = true;
         *i += 1;
         if !bytes.get(*i).is_some_and(|b| b.is_ascii_digit()) {

@@ -312,3 +312,20 @@ Short records of choices that are not obvious from the code. Newest last.
 - **Privacy applies where a call is written.** An instance of a generic from another module
   calls the type's methods through its interfaces, private or not: the type's module chose to
   pass the value there.
+
+## M16 (v0.17)
+
+- **No `^` operator.** `^` is already a power in units, and `x ^ 2` reads as a square to many,
+  so it would compute the wrong thing silently; exclusive or is `a.xor(b)`, and `^` in an
+  expression is E0393 with that as its fix. `& | << >> ~` mean the same in every major language
+  and stay operators, with C and Rust precedence (a mix-up with comparisons is a type error).
+- **Shifts are checked**: an amount outside 0..=63 panics, since machines disagree on what it
+  does. Bits shifted out are dropped: a shift is not arithmetic, so it does not overflow.
+- **Wrapping arithmetic is spelled out** (`wrapping_mul`): plain `*` still panics on overflow,
+  so a hash's intent shows at each operation.
+- **Hex and binary literals are bit patterns**, all 64 bits, because masks and hash constants
+  are written that way (`0xcbf29ce484222325` is negative as an i64).
+- **`bytes` is its own type, the same object as `str` natively** (a str is bytes that are
+  UTF-8), so `to_bytes` costs nothing and `to_str` only checks. An array of i64 would take eight
+  times the memory; `bytes_of` and `to_array` convert.
+- **`6.xor(3)` is a method call**: a digit, `.` and a letter cannot be a float.

@@ -748,8 +748,8 @@ static int64_t errno_file_error(void) {
     return FILE_FAILED;
 }
 
-/* The whole file as a str; NULL with last_file_error set when it fails. */
-AnvStr *anvil_read_file(const AnvStr *path) {
+/* The whole file; NULL with last_file_error set when it fails. With `text`, it must be UTF-8. */
+static AnvStr *read_any(const AnvStr *path, int text) {
     if (path->len == 0) {
         last_file_error = FILE_NOT_FOUND;
         return NULL;
@@ -758,7 +758,13 @@ AnvStr *anvil_read_file(const AnvStr *path) {
         char *key = path_copy(path, 1);
         MemFile *m = mem_find(key, path->len);
         free(key);
-        if (m) return str_from(m->text, m->len);
+        if (m) {
+            if (text && !utf8_valid((const unsigned char *)m->text, m->len)) {
+                last_file_error = FILE_NOT_TEXT;
+                return NULL;
+            }
+            return str_from(m->text, m->len);
+        }
     }
     char *p = path_copy(path, 0);
     if (is_directory(p, path->len)) {
@@ -789,10 +795,81 @@ AnvStr *anvil_read_file(const AnvStr *path) {
     fclose(f);
     AnvStr *s = NULL;
     if (failed) last_file_error = FILE_FAILED;
-    else if (!utf8_valid((const unsigned char *)buf, (int64_t)len)) last_file_error = FILE_NOT_TEXT;
+    else if (text && !utf8_valid((const unsigned char *)buf, (int64_t)len)) last_file_error = FILE_NOT_TEXT;
     else s = str_from(buf, (int64_t)len);
     free(buf);
     return s;
+}
+
+AnvStr *anvil_read_file(const AnvStr *path) { return read_any(path, 1); }
+
+AnvStr *anvil_read_bytes(const AnvStr *path) { return read_any(path, 0); }
+
+/* ---- bytes (a bytes value is a str object whose bytes need not be UTF-8) ---- */
+
+/* Same text as ir::byte_message. */
+AnvStr *anvil_bytes_of(const AnvArr *xs, const AnvStr *site) {
+    AnvStr *s = str_new(xs->len);
+    for (int64_t i = 0; i < xs->len; i++) {
+        int64_t v = *(const int64_t *)(xs->data + i * xs->ti->elem_size);
+        if (v < 0 || v > 255) {
+            anvil_release((AnvObj *)s);
+            char buf[512];
+            int len = snprintf(buf, sizeof buf, "bytes_of got %lld, which is not a byte (0..=255), at %.*s",
+                               (long long)v, (int)site->len, site->bytes);
+            if (len >= (int)sizeof buf) len = (int)sizeof buf - 1;
+            panic_bytes(buf, len);
+        }
+        s->bytes[i] = (char)v;
+    }
+    return s;
+}
+
+/* The same object when it is UTF-8 (a str and bytes share their layout), else NULL. */
+AnvStr *anvil_bytes_to_str(AnvStr *b) {
+    if (!utf8_valid((const unsigned char *)b->bytes, b->len)) return NULL;
+    anvil_retain((AnvObj *)b);
+    return b;
+}
+
+/* ir::hex_text */
+AnvStr *anvil_bytes_hex(const AnvStr *b) {
+    static const char digits[] = "0123456789abcdef";
+    AnvStr *s = str_new(b->len * 2);
+    for (int64_t i = 0; i < b->len; i++) {
+        unsigned char c = (unsigned char)b->bytes[i];
+        s->bytes[2 * i] = digits[c >> 4];
+        s->bytes[2 * i + 1] = digits[c & 15];
+    }
+    return s;
+}
+
+AnvArr *anvil_bytes_to_array(const AnvStr *b, const AnvTypeInfo *ti) {
+    AnvArr *out = anvil_arr_new(ti, b->len);
+    for (int64_t i = 0; i < b->len; i++) *(int64_t *)anvil_arr_push_slot(out) = (unsigned char)b->bytes[i];
+    return out;
+}
+
+int64_t anvil_bytes_at(const AnvStr *b, int64_t i, const AnvStr *site) {
+    if (i < 0 || i >= b->len) anvil_panic_index(i, b->len, site);
+    return (unsigned char)b->bytes[i];
+}
+
+AnvStr *anvil_bytes_slice(const AnvStr *b, int64_t from, int64_t to, const AnvStr *site) {
+    if (from < 0 || to > b->len || from > to) panic_slice("out of bounds for length", from, to, b->len, site);
+    return str_from(b->bytes + from, to - from);
+}
+
+/* The amount of a shift, which must be in 0..=63; same text as ir::shift_message. */
+int64_t anvil_check_shift(int64_t n, const AnvStr *site) {
+    if (n < 0 || n > 63) {
+        char buf[512];
+        int len = snprintf(buf, sizeof buf, "shift by %lld at %.*s; shifts take 0..=63", (long long)n, (int)site->len,
+                           site->bytes);
+        if (len >= (int)sizeof buf) len = (int)sizeof buf - 1;
+        panic_bytes(buf, len);
+    }
+    return n;
 }
 
 /* Whether the directory a path goes in exists (a path without one goes in the working directory). */

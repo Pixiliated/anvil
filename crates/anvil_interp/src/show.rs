@@ -36,6 +36,19 @@ fn write(out: &mut String, v: &Value, ty: &Ty, program: &Program) {
             out.push_str(&program.funcs[c.func].name);
         }
         (Value::Str(s), _) => quote(out, s),
+        (Value::Bytes(bs), _) => {
+            out.push_str("bytes_of([");
+            for (i, b) in bs.iter().take(SHOWN_ITEMS).enumerate() {
+                if i > 0 {
+                    out.push_str(", ");
+                }
+                out.push_str(&b.to_string());
+            }
+            if bs.len() > SHOWN_ITEMS {
+                out.push_str(&format!(", ... {} more", bs.len() - SHOWN_ITEMS));
+            }
+            out.push_str("])");
+        }
         (Value::Struct(fields), Ty::Struct(id)) => {
             let def = &program.structs[*id];
             out.push_str(source_name(&def.name));

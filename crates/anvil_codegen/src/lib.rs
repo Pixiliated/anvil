@@ -113,6 +113,14 @@ const RUNTIME: &[(&str, &[Type], &[Type])] = &[
     ("anvil_str_parse_f64", &[I], &[types::F64]),
     ("anvil_parse_ok", &[], &[I]),
     ("anvil_fn_new", &[I, I], &[I]),
+    ("anvil_read_bytes", &[I], &[I]),
+    ("anvil_bytes_of", &[I, I], &[I]),
+    ("anvil_bytes_to_str", &[I], &[I]),
+    ("anvil_bytes_hex", &[I], &[I]),
+    ("anvil_bytes_to_array", &[I, I], &[I]),
+    ("anvil_bytes_at", &[I, I, I], &[I]),
+    ("anvil_bytes_slice", &[I, I, I, I], &[I]),
+    ("anvil_check_shift", &[I, I], &[I]),
     ("anvil_panic", &[I], &[]),
     ("anvil_panic_index", &[I, I, I], &[]),
     ("anvil_arr_new", &[I, I], &[I]),
@@ -300,7 +308,7 @@ fn flat(program: &Program, ty: &Ty, out: &mut Vec<Scalar>) {
         Ty::I64 => out.push(Scalar { ty: I, heap: false }),
         Ty::F64(_) => out.push(Scalar { ty: types::F64, heap: false }),
         Ty::Bool => out.push(Scalar { ty: types::I8, heap: false }),
-        Ty::Str | Ty::Array(_) | Ty::Map(..) | Ty::Fn(_) => out.push(Scalar { ty: I, heap: true }),
+        Ty::Str | Ty::Bytes | Ty::Array(_) | Ty::Map(..) | Ty::Fn(_) => out.push(Scalar { ty: I, heap: true }),
         Ty::Struct(id) => {
             for (_, t) in &program.structs[*id].fields {
                 flat(program, t, out);
@@ -594,6 +602,8 @@ fn mutates(e: &Expr) -> bool {
         | ExprKind::Local(_)
         | ExprKind::FnRef(_) => false,
         ExprKind::CallValue(callee, es) => mutates(callee) || any(es),
+        ExprKind::Bits { l, r, .. } => mutates(l) || mutates(r),
+        ExprKind::BitNot(x) => mutates(x),
         ExprKind::Closure { captures: es, .. } => any(es),
         ExprKind::Field(x, _) | ExprKind::Not(x) | ExprKind::FNeg(x) | ExprKind::INeg { e: x, .. } => mutates(x),
         ExprKind::Try { inner, .. } => mutates(inner),
@@ -1238,6 +1248,36 @@ impl<'a, 'b> Gen<'a, 'b> {
                 }
                 self.enum_value(*enum_id, *variant, &given)
             }
+            ExprKind::Index { base, index, site } if base.ty == Ty::Bytes => {
+                let (b, owned) = if mutates(index) { (self.expr(base), true) } else { self.borrow(base) };
+                let i = self.expr(index)[0];
+                let s = self.str_obj(site);
+                let v = self.call_rt("anvil_bytes_at", &[b[0], i, s]).unwrap();
+                if owned {
+                    self.call_rt("anvil_release", &[b[0]]);
+                }
+                vec![v]
+            }
+            ExprKind::Bits { op, l, r, site } => {
+                let a = self.expr(l)[0];
+                let mut n = self.expr(r)[0];
+                if matches!(op, BitOp::Shl | BitOp::Shr | BitOp::UShr) {
+                    let s = self.str_obj(site);
+                    n = self.call_rt("anvil_check_shift", &[n, s]).unwrap();
+                }
+                vec![match op {
+                    BitOp::And => self.b.ins().band(a, n),
+                    BitOp::Or => self.b.ins().bor(a, n),
+                    BitOp::Xor => self.b.ins().bxor(a, n),
+                    BitOp::Shl => self.b.ins().ishl(a, n),
+                    BitOp::Shr => self.b.ins().sshr(a, n),
+                    BitOp::UShr => self.b.ins().ushr(a, n),
+                }]
+            }
+            ExprKind::BitNot(x) => {
+                let v = self.expr(x)[0];
+                vec![self.b.ins().bnot(v)]
+            }
             ExprKind::Index { base, index, site } => {
                 // A borrowed array could be changed in place by a pop in the index expression.
                 let (arr, owned) = if mutates(index) { (self.expr(base), true) } else { self.borrow(base) };
@@ -1257,7 +1297,11 @@ impl<'a, 'b> Gen<'a, 'b> {
                 let f = self.expr(from)[0];
                 let t = self.expr(to)[0];
                 let s = self.str_obj(site);
-                let name = if base.ty == Ty::Str { "anvil_str_slice" } else { "anvil_arr_slice" };
+                let name = match base.ty {
+                    Ty::Str => "anvil_str_slice",
+                    Ty::Bytes => "anvil_bytes_slice",
+                    _ => "anvil_arr_slice",
+                };
                 let out = self.call_rt(name, &[vals[0], f, t, s]).unwrap();
                 if owned {
                     self.call_rt("anvil_release", &[vals[0]]);
@@ -1485,6 +1529,12 @@ impl<'a, 'b> Gen<'a, 'b> {
                         };
                         self.b.ins().fcmp(cc, a, c)
                     }
+                    Ty::Bytes => {
+                        let same = self.call_rt("anvil_str_eq", &[a, c]).unwrap();
+                        self.call_rt("anvil_release", &[a]);
+                        self.call_rt("anvil_release", &[c]);
+                        self.b.ins().icmp_imm_s(icc, same, 1)
+                    }
                     Ty::Str => {
                         let order = self.call_rt("anvil_str_cmp", &[a, c]).unwrap();
                         self.call_rt("anvil_release", &[a]);
@@ -1596,7 +1646,7 @@ impl<'a, 'b> Gen<'a, 'b> {
         match ty {
             Ty::I64 | Ty::Bool => self.b.ins().icmp(IntCC::Equal, a[0], b[0]),
             Ty::F64(_) => self.b.ins().fcmp(FloatCC::Equal, a[0], b[0]),
-            Ty::Str => {
+            Ty::Str | Ty::Bytes => {
                 let r = self.call_rt("anvil_str_eq", &[a[0], b[0]]).unwrap();
                 self.b.ins().icmp_imm_s(IntCC::NotEqual, r, 0)
             }
@@ -1902,13 +1952,14 @@ impl<'a, 'b> Gen<'a, 'b> {
                 let got = self.b.ins().icmp_imm_s(IntCC::NotEqual, line, 0);
                 return self.option(*eid, got, |_| vec![line]);
             }
-            Builtin::ReadFile | Builtin::WriteFile => {
+            Builtin::ReadFile | Builtin::ReadBytes | Builtin::WriteFile | Builtin::WriteBytes => {
                 // The runtime answers a str (null on failure) or the bytes written (-1); the
                 // FileError variant of a failure is asked for after.
                 let Ty::Enum(eid) = ty else { unreachable!() };
                 let path = self.expr(&bargs[0])[0];
-                let (r, ok) = if let Builtin::ReadFile = bi {
-                    let r = self.call_rt("anvil_read_file", &[path]).unwrap();
+                let (r, ok) = if let Builtin::ReadFile | Builtin::ReadBytes = bi {
+                    let name = if let Builtin::ReadFile = bi { "anvil_read_file" } else { "anvil_read_bytes" };
+                    let r = self.call_rt(name, &[path]).unwrap();
                     (r, self.b.ins().icmp_imm_s(IntCC::NotEqual, r, 0))
                 } else {
                     let text = self.expr(&bargs[1])[0];
@@ -1940,6 +1991,46 @@ impl<'a, 'b> Gen<'a, 'b> {
                 };
                 self.call_rt("anvil_release", &[s]);
                 return out;
+            }
+            Builtin::WrappingAdd | Builtin::WrappingSub | Builtin::WrappingMul => {
+                let a = self.expr(&bargs[0])[0];
+                let c = self.expr(&bargs[1])[0];
+                return vec![match bi {
+                    Builtin::WrappingAdd => self.b.ins().iadd(a, c),
+                    Builtin::WrappingSub => self.b.ins().isub(a, c),
+                    _ => self.b.ins().imul(a, c),
+                }];
+            }
+            Builtin::BytesOf { site } => {
+                let xs = self.expr(&bargs[0])[0];
+                let s = self.str_obj(site);
+                let out = self.call_rt("anvil_bytes_of", &[xs, s]).unwrap();
+                self.call_rt("anvil_release", &[xs]);
+                return vec![out];
+            }
+            // A str object is valid bytes as it is.
+            Builtin::StrToBytes => return self.expr(&bargs[0]),
+            Builtin::BytesToStr => {
+                let Ty::Enum(eid) = ty else { unreachable!() };
+                let bs = self.expr(&bargs[0])[0];
+                let s = self.call_rt("anvil_bytes_to_str", &[bs]).unwrap();
+                self.call_rt("anvil_release", &[bs]);
+                let ok = self.b.ins().icmp_imm_s(IntCC::NotEqual, s, 0);
+                return self.option(*eid, ok, |_| vec![s]);
+            }
+            Builtin::BytesHex => {
+                let bs = self.expr(&bargs[0])[0];
+                let s = self.call_rt("anvil_bytes_hex", &[bs]).unwrap();
+                self.call_rt("anvil_release", &[bs]);
+                return vec![s];
+            }
+            Builtin::BytesToArray => {
+                let bs = self.expr(&bargs[0])[0];
+                let info = self.be.type_info(self.program, &Ty::I64);
+                let ti = self.data_ptr(info);
+                let out = self.call_rt("anvil_bytes_to_array", &[bs, ti]).unwrap();
+                self.call_rt("anvil_release", &[bs]);
+                return vec![out];
             }
             Builtin::ClockNs => return vec![self.call_rt("anvil_clock_ns", &[]).unwrap()],
             Builtin::RandomF64 => return vec![self.call_rt("anvil_random_f64", &[]).unwrap()],
@@ -1975,7 +2066,17 @@ impl<'a, 'b> Gen<'a, 'b> {
             | Builtin::WriteFile
             | Builtin::StrTrim
             | Builtin::StrParseI64
-            | Builtin::StrParseF64 => unreachable!(),
+            | Builtin::StrParseF64
+            | Builtin::WrappingAdd
+            | Builtin::WrappingSub
+            | Builtin::WrappingMul
+            | Builtin::BytesOf { .. }
+            | Builtin::ReadBytes
+            | Builtin::WriteBytes
+            | Builtin::StrToBytes
+            | Builtin::BytesToStr
+            | Builtin::BytesHex
+            | Builtin::BytesToArray => unreachable!(),
             Builtin::RandomBelow { site } => {
                 let site = self.str_obj(site);
                 vec![self.call_rt("anvil_random_below", &[x, site]).unwrap()]
