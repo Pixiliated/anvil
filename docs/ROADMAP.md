@@ -109,5 +109,11 @@ green and the interpreter and native backend agreeing on every program in `tests
   binary files (`read_bytes`, `write_bytes`), on both backends
 - [x] The fuzzer uses bit operations; property tests generate bytes
 
-## M17: Publishing
+## M17: Standard library: text, collections and the system (v0.18)
+- [x] Text: `replace`, `to_upper`, `to_lower`, `chars`, `join`, and floats with fixed decimals
+- [x] Arrays: `sorted` (stable) and `reversed`
+- [x] The system: `eprint` (stderr kept in goldens), `exit`, `env` (given by a golden's `.in`)
+  and `list_dir` (with writes kept in memory), on both backends
+
+## M18: Publishing
 - [ ] crates.io as `anvil-lang` (`anvil` is taken), docs site, contribution guide

@@ -8,7 +8,7 @@ use anvil_front::span::SourceFile;
 fn every_listed_method_checks_with_its_signature() {
     // One program calling every method, with the result bound to the type the table gives.
     let mut body = String::from(
-        "    let s: str = \"a,b\";\n    var xs: [i64] = [1, 2];\n    var m: Map[str, i64] = [\"k\": 1];\n    let n: i64 = 7;\n    let bs: bytes = bytes_of([1, 2]);\n",
+        "    let s: str = \"a,b\";\n    var xs: [i64] = [1, 2];\n    var m: Map[str, i64] = [\"k\": 1];\n    let n: i64 = 7;\n    let bs: bytes = bytes_of([1, 2]);\n    let ws: [str] = [\"a\"];\n    let f: f64 = 1.5;\n",
     );
     for (n, (on, name, sig)) in METHODS.iter().enumerate() {
         let receiver = match *on {
@@ -17,6 +17,8 @@ fn every_listed_method_checks_with_its_signature() {
             "map" => "m",
             "i64" => "n",
             "bytes" => "bs",
+            "strings" => "ws",
+            "f64" => "f",
             other => panic!("unknown receiver kind {other}"),
         };
         let fill = |t: &str| t.replace('T', "i64").replace('K', "str").replace('V', "i64");
@@ -27,7 +29,7 @@ fn every_listed_method_checks_with_its_signature() {
             .map(|p| {
                 let (pname, ty) = p.split_once(": ").unwrap();
                 let value = if fill(ty) == "str" { "\"k\"".to_string() } else { "2".to_string() };
-                if *name == "set" {
+                if *name == "set" || *name == "replace" {
                     format!("{pname}: {value}")
                 } else {
                     value

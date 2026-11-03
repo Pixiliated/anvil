@@ -329,3 +329,25 @@ Short records of choices that are not obvious from the code. Newest last.
   UTF-8), so `to_bytes` costs nothing and `to_str` only checks. An array of i64 would take eight
   times the memory; `bytes_of` and `to_array` convert.
 - **`6.xor(3)` is a method call**: a digit, `.` and a letter cannot be a float.
+
+## M17 (v0.18)
+
+- **A standard library before publishing.** Everyday programs kept rewriting the same basics
+  (joining, sorting, reporting an error); these are the ones most programs need, specified to
+  give the same text on both backends.
+- **Case is ASCII.** Unicode case mapping depends on tables that change between versions;
+  ASCII letters change and every other character stays, the same everywhere.
+- **`fixed` rounds the exact binary value, ties to even**, as both Rust's formatter and C's
+  printf do (checked on both backends, Windows and Linux), so `0.125.fixed(2)` is `0.12`.
+- **`sorted` is stable and refuses NaN**: one order for every input, including `0.0` and
+  `-0.0`. The runtime has its own merge sort, as qsort is not stable.
+- **stderr is part of a golden** (`stderr:` lines in the header), and of a test's result, so
+  error messages are checked like output. A panic stays apart from it: natively it is the last
+  line of stderr when the exit code is 101.
+- **`exit` ends a function's path**, so `fn f() -> i64 { ...; exit(1); }` needs no dead
+  `return`; in a test it is a failure, since a test ends by returning.
+- **Checked runs see only the environment they are given** (`env:` lines; none for tests):
+  native goldens run with a cleared environment, and `ANVIL_` names read as None, so the
+  runtime's own settings cannot leak into output.
+- **`FileError` gained `NotDirectory`**, at the end, so existing variant numbers stay; matches
+  that list every variant need the new arm.

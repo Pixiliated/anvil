@@ -59,6 +59,8 @@ enum Unwind {
     Panic(String),
     Return(Value),
     OutOfSteps,
+    /// `exit(code)`
+    Exit(i32),
 }
 
 type R<T> = Result<T, Unwind>;
@@ -102,6 +104,14 @@ pub struct Files<'h> {
     pub memory: bool,
 }
 
+/// Where `env` reads: this process's environment (`anvil run`), or the variables a checked run
+/// is given (a golden's `.in`; none for tests).
+#[derive(Clone, Copy, Debug)]
+pub enum Env<'h> {
+    Real,
+    Given(&'h [(String, String)]),
+}
+
 /// What a run takes from outside the program.
 pub struct Host<'h> {
     pub clock: Clock,
@@ -112,6 +122,9 @@ pub struct Host<'h> {
     /// What `read_line` reads; None is an empty input.
     pub stdin: Option<&'h mut dyn BufRead>,
     pub files: Files<'h>,
+    /// Where `eprint` writes.
+    pub stderr: &'h mut dyn Write,
+    pub env: Env<'h>,
 }
 
 impl Host<'_> {
@@ -122,6 +135,8 @@ impl Host<'_> {
             args: self.args,
             stdin: self.stdin.as_deref_mut().map(|s| s as &mut dyn BufRead),
             files: self.files,
+            stderr: &mut *self.stderr,
+            env: self.env,
         }
     }
 }
@@ -136,6 +151,8 @@ pub struct Interp<'p, 'h> {
     random: Random,
     /// Files written in this run when writes are kept in memory, by `memory_file_key`.
     written: HashMap<String, Rc<[u8]>>,
+    /// Running a test, where `exit` is a failure.
+    in_test: bool,
     depth: usize,
     /// Statements and loop iterations left before the run stops; None is unlimited.
     steps_left: Option<u64>,
@@ -197,6 +214,8 @@ pub enum Event {
         step: u64,
         depth: usize,
         text: String,
+        /// `eprint`
+        stderr: bool,
     },
 }
 
@@ -287,6 +306,7 @@ impl<'p, 'h> Interp<'p, 'h> {
             started: std::time::Instant::now(),
             random: Random::default(),
             written: HashMap::new(),
+            in_test: false,
             depth: 0,
             steps_left: max_steps,
             taken: 0,
@@ -314,6 +334,7 @@ pub fn run_main_recorded(
         Ok(other) => unreachable!("main returned {other:?}"),
         Err(Unwind::Panic(m)) => Outcome::Panicked(m),
         Err(Unwind::OutOfSteps) => Outcome::OutOfSteps(max_steps.unwrap()),
+        Err(Unwind::Exit(code)) => Outcome::Exit(code),
         Err(Unwind::Return(v)) => unreachable!("`?` escaped main: {v:?}"),
     }
 }
@@ -365,6 +386,7 @@ pub fn run_test_with(
 ) -> Result<(), TestFail> {
     let test = &program.tests[index];
     let mut it = Interp::new(program, out, max_steps, rec, host);
+    it.in_test = true;
     let mut frame = vec![Value::Void; test.locals.len()];
     for (l, v) in test.inputs.iter().zip(inputs) {
         frame[*l] = v.clone();
@@ -375,6 +397,7 @@ pub fn run_test_with(
         Ok(_) => Ok(()),
         Err(Unwind::Panic(m)) => Err(TestFail::Panic(m)),
         Err(Unwind::OutOfSteps) => Err(TestFail::Stopped(step_limit_message(max_steps.unwrap()))),
+        Err(Unwind::Exit(code)) => unreachable!("exit({code}) in a test panics instead"),
         Err(Unwind::Return(v)) => unreachable!("`?` in a test: {v:?}"),
     }
 }
@@ -1000,6 +1023,51 @@ impl<'p, 'h> Interp<'p, 'h> {
                 Value::Bytes(out.into())
             }
             Builtin::StrToBytes => Value::Bytes(x.as_str().as_bytes().into()),
+            Builtin::StrReplace { message } => {
+                let old = self.eval(&args[1], frame)?;
+                let new = self.eval(&args[2], frame)?;
+                if old.as_str().is_empty() {
+                    return panic(message.clone());
+                }
+                Value::Str(x.as_str().replace(old.as_str(), new.as_str()).into())
+            }
+            Builtin::StrUpper => Value::Str(case_text(x.as_str(), true).into()),
+            Builtin::StrLower => Value::Str(case_text(x.as_str(), false).into()),
+            Builtin::StrChars => {
+                Value::Array(Rc::new(x.as_str().chars().map(|c| Value::Str(c.to_string().into())).collect()))
+            }
+            Builtin::ArrJoin => {
+                let sep = self.eval(&args[1], frame)?;
+                let Value::Array(items) = x else { unreachable!() };
+                let parts: Vec<&str> = items.iter().map(|v| v.as_str()).collect();
+                Value::Str(parts.join(sep.as_str()).into())
+            }
+            Builtin::FloatFixed { message } => {
+                let n = self.eval(&args[1], frame)?.as_i64();
+                if !(0..=17).contains(&n) {
+                    return panic(message.clone());
+                }
+                Value::Str(fixed_text(x.as_f64(), n as usize).into())
+            }
+            Builtin::ArrReversed => {
+                let Value::Array(items) = x else { unreachable!() };
+                Value::Array(Rc::new(items.iter().rev().cloned().collect()))
+            }
+            Builtin::ArrSorted { message } => {
+                let Value::Array(items) = x else { unreachable!() };
+                let mut out = (*items).clone();
+                if out.iter().any(|v| matches!(v, Value::F64(f) if f.is_nan())) {
+                    return panic(message.clone());
+                }
+                // Stable, like the runtime's merge sort, so equal values (0.0 and -0.0) keep their order.
+                out.sort_by(|a, b| match (a, b) {
+                    (Value::I64(x), Value::I64(y)) => x.cmp(y),
+                    (Value::F64(x), Value::F64(y)) => x.partial_cmp(y).expect("no nan"),
+                    (Value::Str(x), Value::Str(y)) => x.as_bytes().cmp(y.as_bytes()),
+                    _ => unreachable!("sorted {a:?}"),
+                });
+                Value::Array(Rc::new(out))
+            }
             Builtin::BytesToStr => {
                 let Value::Bytes(bs) = x else { unreachable!() };
                 option(String::from_utf8(bs.to_vec()).ok().map(|s| Value::Str(s.into())))
@@ -1026,16 +1094,44 @@ impl<'p, 'h> Interp<'p, 'h> {
                 self.random = Random::seeded(x.as_i64());
                 Value::Void
             }
-            Builtin::Print => {
+            Builtin::Print | Builtin::EPrint => {
                 let mut line = print_text(&x, &args[0].ty);
+                let stderr = matches!(b, Builtin::EPrint);
                 if let Some(r) = &mut self.rec {
                     let (step, depth) = (self.taken, self.depth);
-                    r.event(None, || Event::Print { step, depth, text: line.clone() });
+                    r.event(None, || Event::Print { step, depth, text: line.clone(), stderr });
                 }
                 line.push('\n');
-                self.out.write_all(line.as_bytes()).expect("stdout write failed");
+                if stderr {
+                    self.host.stderr.write_all(line.as_bytes()).expect("stderr write failed");
+                } else {
+                    self.out.write_all(line.as_bytes()).expect("stdout write failed");
+                }
                 Value::Void
             }
+            Builtin::Exit { site } => {
+                let code = x.as_i64();
+                if self.in_test {
+                    return panic(exit_in_test_message(code, site));
+                }
+                if !(0..=255).contains(&code) {
+                    return panic(exit_message(code, site));
+                }
+                return Err(Unwind::Exit(code as i32));
+            }
+            Builtin::Env => {
+                let name = x.as_str();
+                let value = if name.starts_with(RESERVED_ENV_PREFIX) {
+                    None
+                } else {
+                    match self.host.env {
+                        Env::Real => std::env::var(name).ok(),
+                        Env::Given(vars) => vars.iter().find(|(n, _)| n == name).map(|(_, v)| v.clone()),
+                    }
+                };
+                option(value.map(|v| Value::Str(v.into())))
+            }
+            Builtin::ListDir => file_result(self.list_dir(x.as_str())),
             Builtin::Assert { message } => {
                 if !x.as_bool() {
                     return panic(message.clone());
@@ -1140,6 +1236,36 @@ impl Interp<'_, '_> {
             return Err(FILE_IS_DIRECTORY);
         }
         std::fs::read(&p).map(Rc::from).map_err(file_error)
+    }
+
+    /// The names in a directory, sorted bytewise; with writes in memory, the files written into
+    /// it by this run too (a file `d/x` for the directory written `d`; `x` for `.`).
+    fn list_dir(&mut self, path: &str) -> Result<Value, usize> {
+        if path.is_empty() {
+            return Err(FILE_NOT_FOUND);
+        }
+        let p = self.host.files.root.join(path);
+        if p.exists() && !p.is_dir() {
+            return Err(FILE_NOT_DIRECTORY);
+        }
+        let mut names = Vec::new();
+        for entry in std::fs::read_dir(&p).map_err(file_error)? {
+            let entry = entry.map_err(file_error)?;
+            names.push(entry.file_name().into_string().map_err(|_| FILE_NOT_TEXT)?);
+        }
+        if self.host.files.memory {
+            let dir = memory_file_key(path);
+            let prefix = if dir == "." { String::new() } else { format!("{}/", dir.trim_end_matches('/')) };
+            for key in self.written.keys() {
+                if let Some(name) = key.strip_prefix(&prefix).filter(|n| !n.is_empty() && !n.contains('/')) {
+                    if !names.iter().any(|n| n == name) {
+                        names.push(name.to_string());
+                    }
+                }
+            }
+        }
+        names.sort();
+        Ok(Value::Array(Rc::new(names.into_iter().map(|n| Value::Str(n.into())).collect())))
     }
 
     /// Ok of the bytes written.

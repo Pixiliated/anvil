@@ -383,8 +383,15 @@ fn members(a: &Analysis, base: &str, kind: &'static str) -> Vec<Item> {
 
 /// The built-in methods of a type shown as `ty`, with its element, key and value types filled in.
 fn methods(ty: &str) -> Vec<Item> {
+    if ty == "[str]" {
+        let mut items = methods_of("array", &[("T", "str".to_string())]);
+        items.extend(methods_of("strings", &[]));
+        return items;
+    }
     let (kind, subst): (&str, Vec<(&str, String)>) = if matches!(ty, "str" | "i64" | "bytes") {
         (ty, Vec::new())
+    } else if ty == "f64" || ty.starts_with("f64[") {
+        ("f64", Vec::new())
     } else if let Some(elem) = ty.strip_prefix('[').and_then(|t| t.strip_suffix(']')) {
         ("array", vec![("T", elem.to_string())])
     } else if let Some(kv) = ty.strip_prefix("Map[").and_then(|t| t.strip_suffix(']')) {
@@ -393,10 +400,14 @@ fn methods(ty: &str) -> Vec<Item> {
     } else {
         return Vec::new();
     };
+    methods_of(kind, &subst)
+}
+
+fn methods_of(kind: &str, subst: &[(&str, String)]) -> Vec<Item> {
     METHODS
         .iter()
         .filter(|(on, _, _)| *on == kind)
-        .map(|(_, name, sig)| Item { label: name.to_string(), kind: "method", detail: fill(sig, &subst) })
+        .map(|(_, name, sig)| Item { label: name.to_string(), kind: "method", detail: fill(sig, subst) })
         .collect()
 }
 

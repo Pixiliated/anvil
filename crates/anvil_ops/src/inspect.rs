@@ -75,7 +75,7 @@ fn given(root: &Path, which: Option<usize>, input: &ProgramInput) -> Result<Inpu
         return Err(Report::usage("arguments and --input are for main; tests run without them"));
     }
     let stdin = input.file_bytes(root)?.unwrap_or_default();
-    Ok(Input { args: input.args.clone(), stdin })
+    Ok(Input { args: input.args.clone(), stdin, env: Vec::new() })
 }
 
 fn run_name(program: &Program, which: Option<usize>) -> String {
@@ -102,8 +102,9 @@ fn observe<T: Send + 'static>(
     Ok(anvil_interp::run_on_big_stack(move || {
         let mut rec = make(&program);
         let mut sink = Vec::new();
+        let mut err_sink = Vec::new();
         let mut stdin = std::io::Cursor::new(input.stdin.as_slice());
-        let host = crate::checked_host(&mut ffi, &root, &input.args, Some(&mut stdin));
+        let host = crate::checked_host(&mut ffi, &root, &input.args, Some(&mut stdin), &mut err_sink, &input.env);
         let ended = match which {
             None => match anvil_interp::run_main_recorded(&program, &mut sink, max_steps, Some(&mut rec), host) {
                 Outcome::Exit(code) => Ended::Exit(code),
@@ -212,8 +213,11 @@ fn event(p: &Program, e: &Event) -> (Value, usize, String) {
             let line = format!("{} returns {value}", f.name);
             (json!({ "step": step, "depth": depth, "return": f.name, "value": value }), depth - 1, line)
         }
-        Event::Print { step, depth, text } => {
+        Event::Print { step, depth, text, stderr: false } => {
             (json!({ "step": step, "depth": depth, "print": text }), *depth, format!("| {text}"))
+        }
+        Event::Print { step, depth, text, stderr: true } => {
+            (json!({ "step": step, "depth": depth, "eprint": text }), *depth, format!("! {text}"))
         }
     }
 }

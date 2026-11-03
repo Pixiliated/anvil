@@ -29,6 +29,8 @@ pub(crate) struct Ran {
     pub failure: Option<String>,
     pub stopped: bool,
     pub output: String,
+    /// What eprint wrote.
+    pub errors: String,
     /// For a failed property: the shrunk inputs, and which case first failed.
     pub inputs: Option<String>,
     pub case: Option<u64>,
@@ -54,21 +56,25 @@ pub(crate) fn run_all(
             failure: None,
             stopped: false,
             output: String::new(),
+            errors: String::new(),
             inputs: None,
             case: None,
             shrinks: 0,
         };
         if t.inputs.is_empty() {
             let mut buf = Vec::new();
-            let host = crate::checked_host(ffi, root, &[], None);
+            let mut err = Vec::new();
+            let host = crate::checked_host(ffi, root, &[], None, &mut err, &[]);
             match anvil_interp::run_test_with(program, i, &[], &mut buf, max_steps, rec.as_deref_mut(), host) {
                 Ok(()) => {}
                 Err(TestFail::Panic(m)) => ran.failure = Some(m),
                 Err(TestFail::Stopped(m)) => (ran.failure, ran.stopped) = (Some(m), true),
             }
             ran.output = String::from_utf8_lossy(&buf).into_owned();
+            ran.errors = String::from_utf8_lossy(&err).into_owned();
         } else {
-            let host = crate::checked_host(ffi, root, &[], None);
+            let mut err = Vec::new();
+            let host = crate::checked_host(ffi, root, &[], None, &mut err, &[]);
             match anvil_interp::run_property(program, i, cases, seed, max_steps, rec.as_deref_mut(), host) {
                 Property::Passed { .. } => {}
                 Property::Stopped(m) => (ran.failure, ran.stopped) = (Some(m), true),
@@ -96,7 +102,7 @@ pub(crate) fn run_all(
 
 /// What the native executable did for one test, run in `root` without input.
 fn native_result(exe: &Path, index: usize, root: &Path) -> Result<golden::Output, String> {
-    golden::run_native(exe, &[&index.to_string()], root, &[])
+    golden::run_native(exe, &[&index.to_string()], root, &[], &[])
 }
 
 pub fn test(
@@ -152,7 +158,7 @@ pub fn test(
                                 None => "ok".into(),
                                 Some(m) => format!("panic: {m}"),
                             });
-                            let same = o.panic == r.failure && o.stdout == r.output;
+                            let same = o.panic == r.failure && o.stdout == r.output && o.stderr == r.errors;
                             if !same {
                                 let theirs =
                                     o.panic.as_deref().map_or("passes".into(), |m| format!("panics with `{m}`"));

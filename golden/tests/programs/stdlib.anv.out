@@ -1,0 +1,26 @@
+exit: 0
+stderr: warning: this line goes to stderr
+stderr: 42
+---
+HELLO, WöRLD
+hello, wörld
+HeLLo, wörLd
+abc
+ba
+5 chars, second [é], reversed olléh
+x, y, z
+[-2, -2, 0, 5, 9]
+[-7.25, 0.0, -0.0, 0.001, 2.5]
+Apple apple fig pear äpfel
+[3, 2, 1]
+3.14
+2
+0.12
+-1.000
+100.0
+HOME is /home/ada
+MISSING set: false, ANVIL_FS readable: false
+[latin1.txt scores.txt]
+[latin1.txt new.txt scores.txt]
+not a directory
+not found

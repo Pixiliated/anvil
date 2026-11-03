@@ -95,10 +95,13 @@ const RUNTIME: &[(&str, &[Type], &[Type])] = &[
     ("anvil_str_from_i64", &[I], &[I]),
     ("anvil_str_from_f64", &[types::F64], &[I]),
     ("anvil_str_from_bool", &[I], &[I]),
-    ("anvil_print_line", &[I], &[]),
-    ("anvil_print_i64", &[I], &[]),
-    ("anvil_print_bool", &[I], &[]),
-    ("anvil_print_f64", &[types::F64, I], &[]),
+    ("anvil_print_line", &[I, I], &[]),
+    ("anvil_print_i64", &[I, I], &[]),
+    ("anvil_print_bool", &[I, I], &[]),
+    ("anvil_print_f64", &[types::F64, I, I], &[]),
+    ("anvil_exit_now", &[I, I], &[]),
+    ("anvil_env", &[I], &[I]),
+    ("anvil_list_dir", &[I, I], &[I]),
     ("anvil_clock_ns", &[], &[I]),
     ("anvil_random_below", &[I, I], &[I]),
     ("anvil_random_f64", &[], &[types::F64]),
@@ -121,6 +124,13 @@ const RUNTIME: &[(&str, &[Type], &[Type])] = &[
     ("anvil_bytes_at", &[I, I, I], &[I]),
     ("anvil_bytes_slice", &[I, I, I, I], &[I]),
     ("anvil_check_shift", &[I, I], &[I]),
+    ("anvil_str_replace", &[I, I, I, I], &[I]),
+    ("anvil_str_case", &[I, I], &[I]),
+    ("anvil_str_chars", &[I, I], &[I]),
+    ("anvil_arr_join", &[I, I], &[I]),
+    ("anvil_f64_fixed", &[types::F64, I, I], &[I]),
+    ("anvil_arr_reversed", &[I], &[I]),
+    ("anvil_arr_sorted", &[I, I, I], &[I]),
     ("anvil_panic", &[I], &[]),
     ("anvil_panic_index", &[I, I, I], &[]),
     ("anvil_arr_new", &[I, I], &[I]),
@@ -1912,27 +1922,28 @@ impl<'a, 'b> Gen<'a, 'b> {
                 }
                 return vec![out];
             }
-            Builtin::Print => {
+            Builtin::Print | Builtin::EPrint => {
                 // Numbers and bools are written without building a str: print never allocates.
+                let stream = self.b.ins().iconst(I, matches!(bi, Builtin::EPrint) as i64);
                 match &bargs[0].ty {
                     Ty::I64 => {
                         let v = self.expr(&bargs[0]);
-                        self.call_rt("anvil_print_i64", &v);
+                        self.call_rt("anvil_print_i64", &[v[0], stream]);
                     }
                     Ty::Bool => {
                         let v = self.expr(&bargs[0]);
                         let wide = self.b.ins().uextend(I, v[0]);
-                        self.call_rt("anvil_print_bool", &[wide]);
+                        self.call_rt("anvil_print_bool", &[wide, stream]);
                     }
                     Ty::F64(u) => {
                         let v = self.expr(&bargs[0]);
                         let unit = if u.is_dimensionless() { String::new() } else { format!(" {u}") };
                         let unit = self.str_obj(&unit);
-                        self.call_rt("anvil_print_f64", &[v[0], unit]);
+                        self.call_rt("anvil_print_f64", &[v[0], unit, stream]);
                     }
                     _ => {
                         let (t, owned) = self.borrow(&bargs[0]);
-                        self.call_rt("anvil_print_line", &[t[0]]);
+                        self.call_rt("anvil_print_line", &[t[0], stream]);
                         if owned {
                             self.call_rt("anvil_release", &[t[0]]);
                         }
@@ -1951,6 +1962,35 @@ impl<'a, 'b> Gen<'a, 'b> {
                 let line = self.call_rt("anvil_read_line", &[m]).unwrap();
                 let got = self.b.ins().icmp_imm_s(IntCC::NotEqual, line, 0);
                 return self.option(*eid, got, |_| vec![line]);
+            }
+            Builtin::Exit { site } => {
+                let code = self.expr(&bargs[0])[0];
+                let s = self.str_obj(site);
+                self.call_rt("anvil_exit_now", &[code, s]);
+                return Vec::new();
+            }
+            Builtin::Env => {
+                let Ty::Enum(eid) = ty else { unreachable!() };
+                let name = self.expr(&bargs[0])[0];
+                let v = self.call_rt("anvil_env", &[name]).unwrap();
+                self.call_rt("anvil_release", &[name]);
+                let got = self.b.ins().icmp_imm_s(IntCC::NotEqual, v, 0);
+                return self.option(*eid, got, |_| vec![v]);
+            }
+            Builtin::ListDir => {
+                let Ty::Enum(eid) = ty else { unreachable!() };
+                let path = self.expr(&bargs[0])[0];
+                let info = self.be.type_info(self.program, &Ty::Str);
+                let ti = self.data_ptr(info);
+                let r = self.call_rt("anvil_list_dir", &[path, ti]).unwrap();
+                self.call_rt("anvil_release", &[path]);
+                let ok = self.b.ins().icmp_imm_s(IntCC::NotEqual, r, 0);
+                return self.either(
+                    *eid,
+                    ok,
+                    (RESULT_OK, |_: &mut Self| vec![r]),
+                    (RESULT_ERR, |g: &mut Self| vec![g.call_rt("anvil_file_error", &[]).unwrap()]),
+                );
             }
             Builtin::ReadFile | Builtin::ReadBytes | Builtin::WriteFile | Builtin::WriteBytes => {
                 // The runtime answers a str (null on failure) or the bytes written (-1); the
@@ -2010,6 +2050,62 @@ impl<'a, 'b> Gen<'a, 'b> {
             }
             // A str object is valid bytes as it is.
             Builtin::StrToBytes => return self.expr(&bargs[0]),
+            Builtin::StrReplace { message } => {
+                let s = self.expr(&bargs[0])[0];
+                let old = self.expr(&bargs[1])[0];
+                let new = self.expr(&bargs[2])[0];
+                let m = self.str_obj(message);
+                let out = self.call_rt("anvil_str_replace", &[s, old, new, m]).unwrap();
+                for v in [s, old, new] {
+                    self.call_rt("anvil_release", &[v]);
+                }
+                return vec![out];
+            }
+            Builtin::StrUpper | Builtin::StrLower | Builtin::StrChars | Builtin::ArrReversed => {
+                let x = self.expr(&bargs[0])[0];
+                let out = match bi {
+                    Builtin::StrChars => {
+                        let info = self.be.type_info(self.program, &Ty::Str);
+                        let ti = self.data_ptr(info);
+                        self.call_rt("anvil_str_chars", &[x, ti]).unwrap()
+                    }
+                    Builtin::ArrReversed => self.call_rt("anvil_arr_reversed", &[x]).unwrap(),
+                    _ => {
+                        let upper = self.b.ins().iconst(I, matches!(bi, Builtin::StrUpper) as i64);
+                        self.call_rt("anvil_str_case", &[x, upper]).unwrap()
+                    }
+                };
+                self.call_rt("anvil_release", &[x]);
+                return vec![out];
+            }
+            Builtin::ArrJoin => {
+                let xs = self.expr(&bargs[0])[0];
+                let sep = self.expr(&bargs[1])[0];
+                let out = self.call_rt("anvil_arr_join", &[xs, sep]).unwrap();
+                self.call_rt("anvil_release", &[xs]);
+                self.call_rt("anvil_release", &[sep]);
+                return vec![out];
+            }
+            Builtin::FloatFixed { message } => {
+                let v = self.expr(&bargs[0])[0];
+                let n = self.expr(&bargs[1])[0];
+                let m = self.str_obj(message);
+                return vec![self.call_rt("anvil_f64_fixed", &[v, n, m]).unwrap()];
+            }
+            Builtin::ArrSorted { message } => {
+                let xs = self.expr(&bargs[0])[0];
+                let Ty::Array(elem) = &bargs[0].ty else { unreachable!() };
+                let kind = match **elem {
+                    Ty::I64 => 0,
+                    Ty::F64(_) => 1,
+                    _ => 2,
+                };
+                let kind = self.b.ins().iconst(I, kind);
+                let m = self.str_obj(message);
+                let out = self.call_rt("anvil_arr_sorted", &[xs, kind, m]).unwrap();
+                self.call_rt("anvil_release", &[xs]);
+                return vec![out];
+            }
             Builtin::BytesToStr => {
                 let Ty::Enum(eid) = ty else { unreachable!() };
                 let bs = self.expr(&bargs[0])[0];
@@ -2076,7 +2172,19 @@ impl<'a, 'b> Gen<'a, 'b> {
             | Builtin::StrToBytes
             | Builtin::BytesToStr
             | Builtin::BytesHex
-            | Builtin::BytesToArray => unreachable!(),
+            | Builtin::BytesToArray
+            | Builtin::StrReplace { .. }
+            | Builtin::StrUpper
+            | Builtin::StrLower
+            | Builtin::StrChars
+            | Builtin::ArrJoin
+            | Builtin::FloatFixed { .. }
+            | Builtin::ArrSorted { .. }
+            | Builtin::ArrReversed
+            | Builtin::EPrint
+            | Builtin::Exit { .. }
+            | Builtin::Env
+            | Builtin::ListDir => unreachable!(),
             Builtin::RandomBelow { site } => {
                 let site = self.str_obj(site);
                 vec![self.call_rt("anvil_random_below", &[x, site]).unwrap()]

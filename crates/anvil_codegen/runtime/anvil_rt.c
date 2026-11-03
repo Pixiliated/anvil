@@ -33,6 +33,7 @@ __declspec(dllimport) unsigned long __stdcall GetFileAttributesW(const wchar_t *
 #else
 #include <time.h>
 #include <sys/stat.h>
+#include <dirent.h>
 #endif
 
 #define ANVIL_PANIC_EXIT 101
@@ -235,31 +236,31 @@ AnvStr *anvil_str_from_f64(double v) {
     return str_from(buf, n);
 }
 
-void anvil_print_line(const AnvStr *s) {
+/* `stream` 0 is stdout (print), 1 stderr (eprint). */
+static FILE *stream_of(int64_t stream) {
     init_stdout();
-    fwrite(s->bytes, 1, (size_t)s->len, stdout);
-    fputc('\n', stdout);
+    return stream ? stderr : stdout;
+}
+
+void anvil_print_line(const AnvStr *s, int64_t stream) {
+    FILE *f = stream_of(stream);
+    fwrite(s->bytes, 1, (size_t)s->len, f);
+    fputc('\n', f);
 }
 
 /* print of a number or a bool writes its text straight out: print never allocates. */
-void anvil_print_i64(int64_t v) {
-    init_stdout();
-    fprintf(stdout, "%lld\n", (long long)v);
-}
+void anvil_print_i64(int64_t v, int64_t stream) { fprintf(stream_of(stream), "%lld\n", (long long)v); }
 
-void anvil_print_bool(int64_t v) {
-    init_stdout();
-    fputs(v ? "true\n" : "false\n", stdout);
-}
+void anvil_print_bool(int64_t v, int64_t stream) { fputs(v ? "true\n" : "false\n", stream_of(stream)); }
 
 /* `unit` is the text after the digits: "" or " m/s". */
-void anvil_print_f64(double v, const AnvStr *unit) {
+void anvil_print_f64(double v, const AnvStr *unit, int64_t stream) {
     char buf[64];
     int n = format_f64(v, buf);
-    init_stdout();
-    fwrite(buf, 1, (size_t)n, stdout);
-    fwrite(unit->bytes, 1, (size_t)unit->len, stdout);
-    fputc('\n', stdout);
+    FILE *f = stream_of(stream);
+    fwrite(buf, 1, (size_t)n, f);
+    fwrite(unit->bytes, 1, (size_t)unit->len, f);
+    fputc('\n', f);
 }
 
 /* ---- panics and exit ---- */
@@ -860,6 +861,147 @@ AnvStr *anvil_bytes_slice(const AnvStr *b, int64_t from, int64_t to, const AnvSt
     return str_from(b->bytes + from, to - from);
 }
 
+/* ---- text and array helpers (ir::case_text, fixed_text; the methods in SPEC, Text) ---- */
+
+AnvStr *anvil_str_replace(const AnvStr *s, const AnvStr *old, const AnvStr *new_, const AnvStr *message) {
+    if (old->len == 0) anvil_panic(message);
+    int64_t count = 0;
+    for (int64_t i = 0; i + old->len <= s->len;) {
+        if (memcmp(s->bytes + i, old->bytes, (size_t)old->len) == 0) {
+            count++;
+            i += old->len;
+        } else {
+            i++;
+        }
+    }
+    AnvStr *out = str_new(s->len + count * (new_->len - old->len));
+    int64_t o = 0;
+    for (int64_t i = 0; i < s->len;) {
+        if (i + old->len <= s->len && memcmp(s->bytes + i, old->bytes, (size_t)old->len) == 0) {
+            memcpy(out->bytes + o, new_->bytes, (size_t)new_->len);
+            o += new_->len;
+            i += old->len;
+        } else {
+            out->bytes[o++] = s->bytes[i++];
+        }
+    }
+    return out;
+}
+
+AnvStr *anvil_str_case(const AnvStr *s, int64_t upper) {
+    AnvStr *out = str_from(s->bytes, s->len);
+    for (int64_t i = 0; i < s->len; i++) {
+        char c = out->bytes[i];
+        if (upper && c >= 'a' && c <= 'z') out->bytes[i] = (char)(c - 32);
+        if (!upper && c >= 'A' && c <= 'Z') out->bytes[i] = (char)(c + 32);
+    }
+    return out;
+}
+
+/* Each character (a str is UTF-8, so its first byte gives its length). */
+AnvArr *anvil_str_chars(const AnvStr *s, const AnvTypeInfo *ti) {
+    AnvArr *out = anvil_arr_new(ti, s->len);
+    for (int64_t i = 0; i < s->len;) {
+        unsigned char c = (unsigned char)s->bytes[i];
+        int64_t n = c < 0x80 ? 1 : c < 0xE0 ? 2 : c < 0xF0 ? 3 : 4;
+        *(AnvStr **)anvil_arr_push_slot(out) = str_from(s->bytes + i, n);
+        i += n;
+    }
+    return out;
+}
+
+AnvStr *anvil_arr_join(const AnvArr *xs, const AnvStr *sep) {
+    int64_t len = 0;
+    for (int64_t i = 0; i < xs->len; i++) len += (*(AnvStr **)(xs->data + i * xs->ti->elem_size))->len;
+    if (xs->len > 1) len += (xs->len - 1) * sep->len;
+    AnvStr *out = str_new(len);
+    int64_t o = 0;
+    for (int64_t i = 0; i < xs->len; i++) {
+        if (i > 0) {
+            memcpy(out->bytes + o, sep->bytes, (size_t)sep->len);
+            o += sep->len;
+        }
+        const AnvStr *part = *(AnvStr **)(xs->data + i * xs->ti->elem_size);
+        memcpy(out->bytes + o, part->bytes, (size_t)part->len);
+        o += part->len;
+    }
+    return out;
+}
+
+AnvStr *anvil_f64_fixed(double v, int64_t n, const AnvStr *message) {
+    if (n < 0 || n > 17) anvil_panic(message);
+    if (isnan(v)) return str_from("nan", 3);
+    if (isinf(v)) return v > 0 ? str_from("inf", 3) : str_from("-inf", 4);
+    char small[64];
+    int len = snprintf(small, sizeof small, "%.*f", (int)n, v);
+    if (len < (int)sizeof small) return str_from(small, len);
+    char *big = xmalloc((size_t)len + 1);
+    snprintf(big, (size_t)len + 1, "%.*f", (int)n, v);
+    AnvStr *s = str_from(big, len);
+    free(big);
+    return s;
+}
+
+/* A copy with each element's references counted again. */
+static AnvArr *arr_copy(const AnvArr *a) {
+    AnvArr *b = anvil_arr_new(a->ti, a->len);
+    b->len = a->len;
+    if (b->len) memcpy(b->data, a->data, (size_t)(b->len * a->ti->elem_size));
+    retain_elements(b);
+    return b;
+}
+
+AnvArr *anvil_arr_reversed(const AnvArr *a) {
+    AnvArr *b = arr_copy(a);
+    int64_t size = a->ti->elem_size;
+    char *tmp = xmalloc((size_t)size);
+    for (int64_t i = 0, j = b->len - 1; i < j; i++, j--) {
+        memcpy(tmp, b->data + i * size, (size_t)size);
+        memcpy(b->data + i * size, b->data + j * size, (size_t)size);
+        memcpy(b->data + j * size, tmp, (size_t)size);
+    }
+    free(tmp);
+    return b;
+}
+
+/* The element kinds `sorted` takes. */
+enum { SORT_I64 = 0, SORT_F64 = 1, SORT_STR = 2 };
+
+static int sort_before(const char *x, const char *y, int64_t kind) {
+    switch (kind) {
+    case SORT_I64: return *(const int64_t *)x < *(const int64_t *)y;
+    case SORT_F64: return *(const double *)x < *(const double *)y;
+    default: return anvil_str_cmp(*(AnvStr *const *)x, *(AnvStr *const *)y) < 0;
+    }
+}
+
+/* Stable merge sort of 8-byte elements, as the interpreter's sort is stable. */
+static void merge_sort(char *data, char *tmp, int64_t n, int64_t kind) {
+    if (n < 2) return;
+    int64_t half = n / 2;
+    merge_sort(data, tmp, half, kind);
+    merge_sort(data + half * 8, tmp, n - half, kind);
+    int64_t i = 0, j = half, k = 0;
+    while (i < half && j < n) {
+        if (sort_before(data + j * 8, data + i * 8, kind)) memcpy(tmp + 8 * k++, data + 8 * j++, 8);
+        else memcpy(tmp + 8 * k++, data + 8 * i++, 8);
+    }
+    while (i < half) memcpy(tmp + 8 * k++, data + 8 * i++, 8);
+    while (j < n) memcpy(tmp + 8 * k++, data + 8 * j++, 8);
+    memcpy(data, tmp, (size_t)(n * 8));
+}
+
+AnvArr *anvil_arr_sorted(const AnvArr *a, int64_t kind, const AnvStr *message) {
+    if (kind == SORT_F64)
+        for (int64_t i = 0; i < a->len; i++)
+            if (isnan(*(const double *)(a->data + i * 8))) anvil_panic(message);
+    AnvArr *b = arr_copy(a);
+    char *tmp = xmalloc((size_t)(b->len * 8 + 8));
+    merge_sort(b->data, tmp, b->len, kind);
+    free(tmp);
+    return b;
+}
+
 /* The amount of a shift, which must be in 0..=63; same text as ir::shift_message. */
 int64_t anvil_check_shift(int64_t n, const AnvStr *site) {
     if (n < 0 || n > 63) {
@@ -1012,6 +1154,167 @@ double anvil_str_parse_f64(const AnvStr *s) {
     if (!isfinite(v)) return 0.0;
     parse_ok = 1;
     return v;
+}
+
+/* ---- the system: exit, env and list_dir (docs/SPEC.md, Input and files) ---- */
+
+/* Same texts as ir::exit_message and ir::exit_in_test_message. No leak check: the program's
+ * objects are alive when it stops. */
+void anvil_exit_now(int64_t code, const AnvStr *site) {
+    char buf[512];
+    int len = -1;
+    if (test_mode)
+        len = snprintf(buf, sizeof buf, "exit(%lld) in a test at %.*s; a test ends by returning", (long long)code,
+                       (int)site->len, site->bytes);
+    else if (code < 0 || code > 255)
+        len = snprintf(buf, sizeof buf, "exit(%lld) is outside the exit code range 0..=255 at %.*s", (long long)code,
+                       (int)site->len, site->bytes);
+    if (len >= 0) {
+        if (len >= (int)sizeof buf) len = (int)sizeof buf - 1;
+        panic_bytes(buf, len);
+    }
+    init_stdout();
+    fflush(stdout);
+    fflush(stderr);
+    exit((int)code);
+}
+
+/* The variable's value, NULL when unset, not UTF-8, or named ANVIL_ (ir::RESERVED_ENV_PREFIX). */
+AnvStr *anvil_env(const AnvStr *name) {
+    if (name->len == 0 || (name->len >= 6 && memcmp(name->bytes, "ANVIL_", 6) == 0)) return NULL;
+    char *n = path_copy(name, 0);
+    if ((int64_t)strlen(n) != name->len) {
+        free(n);
+        return NULL;
+    }
+#ifdef _WIN32
+    wchar_t *w = wide(n);
+    free(n);
+    const wchar_t *v = _wgetenv(w);
+    free(w);
+    if (!v) return NULL;
+    int len = WideCharToMultiByte(65001, 0, v, -1, NULL, 0, NULL, NULL);
+    if (len <= 0) return NULL;
+    char *u = xmalloc((size_t)len);
+    WideCharToMultiByte(65001, 0, v, -1, u, len, NULL, NULL);
+    AnvStr *s = str_from(u, len - 1);
+    free(u);
+    return s;
+#else
+    const char *v = getenv(n);
+    free(n);
+    if (!v || !utf8_valid((const unsigned char *)v, (int64_t)strlen(v))) return NULL;
+    return str_from(v, (int64_t)strlen(v));
+#endif
+}
+
+static int exists(const char *path, int64_t len) {
+    if ((int64_t)strlen(path) != len) return 0;
+#ifdef _WIN32
+    wchar_t *w = wide(path);
+    unsigned long attrs = GetFileAttributesW(w);
+    free(w);
+    return attrs != 0xFFFFFFFFul;
+#else
+    struct stat st;
+    return stat(path, &st) == 0;
+#endif
+}
+
+static int by_bytes(const void *a, const void *b) {
+    return (int)anvil_str_cmp(*(AnvStr *const *)a, *(AnvStr *const *)b);
+}
+
+/* Appends `name` unless it is there already. */
+static void add_name(AnvArr *out, const char *name, int64_t len) {
+    for (int64_t i = 0; i < out->len; i++) {
+        const AnvStr *s = *(AnvStr **)(out->data + i * 8);
+        if (s->len == len && memcmp(s->bytes, name, (size_t)len) == 0) return;
+    }
+    *(AnvStr **)anvil_arr_push_slot(out) = str_from(name, len);
+}
+
+/* The names in a directory, sorted bytewise, NULL with last_file_error set when it fails. With
+ * writes in memory, the files this run wrote into it too (as the interpreter's list_dir). */
+AnvArr *anvil_list_dir(const AnvStr *path, const AnvTypeInfo *ti) {
+    if (path->len == 0) {
+        last_file_error = FILE_NOT_FOUND;
+        return NULL;
+    }
+    char *p = path_copy(path, 0);
+    if (exists(p, path->len) && !is_directory(p, path->len)) {
+        free(p);
+        last_file_error = 5; /* NotDirectory */
+        return NULL;
+    }
+    AnvArr *out = anvil_arr_new(ti, 8);
+#ifdef _WIN32
+    char *pattern = xmalloc((size_t)path->len + 3);
+    memcpy(pattern, p, (size_t)path->len);
+    memcpy(pattern + path->len, "\\*", 3);
+    wchar_t *w = wide(pattern);
+    free(pattern);
+    struct _wfinddata64_t fd;
+    intptr_t h = (int64_t)strlen(p) == path->len ? _wfindfirst64(w, &fd) : -1;
+    free(w);
+    if (h == -1) {
+        last_file_error = errno_file_error();
+        free(p);
+        anvil_release((AnvObj *)out);
+        return NULL;
+    }
+    do {
+        if (wcscmp(fd.name, L".") == 0 || wcscmp(fd.name, L"..") == 0) continue;
+        int len = WideCharToMultiByte(65001, 0, fd.name, -1, NULL, 0, NULL, NULL);
+        char *u = xmalloc((size_t)(len > 0 ? len : 1));
+        if (len <= 0 || WideCharToMultiByte(65001, 0, fd.name, -1, u, len, NULL, NULL) <= 0) len = 1, u[0] = 0;
+        add_name(out, u, len - 1);
+        free(u);
+    } while (_wfindnext64(h, &fd) == 0);
+    _findclose(h);
+#else
+    DIR *d = (int64_t)strlen(p) == path->len ? opendir(p) : NULL;
+    if (!d) {
+        last_file_error = errno_file_error();
+        free(p);
+        anvil_release((AnvObj *)out);
+        return NULL;
+    }
+    struct dirent *e;
+    while ((e = readdir(d)) != NULL) {
+        if (strcmp(e->d_name, ".") == 0 || strcmp(e->d_name, "..") == 0) continue;
+        int64_t len = (int64_t)strlen(e->d_name);
+        if (!utf8_valid((const unsigned char *)e->d_name, len)) {
+            closedir(d);
+            free(p);
+            anvil_release((AnvObj *)out);
+            last_file_error = FILE_NOT_TEXT;
+            return NULL;
+        }
+        add_name(out, e->d_name, len);
+    }
+    closedir(d);
+#endif
+    free(p);
+    if (fs_memory) {
+        char *dir = path_copy(path, 1);
+        int64_t dl = path->len;
+        while (dl > 0 && dir[dl - 1] == '/') dl--;
+        int dot = dl == 1 && dir[0] == '.';
+        for (int64_t i = 0; i < mem_count; i++) {
+            const char *k = mem_files[i].key;
+            int64_t kl = (int64_t)strlen(k);
+            const char *name = k;
+            if (!dot) {
+                if (kl <= dl + 1 || memcmp(k, dir, (size_t)dl) != 0 || k[dl] != '/') continue;
+                name = k + dl + 1;
+            }
+            if (*name && !strchr(name, '/')) add_name(out, name, (int64_t)strlen(name));
+        }
+        free(dir);
+    }
+    qsort(out->data, (size_t)out->len, 8, by_bytes);
+    return out;
 }
 
 #ifdef _WIN32

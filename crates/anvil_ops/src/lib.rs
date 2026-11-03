@@ -404,7 +404,7 @@ pub fn run(
     file: &str,
     max_steps: Option<u64>,
     input: &ProgramInput,
-    out: &mut (dyn Write + Send),
+    (out, err): (&mut (dyn Write + Send), &mut (dyn Write + Send)),
 ) -> Report {
     let (_, program) = try_report!(with_main(root, file));
     let bytes = try_report!(input.file_bytes(root));
@@ -423,7 +423,8 @@ pub fn run(
                     (None, false) => Box::new(std::io::empty()),
                 };
                 let files = anvil_interp::Files { root, memory: false };
-                let host = host(anvil_interp::Clock::Real, &mut ffi, &input.args, Some(&mut *stdin), files);
+                let host = host(anvil_interp::Clock::Real, &mut ffi, &input.args, Some(&mut *stdin), files, err);
+                let host = anvil_interp::Host { env: anvil_interp::Env::Real, ..host };
                 anvil_interp::run_main(&program, out, max_steps, host)
             })
             .expect("cannot spawn interpreter thread")
@@ -431,6 +432,7 @@ pub fn run(
             .expect("interpreter thread crashed")
     });
     let _ = out.flush();
+    let _ = err.flush();
     match outcome {
         anvil_interp::Outcome::Exit(code) => Report {
             json: json!({ "ok": true, "exit": code }),
@@ -489,24 +491,30 @@ pub(crate) fn c_functions(program: &Program) -> Result<Option<Ffi>, String> {
 
 /// The host of every checked run (tests, goldens, traces, profiles): the virtual clock, files
 /// read from under `root` with writes kept in memory, and the program's C functions.
+/// `env` is the whole environment the run sees.
 pub(crate) fn checked_host<'h>(
     ffi: &'h mut Option<Ffi>,
     root: &'h Path,
     args: &'h [String],
     stdin: Option<&'h mut dyn BufRead>,
+    stderr: &'h mut dyn Write,
+    env: &'h [(String, String)],
 ) -> anvil_interp::Host<'h> {
-    host(anvil_interp::Clock::Virtual, ffi, args, stdin, anvil_interp::Files { root, memory: true })
+    let host = host(anvil_interp::Clock::Virtual, ffi, args, stdin, anvil_interp::Files { root, memory: true }, stderr);
+    anvil_interp::Host { env: anvil_interp::Env::Given(env), ..host }
 }
 
+/// A host whose environment is empty; `run` gives it the process's own.
 pub(crate) fn host<'h>(
     clock: anvil_interp::Clock,
     ffi: &'h mut Option<Ffi>,
     args: &'h [String],
     stdin: Option<&'h mut dyn BufRead>,
     files: anvil_interp::Files<'h>,
+    stderr: &'h mut dyn Write,
 ) -> anvil_interp::Host<'h> {
     let foreign = ffi.as_mut().map(|f| f as &mut dyn anvil_interp::Foreign);
-    anvil_interp::Host { clock, foreign, args, stdin, files }
+    anvil_interp::Host { clock, foreign, args, stdin, files, stderr, env: anvil_interp::Env::Given(&[]) }
 }
 
 /// Distinct per call within this process, for scratch directories (the MCP server builds many times).

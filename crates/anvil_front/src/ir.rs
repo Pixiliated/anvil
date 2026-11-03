@@ -156,12 +156,13 @@ pub const RESULT_OK: usize = 0;
 pub const RESULT_ERR: usize = 1;
 
 /// The variants of the built-in `FileError`, in order (see SPEC, Input and files).
-pub const FILE_ERRORS: [&str; 5] = ["NotFound", "IsDirectory", "Denied", "NotText", "Failed"];
+pub const FILE_ERRORS: [&str; 6] = ["NotFound", "IsDirectory", "Denied", "NotText", "Failed", "NotDirectory"];
 pub const FILE_NOT_FOUND: usize = 0;
 pub const FILE_IS_DIRECTORY: usize = 1;
 pub const FILE_DENIED: usize = 2;
 pub const FILE_NOT_TEXT: usize = 3;
 pub const FILE_FAILED: usize = 4;
+pub const FILE_NOT_DIRECTORY: usize = 5;
 
 #[derive(Clone, Debug)]
 pub struct Local {
@@ -404,6 +405,40 @@ pub enum Builtin {
     BytesHex,
     /// `b.to_array()`: each byte as an i64.
     BytesToArray,
+    /// `s.replace(old: a, new: b)`: every `a`, left to right, as `b`; panics with `message` when
+    /// `a` is empty.
+    StrReplace {
+        message: String,
+    },
+    /// ASCII letters only (`case_text`); other characters stay.
+    StrUpper,
+    StrLower,
+    /// `s.chars()`: each character as a str of its own.
+    StrChars,
+    /// `xs.join(sep)` on [str].
+    ArrJoin,
+    /// `x.fixed(n)`: `n` digits after the point (`fixed_text`); panics with `message` unless n is
+    /// in 0..=17.
+    FloatFixed {
+        message: String,
+    },
+    /// `xs.sorted()` on [i64], [f64] or [str]: ascending and stable; floats panic with `message`
+    /// on NaN.
+    ArrSorted {
+        message: String,
+    },
+    /// `xs.reversed()`
+    ArrReversed,
+    /// Like Print, to stderr.
+    EPrint,
+    /// Ends the program with the code; panics naming `site` outside 0..=255, or in a test.
+    Exit {
+        site: String,
+    },
+    /// The environment variable's value: Option[str]. `ANVIL_` names are the runtime's: None.
+    Env,
+    /// The names in a directory, sorted: Result[[str], FileError].
+    ListDir,
 }
 
 #[derive(Clone, Debug)]
@@ -557,6 +592,49 @@ pub fn split_message(site: &str) -> String {
 pub fn duplicate_key_message(site: &str) -> String {
     format!("duplicate key in the map literal at {site}")
 }
+pub fn exit_message(code: i64, site: &str) -> String {
+    format!("exit({code}) is outside the exit code range 0..=255 at {site}")
+}
+pub fn exit_in_test_message(code: i64, site: &str) -> String {
+    format!("exit({code}) in a test at {site}; a test ends by returning")
+}
+
+/// Names `env` never reads: the runtime's own settings.
+pub const RESERVED_ENV_PREFIX: &str = "ANVIL_";
+
+pub fn replace_message(site: &str) -> String {
+    format!("replace with an empty `old` at {site}")
+}
+pub fn fixed_message(site: &str) -> String {
+    format!("fixed takes 0..=17 digits at {site}")
+}
+pub fn sorted_message(site: &str) -> String {
+    format!("sorted found nan, which has no order, at {site}")
+}
+
+/// `to_upper` and `to_lower`: ASCII letters change, every other character stays. Mirrors
+/// anvil_str_case.
+pub fn case_text(s: &str, upper: bool) -> String {
+    if upper {
+        s.to_ascii_uppercase()
+    } else {
+        s.to_ascii_lowercase()
+    }
+}
+
+/// `x.fixed(n)`: the value rounded to n digits after the point, the nearest such decimal (ties
+/// to even, as the exact binary value decides); `nan`, `inf` and `-inf` as in print. Mirrors
+/// anvil_f64_fixed.
+pub fn fixed_text(v: f64, n: usize) -> String {
+    if v.is_nan() {
+        return "nan".into();
+    }
+    if v.is_infinite() {
+        return if v > 0.0 { "inf".into() } else { "-inf".into() };
+    }
+    format!("{v:.n$}")
+}
+
 /// Mirrors anvil_check_shift in the C runtime.
 pub fn shift_message(n: i64, site: &str) -> String {
     format!("shift by {n} at {site}; shifts take 0..=63")

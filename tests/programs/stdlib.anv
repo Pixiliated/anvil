@@ -1,0 +1,73 @@
+// The standard library's text, array and system functions. The golden gives main one variable
+// (golden/tests/programs/stdlib.anv.in); writes stay in memory under golden check.
+unit m;
+
+fn show_i64(xs: [i64]) -> str {
+    var parts: [str] = [];
+    for x in xs {
+        parts.push("{x}");
+    }
+    return "[{parts.join(", ")}]";
+}
+
+fn show_f64(xs: [f64]) -> str {
+    var parts: [str] = [];
+    for x in xs {
+        parts.push("{x}");
+    }
+    return "[{parts.join(", ")}]";
+}
+
+fn listing(path: str) -> str uses fs {
+    var out: str = "";
+    match list_dir(path) {
+        Ok(value: names) => { out = "[{names.join(" ")}]"; }
+        Err(error) => {
+            if error == FileError.NotFound {
+                out = "not found";
+            } else if error == FileError.NotDirectory {
+                out = "not a directory";
+            } else {
+                out = "failed";
+            }
+        }
+    }
+    return out;
+}
+
+fn main() uses io, fs {
+    let s: str = "Hello, wörld";
+    print(s.to_upper());
+    print(s.to_lower());
+    print(s.replace(old: "l", new: "L"));
+    print("a-b-c".replace(old: "-", new: ""));
+    print("aaa".replace(old: "aa", new: "b"));
+    let cs: [str] = "héllo".chars();
+    print("{cs.len()} chars, second [{cs[1]}], reversed {cs.reversed().join("")}");
+    print(["x", "y", "z"].join(", "));
+    print(show_i64([5, -2, 9, 0, -2].sorted()));
+    print(show_f64([2.5, 0.0, 0.001, -0.0, -7.25].sorted()));
+    print(["pear", "Apple", "apple", "äpfel", "fig"].sorted().join(" "));
+    print(show_i64([1, 2, 3].reversed()));
+    print(3.14159.fixed(2));
+    print(2.5.fixed(0));
+    print(0.125.fixed(2));
+    print((-1.0).fixed(3));
+    print(100.0[m].fixed(1));
+
+    match env("HOME") {
+        Some(value: home) => { print("HOME is {home}"); }
+        None => { print("no HOME"); }
+    }
+    print("MISSING set: {env("MISSING") != None}, ANVIL_FS readable: {env("ANVIL_FS") != None}");
+
+    print(listing("tests/programs/data"));
+    match write_file(path: "tests/programs/data/new.txt", text: "x") {
+        Ok(value: _) => { print(listing("tests/programs/data")); }
+        Err(error: _) => { print("write failed"); }
+    }
+    print(listing("tests/programs/data/scores.txt"));
+    print(listing("tests/programs/nowhere"));
+    eprint("warning: this line goes to stderr");
+    eprint(42);
+}

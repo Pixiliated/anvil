@@ -288,10 +288,11 @@ impl AnvilServer {
         A panic, or running out of steps, is a tool error.")]
     async fn run(&self, Parameters(a): Parameters<RunArgs>) -> Result<CallToolResult, ErrorData> {
         self.op(move |root| {
-            let mut out = Vec::new();
+            let (mut out, mut err) = (Vec::new(), Vec::new());
             let input = program_input(a.args, a.input);
-            let mut report = anvil_ops::run(root, &a.file, Some(steps(a.max_steps)), &input, &mut out);
+            let mut report = anvil_ops::run(root, &a.file, Some(steps(a.max_steps)), &input, (&mut out, &mut err));
             report.json["stdout"] = serde_json::json!(String::from_utf8_lossy(&out));
+            report.json["stderr"] = serde_json::json!(String::from_utf8_lossy(&err));
             report
         })
         .await

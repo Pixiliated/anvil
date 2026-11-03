@@ -1,0 +1,5 @@
+// expect: E0406
+fn main() uses io {
+    let flags: [bool] = [true, false];
+    print(flags.sorted().len());
+}

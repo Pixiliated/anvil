@@ -22,6 +22,7 @@ fn describe(e: FileError) -> str {
         Denied => { s = "denied"; }
         NotText => { s = "not UTF-8 text"; }
         Failed => { s = "failed"; }
+        NotDirectory => { s = "not a directory"; }
     }
     return s;
 }

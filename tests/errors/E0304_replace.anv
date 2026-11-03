@@ -1,0 +1,5 @@
+// expect: E0304
+// resolve: mechanical
+fn main() uses io {
+    print("a.b".replace(".", "/"));
+}

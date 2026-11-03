@@ -1,0 +1,16 @@
+// exit ends the program from anywhere, with a code; eprint says why on stderr.
+fn index_of(xs: [i64], want: i64) -> i64 uses io {
+    for i in 0..xs.len() {
+        if xs[i] == want {
+            return i;
+        }
+    }
+    eprint("error: {want} is not in the list");
+    exit(3);
+}
+
+fn main() uses io {
+    print(index_of(xs: [4, 5, 6], want: 5));
+    print(index_of(xs: [4, 5, 6], want: 7));
+    print("never printed");
+}

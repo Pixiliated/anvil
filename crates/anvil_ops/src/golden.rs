@@ -8,6 +8,7 @@
 //! ```text
 //! exit: 101
 //! panic: index 3 out of bounds for length 3 at src/main.anv:7:22
+//! stderr: a line the program wrote with eprint
 //! ---
 //! everything the program printed, byte for byte
 //! ```
@@ -19,6 +20,7 @@
 //! ```text
 //! arg: --verbose
 //! arg: two words
+//! env: HOME=/home/ada
 //! ---
 //! the program's stdin, byte for byte
 //! ```
@@ -37,11 +39,14 @@ use std::process::{Command, Stdio};
 pub struct Input {
     pub args: Vec<String>,
     pub stdin: Vec<u8>,
+    /// The environment the run sees: nothing else.
+    pub env: Vec<(String, String)>,
 }
 
 impl Input {
     pub fn parse(bytes: &[u8]) -> Result<Input, String> {
         let mut args = Vec::new();
+        let mut env = Vec::new();
         let mut rest = bytes;
         loop {
             let end =
@@ -49,11 +54,17 @@ impl Input {
             let line = std::str::from_utf8(&rest[..end]).map_err(|_| "a line before `---` is not UTF-8")?;
             rest = &rest[end + 1..];
             if line == "---" {
-                return Ok(Input { args, stdin: rest.to_vec() });
+                return Ok(Input { args, stdin: rest.to_vec(), env });
             }
-            match line.strip_prefix("arg: ") {
-                Some(a) => args.push(a.to_string()),
-                None => return Err(format!("unknown line `{line}`; expected `arg: ` or `---`")),
+            if let Some(a) = line.strip_prefix("arg: ") {
+                args.push(a.to_string());
+            } else if let Some(kv) = line.strip_prefix("env: ") {
+                let Some((k, v)) = kv.split_once('=').filter(|(k, _)| !k.is_empty()) else {
+                    return Err(format!("`{line}` is not `env: NAME=value`"));
+                };
+                env.push((k.to_string(), v.to_string()));
+            } else {
+                return Err(format!("unknown line `{line}`; expected `arg: `, `env: ` or `---`"));
             }
         }
     }
@@ -79,6 +90,8 @@ pub struct Output {
     pub exit: i32,
     pub panic: Option<String>,
     pub stdout: String,
+    /// What eprint wrote (the panic message is apart).
+    pub stderr: String,
 }
 
 impl Output {
@@ -86,6 +99,9 @@ impl Output {
         let mut s = format!("exit: {}\n", self.exit);
         if let Some(p) = &self.panic {
             s.push_str(&format!("panic: {p}\n"));
+        }
+        for line in self.stderr.lines() {
+            s.push_str(&format!("stderr: {line}\n"));
         }
         s.push_str("---\n");
         s.push_str(&self.stdout);
@@ -96,20 +112,24 @@ impl Output {
         let (head, stdout) = text.split_once("---\n").ok_or("no `---` line separating the header from the output")?;
         let mut exit = None;
         let mut panic = None;
+        let mut stderr = String::new();
         for line in head.lines() {
             if let Some(v) = line.strip_prefix("exit: ") {
                 exit = Some(v.parse().map_err(|_| format!("bad exit code `{v}`"))?);
             } else if let Some(v) = line.strip_prefix("panic: ") {
                 panic = Some(v.to_string());
+            } else if let Some(v) = line.strip_prefix("stderr: ") {
+                stderr.push_str(v);
+                stderr.push('\n');
             } else {
-                return Err(format!("unknown header line `{line}`; expected `exit:` or `panic:`"));
+                return Err(format!("unknown header line `{line}`; expected `exit:`, `panic:` or `stderr:`"));
             }
         }
-        Ok(Output { exit: exit.ok_or("no `exit:` line")?, panic, stdout: stdout.to_string() })
+        Ok(Output { exit: exit.ok_or("no `exit:` line")?, panic, stdout: stdout.to_string(), stderr })
     }
 
     pub fn to_json(&self) -> Value {
-        json!({ "exit": self.exit, "panic": self.panic, "stdout": self.stdout })
+        json!({ "exit": self.exit, "panic": self.panic, "stdout": self.stdout, "stderr": self.stderr })
     }
 }
 
@@ -126,16 +146,22 @@ pub fn difference(want: &Output, got: &Output) -> Option<String> {
     if want.exit != got.exit {
         return Some(format!("exits with {}, approved {}", got.exit, want.exit));
     }
-    if want.stdout != got.stdout {
-        let (w, g): (Vec<&str>, Vec<&str>) = (want.stdout.split('\n').collect(), got.stdout.split('\n').collect());
-        for i in 0..w.len().max(g.len()) {
-            match (w.get(i), g.get(i)) {
-                (Some(a), Some(b)) if a == b => continue,
-                (Some(a), Some(b)) => return Some(format!("output line {}: printed `{b}`, approved `{a}`", i + 1)),
-                (Some(a), None) => return Some(format!("output stops before line {}; approved `{a}`", i + 1)),
-                (None, Some(b)) => return Some(format!("output has an extra line {}: `{b}`", i + 1)),
-                (None, None) => unreachable!(),
-            }
+    lines_differ("output", &want.stdout, &got.stdout).or_else(|| lines_differ("stderr", &want.stderr, &got.stderr))
+}
+
+/// The first line where `got` differs from `want`.
+fn lines_differ(what: &str, want: &str, got: &str) -> Option<String> {
+    if want == got {
+        return None;
+    }
+    let (w, g): (Vec<&str>, Vec<&str>) = (want.split('\n').collect(), got.split('\n').collect());
+    for i in 0..w.len().max(g.len()) {
+        match (w.get(i), g.get(i)) {
+            (Some(a), Some(b)) if a == b => continue,
+            (Some(a), Some(b)) => return Some(format!("{what} line {}: printed `{b}`, approved `{a}`", i + 1)),
+            (Some(a), None) => return Some(format!("{what} stops before line {}; approved `{a}`", i + 1)),
+            (None, Some(b)) => return Some(format!("{what} has an extra line {}: `{b}`", i + 1)),
+            (None, None) => unreachable!(),
         }
     }
     None
@@ -164,18 +190,22 @@ pub fn interpret(
 ) -> Result<(Output, Counts), String> {
     let mut ffi = crate::c_functions(&program)?;
     let (root, input) = (root.to_path_buf(), input.clone());
-    let (outcome, bytes, counts) = anvil_interp::run_on_big_stack(move || {
+    let (outcome, bytes, err, counts) = anvil_interp::run_on_big_stack(move || {
         let mut buf = Vec::new();
+        let mut err = Vec::new();
         let mut rec = Recorder::new(&program);
         let mut stdin = std::io::Cursor::new(input.stdin.as_slice());
-        let host = crate::checked_host(&mut ffi, &root, &input.args, Some(&mut stdin));
+        let host = crate::checked_host(&mut ffi, &root, &input.args, Some(&mut stdin), &mut err, &input.env);
         let o = anvil_interp::run_main_recorded(&program, &mut buf, max_steps, Some(&mut rec), host);
-        (o, buf, Counts::of(&rec))
+        (o, buf, err, Counts::of(&rec))
     });
     let stdout = String::from_utf8_lossy(&bytes).into_owned();
+    let stderr = String::from_utf8_lossy(&err).into_owned();
     match outcome {
-        anvil_interp::Outcome::Exit(exit) => Ok((Output { exit, panic: None, stdout }, counts)),
-        anvil_interp::Outcome::Panicked(m) => Ok((Output { exit: PANIC_EXIT_CODE, panic: Some(m), stdout }, counts)),
+        anvil_interp::Outcome::Exit(exit) => Ok((Output { exit, panic: None, stdout, stderr }, counts)),
+        anvil_interp::Outcome::Panicked(m) => {
+            Ok((Output { exit: PANIC_EXIT_CODE, panic: Some(m), stdout, stderr }, counts))
+        }
         anvil_interp::Outcome::OutOfSteps(n) => Err(anvil_interp::step_limit_message(n)),
     }
 }
@@ -277,7 +307,7 @@ pub fn native(program: &Program, scratch: &Path, name: &str, root: &Path, input:
     let exe = scratch.join(format!("{}{}", name.replace(['/', '\\', '.'], "_"), std::env::consts::EXE_SUFFIX));
     anvil_codegen::build_exe(program, &exe, &scratch.join("work"), false)?;
     let args: Vec<&str> = input.args.iter().map(String::as_str).collect();
-    let result = run_native(&exe, &args, root, &input.stdin);
+    let result = run_native(&exe, &args, root, &input.stdin, &input.env);
     let _ = std::fs::remove_file(&exe);
     result
 }
@@ -285,11 +315,20 @@ pub fn native(program: &Program, scratch: &Path, name: &str, root: &Path, input:
 /// Runs a built executable as a checked run (the leak check on, the virtual clock, writes kept in
 /// memory) in `cwd` with `stdin`, and reads what it did. Err for a runtime error (a leak or
 /// refcount fault: a bug in Anvil, not in the program) or odd stderr.
-pub(crate) fn run_native(exe: &Path, args: &[&str], cwd: &Path, stdin: &[u8]) -> Result<Output, String> {
+pub(crate) fn run_native(
+    exe: &Path,
+    args: &[&str],
+    cwd: &Path,
+    stdin: &[u8],
+    env: &[(String, String)],
+) -> Result<Output, String> {
     let exe = std::path::absolute(exe).map_err(|e| format!("cannot find {}: {e}", exe.display()))?;
+    // The environment is what the run is given and nothing else, as in the interpreter.
     let mut child = Command::new(&exe)
         .args(args)
         .current_dir(cwd)
+        .env_clear()
+        .envs(env.iter().map(|(k, v)| (k, v)))
         .env("ANVIL_CHECK_LEAKS", "1")
         .env("ANVIL_CLOCK", "virtual")
         .env("ANVIL_FS", "memory")
@@ -310,15 +349,21 @@ pub(crate) fn run_native(exe: &Path, args: &[&str], cwd: &Path, stdin: &[u8]) ->
     let stderr = String::from_utf8_lossy(&out.stderr);
     let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
     let exit = out.status.code().ok_or("the executable was killed")?;
-    if let Some(m) = stderr.strip_prefix("anvil runtime error: ") {
-        return Err(format!("runtime error: {}", m.trim_end()));
+    if let Some(at) = stderr.find("anvil runtime error: ") {
+        return Err(format!("runtime error: {}", stderr[at + 21..].trim_end()));
     }
-    let panic = match stderr.strip_prefix("panic: ") {
-        Some(m) => Some(m.trim_end_matches('\n').to_string()),
-        None if stderr.is_empty() => None,
-        None => return Err(format!("unexpected stderr: {stderr}")),
-    };
-    Ok(Output { exit, panic, stdout })
+    // A panic is the last line of stderr; what eprint wrote comes before it.
+    let mut err = stderr.into_owned();
+    let mut panic = None;
+    if exit == PANIC_EXIT_CODE {
+        let body = err.strip_suffix('\n').unwrap_or(&err);
+        let start = body.rfind('\n').map_or(0, |i| i + 1);
+        if let Some(m) = body[start..].strip_prefix("panic: ") {
+            panic = Some(m.to_string());
+            err.truncate(start);
+        }
+    }
+    Ok(Output { exit, panic, stdout, stderr: err })
 }
 
 pub fn path(project: &Project, file: &str) -> PathBuf {

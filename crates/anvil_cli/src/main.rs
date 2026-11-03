@@ -133,7 +133,7 @@ fn dispatch(p: &Parsed) -> Result<Report, String> {
         |own_stdin: bool| ProgramInput { args: p.rest.clone(), file: text("input").map(String::from), own_stdin };
     Ok(match p.command.name {
         "check" => anvil_ops::check(root, file),
-        "run" => anvil_ops::run(root, file, steps, &input(true), &mut std::io::stdout()),
+        "run" => anvil_ops::run(root, file, steps, &input(true), (&mut std::io::stdout(), &mut std::io::stderr())),
         "build" => {
             let out = p.options.get("out").and_then(|v| v.as_deref());
             anvil_ops::build(root, file, out, p.options.contains_key("asm"))

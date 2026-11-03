@@ -1,4 +1,4 @@
-# Anvil language specification (v0.17)
+# Anvil language specification (v0.18)
 
 Anvil is a small, compiled, general-purpose language designed to be written mostly by AI agents
 and read by humans. Its rules aim at three things: one obvious way to write each thing, code
@@ -225,8 +225,8 @@ do. There are four:
 
 | Effect | Performed by |
 |---|---|
-| `io` | `print`, `args`, `read_line` |
-| `fs` | `read_file`, `write_file` |
+| `io` | `print`, `eprint`, `exit`, `args`, `env`, `read_line` |
+| `fs` | `read_file`, `write_file`, `read_bytes`, `write_bytes`, `list_dir` |
 | `clock` | `clock_ns` |
 | `random` | `random_below`, `random_f64`, `random_seed` |
 
@@ -250,10 +250,11 @@ effects gives the same result for the same arguments. `uses` lists them in the o
 allocation is too slow or must not fail. The checker holds it to that (E0333): interpolation,
 joining strings or bytes, array and map literals, slices, `split`, `trim`, `keys`, `values`,
 `push`, `pop`, `set`, `remove`, `args`, `read_line`, `read_file`, `read_bytes`, `bytes_of`,
-`to_bytes`, `to_str`, `hex`, `to_array` and assigning to an array element may allocate;
+`to_bytes`, `to_str`, `hex`, `to_array`, `replace`, `to_upper`, `to_lower`, `chars`, `join`,
+`fixed`, `sorted`, `reversed`, `env`, `list_dir` and assigning to an array element may allocate;
 arithmetic, bit operations, comparisons, struct fields, indexing, `len`, the str searches,
 `parse_i64`, `parse_f64`, `get`, `has`, `print`, `write_file`, `write_bytes` and the other
-built-ins never do. A
+built-ins (`eprint` and `exit` among them) never do. A
 noalloc function may only call functions that are noalloc too (E0334). Allocation is not an
 effect: most functions allocate, so it is the promise not to that a signature carries.
 
@@ -334,6 +335,9 @@ let mid: [i64] = xs[1..3];   // a copy of elements 1 and 2
 - **Slices** `xs[from..to]` copy elements `from` up to, not including, `to`. Both bounds are
   required; `from < 0`, `to > len` or `from > to` panics with the range, the length and the
   location. A slice is not a place: it cannot be assigned.
+- `xs.reversed()` is a reversed copy. `xs.sorted()`, on `[i64]`, `[f64]` and `[str]`, is a
+  sorted copy, ascending (str bytewise) and stable, so equal values keep their order (`0.0` and
+  `-0.0` too); a NaN panics. To sort by anything else, write the sort with a function value.
 
 ## Text
 
@@ -350,6 +354,11 @@ either bound falls inside a character (`"héllo"[0..2]`).
 | `s.split(sep)` | `[str]`: the pieces between occurrences of `sep`, left to right; `"a,,b"` gives `["a", "", "b"]`, `""` gives `[""]`; an empty `sep` panics |
 | `s.trim()` | `str` without the spaces, tabs, `\r` and `\n` at either end |
 | `s.parse_i64()` | `Option[i64]`: `Some` for an optional `-` and one or more ASCII digits in range (`"007"` is 7); nothing else, so no `+`, `_` or spaces |
+| `s.replace(old: a, new: b)` | `str`: every `a`, left to right, as `b`; an empty `a` panics |
+| `s.to_upper()`, `s.to_lower()` | `str` with the ASCII letters changed; other characters stay |
+| `s.chars()` | `[str]`: each character as a str of its own |
+| `xs.join(sep)` | on `[str]`: the parts with `sep` between them |
+| `x.fixed(n)` | on `f64`: the nearest decimal with `n` digits after the point (0..=17, else a panic; ties go to even), without the unit: `3.14159.fixed(2)` is `"3.14"`; `nan`, `inf` and `-inf` as print writes them |
 | `s.parse_f64()` | `Option[f64]`: `Some` for an optional `-`, digits, optionally `.` and digits, and optionally `e` or `E`, a sign and digits (`"-2.5e3"`), read as the nearest double, which must be finite; not `.5`, `1.`, `inf` or `nan`. Every float's text reads back as that float |
 
 **Interpolation** is the one way to build text from values: `"{name} is {age} years old"`.
@@ -580,6 +589,10 @@ target's bounds are checked.
 | Call | Meaning |
 |---|---|
 | `print(x)` | writes the text of `x` (`i64`, `f64`, `bool` or `str`), then a newline; needs `uses io` |
+| `eprint(x)` | the same, to stderr; needs `uses io` |
+| `exit(code)` | ends the program with the code (0..=255, else a panic); nothing after it runs, so it ends a function's path like `return`; in a test it is a failure; needs `uses io` |
+| `env(name)` | `Option[str]`: the environment variable; names starting `ANVIL_` are the runtime's and read as `None`; needs `uses io` |
+| `list_dir(path)` | `Result[[str], FileError]`: the names in the directory, sorted bytewise; needs `uses fs` |
 | `assert(cond)` | panics if `cond` is false |
 | `sqrt(x)` | square root of an `f64`, halving the unit |
 | `abs(x)` | absolute value of `i64` (panics on `i64` minimum) or `f64` |
@@ -626,23 +639,26 @@ fn main() uses io, fs {
   `/` separates directories on every platform. Text is UTF-8 both ways and written byte for byte.
 - A failure is a `FileError`, a built-in enum whose variants are, in order, `NotFound` (no such
   file, or no such directory to write it in), `IsDirectory`, `Denied`, `NotText` (the file is
-  not UTF-8) and `Failed` (anything else). An empty path is `NotFound`.
+  not UTF-8), `Failed` (anything else) and `NotDirectory` (`list_dir` of a file). An empty path
+  is `NotFound`.
 - **Checked runs** (tests, goldens, `trace` and `profile`) stay deterministic and never change
   the disk: the working directory is the root the command runs in (the project's root), files
   are read from it, and writes are kept in memory for the run, where later reads of the same
-  path (with `\` read as `/`) find them. A write still fails as the disk would make it fail: the
+  path (with `\` read as `/`) find them, and `list_dir` of the directory written lists them. A write still fails as the disk would make it fail: the
   directory it goes in must exist, and a directory cannot be overwritten. Tests have no
-  arguments and an empty stdin. Executables keep their writes in memory too when
+  arguments, an empty stdin and an empty environment. Executables keep their writes in memory too when
   `ANVIL_FS=memory` is set (any other value is an error).
 - `anvil run file.anv -- a b` gives main the arguments `a` and `b`; stdin is the command's own,
   or a file with `--input FILE` (over MCP: `args` and `input`, and stdin is empty without it).
-  `trace` and `profile` take the same, with stdin empty unless `--input` is given. A golden's
-  arguments and stdin are in `golden/<file>.in` (see Projects).
+  `trace` and `profile` take the same, with stdin empty unless `--input` is given, and an empty
+  environment. A golden's arguments, environment and stdin are in `golden/<file>.in` (see
+  Projects); `anvil run` and executables see the process's environment.
 
 ## Programs, panics and exit codes
 
 `main` takes no parameters and returns nothing or `i64`. Its `i64` result is the exit code and
-must be in 0..=255. A panic writes `panic: <message>` to stderr and exits with code 101.
+must be in 0..=255; `exit(code)` ends the program earlier. A panic writes `panic: <message>` to
+stderr and exits with code 101.
 Panic messages name the source location: `index 3 out of bounds for length 3 at
 main.anv:12:9`.
 
@@ -771,9 +787,10 @@ anvil watch [--native] [--runs N]           verify, and again after every change
 ```
 
 A **golden** (`golden/<file>.out`) is a program's approved output: its exit code, its panic
-message if any, and every byte it printed. A program that reads arguments or stdin is given them
-by `golden/<file>.in`, written by hand: a line `arg: VALUE` per argument, then `---`, then the
-stdin byte for byte. Without one, it runs with neither. `golden check --native` also builds each program and
+message if any, the lines it wrote with eprint (`stderr: ...`), and every byte it printed. A
+program that reads arguments, the environment or stdin is given them by `golden/<file>.in`,
+written by hand: a line `arg: VALUE` per argument and `env: NAME=value` per variable, then
+`---`, then the stdin byte for byte. Without one, it runs with none of them. `golden check --native` also builds each program and
 requires the executable to match and to free every object. Only `golden approve` writes one,
 after the output has been read. The **record** (`anvil_record.db`, not checked in) keeps
 milestones, decisions, and every problem `verify` finds, with when it was first seen and when it

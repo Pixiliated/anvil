@@ -34,6 +34,10 @@ pub const BUILTINS: &[&str] = &[
     "bytes_of",
     "read_bytes",
     "write_bytes",
+    "eprint",
+    "exit",
+    "env",
+    "list_dir",
 ];
 /// The effects `uses` can list, in the order it lists them.
 pub const EFFECTS: &[&str] = &["io", "fs", "clock", "random"];
@@ -61,6 +65,10 @@ pub const BUILTIN_SIGNATURES: &[(&str, &str)] = &[
     ("bytes_of", "bytes_of(xs: [i64]) -> bytes: each value 0..=255 as a byte"),
     ("read_bytes", "read_bytes(path: str) -> Result[bytes, FileError] uses fs: the whole file"),
     ("write_bytes", "write_bytes(path: str, data: bytes) -> Result[i64, FileError] uses fs: replaces the file"),
+    ("eprint", "eprint(x) uses io: like print, to stderr"),
+    ("exit", "exit(code: i64) uses io: ends the program with the code"),
+    ("env", "env(name: str) -> Option[str] uses io: an environment variable"),
+    ("list_dir", "list_dir(path: str) -> Result[[str], FileError] uses fs: the names in a directory, sorted"),
     ("Some", "Some(value) -> Option[T]"),
     ("None", "None: Option[T]"),
     ("Ok", "Ok(value) -> Result[T, E]"),
@@ -80,6 +88,14 @@ pub const METHODS: &[(&str, &str, &str)] = &[
     ("str", "parse_i64", "parse_i64() -> Option[i64]"),
     ("str", "parse_f64", "parse_f64() -> Option[f64]"),
     ("str", "to_bytes", "to_bytes() -> bytes"),
+    ("str", "replace", "replace(old: str, new: str) -> str"),
+    ("str", "to_upper", "to_upper() -> str"),
+    ("str", "to_lower", "to_lower() -> str"),
+    ("str", "chars", "chars() -> [str]"),
+    ("array", "reversed", "reversed() -> [T]"),
+    ("array", "sorted", "sorted() -> [T]"),
+    ("strings", "join", "join(sep: str) -> str"),
+    ("f64", "fixed", "fixed(digits: i64) -> str"),
     ("i64", "xor", "xor(other: i64) -> i64"),
     ("i64", "unsigned_shr", "unsigned_shr(n: i64) -> i64"),
     ("i64", "wrapping_add", "wrapping_add(other: i64) -> i64"),
@@ -3776,7 +3792,8 @@ impl<'a> Checker<'a> {
         }
         // Recorded first, so an error in an argument cannot also report the effect as unused.
         match name {
-            "print" => self.note_effect(b, Effect::Io, callee.span, "print"),
+            "print" | "eprint" | "exit" | "env" => self.note_effect(b, Effect::Io, callee.span, &format!("`{name}`")),
+            "list_dir" => self.note_effect(b, Effect::Fs, callee.span, "`list_dir`"),
             "clock_ns" => self.note_effect(b, Effect::Clock, callee.span, "clock_ns"),
             "random_below" | "random_f64" | "random_seed" => {
                 self.note_effect(b, Effect::Random, callee.span, &format!("`{name}`"))
@@ -3785,17 +3802,18 @@ impl<'a> Checker<'a> {
             "read_file" | "read_bytes" => self.note_effect(b, Effect::Fs, callee.span, &format!("`{name}`")),
             _ => {}
         }
-        if matches!(name, "args" | "read_line" | "read_file" | "read_bytes" | "bytes_of") {
+        if matches!(name, "args" | "read_line" | "read_file" | "read_bytes" | "bytes_of" | "env" | "list_dir") {
             self.note_alloc(b, callee.span, &format!("`{name}`"));
         }
         let vals: Vec<Expr> = args.iter().map(|a| self.expr(b, &a.value)).collect();
         if vals.iter().any(|v| v.ty == Ty::Error) {
             return Self::err_expr();
         }
-        if name == "print" {
+        if name == "print" || name == "eprint" {
             if vals.len() != 1 {
-                let mut d = Diagnostic::new("E0303", e.span, format!("print takes one argument, found {}", vals.len()))
-                    .note("build the line with interpolation: print(\"x = {x}\")", None);
+                let mut d =
+                    Diagnostic::new("E0303", e.span, format!("{name} takes one argument, found {}", vals.len()))
+                        .note("build the line with interpolation: print(\"x = {x}\")", None);
                 if let Some(text) = self.as_interpolation(args) {
                     let inner = Span::new(args[0].value.span.start, args.last().unwrap().value.span.end);
                     d = d.fix1(FixKind::Mechanical, "join the arguments into one interpolated string", inner, text);
@@ -3818,12 +3836,17 @@ impl<'a> Checker<'a> {
                     _ => "only values have text",
                 };
                 self.err(
-                    Diagnostic::new("E0407", args[0].value.span, format!("print takes i64, f64, bool or str, not {t}"))
-                        .note(hint, None),
+                    Diagnostic::new(
+                        "E0407",
+                        args[0].value.span,
+                        format!("{name} takes i64, f64, bool or str, not {t}"),
+                    )
+                    .note(hint, None),
                 );
                 return Self::err_expr();
             }
-            return Expr { kind: ExprKind::Builtin(Builtin::Print, vals), ty: Ty::Void };
+            let b = if name == "print" { Builtin::Print } else { Builtin::EPrint };
+            return Expr { kind: ExprKind::Builtin(b, vals), ty: Ty::Void };
         }
         if name == "clock_ns" || name == "random_f64" || name == "args" || name == "read_line" {
             if !vals.is_empty() {
@@ -3934,6 +3957,26 @@ impl<'a> Checker<'a> {
                     if name == "read_file" { (Ty::Str, Builtin::ReadFile) } else { (Ty::Bytes, Builtin::ReadBytes) };
                 let ty = self.result_of(content, Ty::Enum(self.file_error));
                 Expr { kind: ExprKind::Builtin(b, vec![x]), ty }
+            }
+            "exit" => {
+                if t != Ty::I64 {
+                    return bad(self, "an i64 exit code");
+                }
+                Expr { kind: ExprKind::Builtin(Builtin::Exit { site }, vec![x]), ty: Ty::Void }
+            }
+            "env" => {
+                if t != Ty::Str {
+                    return bad(self, "a str name");
+                }
+                let ty = self.option_of(Ty::Str);
+                Expr { kind: ExprKind::Builtin(Builtin::Env, vec![x]), ty }
+            }
+            "list_dir" => {
+                if t != Ty::Str {
+                    return bad(self, "a str path");
+                }
+                let ty = self.result_of(Ty::Array(Box::new(Ty::Str)), Ty::Enum(self.file_error));
+                Expr { kind: ExprKind::Builtin(Builtin::ListDir, vec![x]), ty }
             }
             "bytes_of" => {
                 if t != Ty::Array(Box::new(Ty::I64)) {
@@ -4246,8 +4289,9 @@ impl<'a> Checker<'a> {
         if self.has_methods(&rt) {
             return self.user_method(b, e, receiver, (rt, pre), method, args);
         }
-        // `set` names its two arguments, like any call with two parameters; the rest take one or none.
-        if m != "set" {
+        // `set` and `replace` name their two arguments, like any call with two parameters; the
+        // rest take one or none.
+        if m != "set" && m != "replace" {
             for a in args {
                 if let Some(n) = &a.name {
                     self.err(Diagnostic::new("E0304", n.span, format!("`{m}` takes positional arguments")).fix1(
@@ -4261,9 +4305,10 @@ impl<'a> Checker<'a> {
         }
         let want_args = match m {
             "pop" | "len" | "keys" | "values" | "trim" | "parse_i64" | "parse_f64" | "to_bytes" | "to_str" | "hex"
-            | "to_array" => Some(0),
+            | "to_array" | "to_upper" | "to_lower" | "chars" | "sorted" | "reversed" => Some(0),
             "push" | "remove" | "has" | "get" | "contains" | "find" | "starts_with" | "ends_with" | "split" | "xor"
-            | "unsigned_shr" | "wrapping_add" | "wrapping_sub" | "wrapping_mul" => Some(1),
+            | "unsigned_shr" | "wrapping_add" | "wrapping_sub" | "wrapping_mul" | "join" | "fixed" => Some(1),
+            "replace" => Some(2),
             _ => None,
         };
         if let Some(want) = want_args {
@@ -4290,8 +4335,29 @@ impl<'a> Checker<'a> {
             return Self::err_expr();
         }
         let site = self.site(e.span);
+        if let ("replace", Ty::Str) = (m, &x.ty) {
+            let params = [("old".to_string(), Ty::Str), ("new".to_string(), Ty::Str)];
+            let ok = self.check_args("replace", e.span, args, &params, None) == Some(true);
+            let mut vals = vec![x];
+            vals.extend(args.iter().map(|a| self.expect(b, &a.value, &Ty::Str)));
+            if !ok {
+                return Self::err_expr();
+            }
+            self.note_alloc(b, e.span, "`replace`");
+            let builtin = Builtin::StrReplace { message: replace_message(&site) };
+            return Expr { kind: ExprKind::Builtin(builtin, vals), ty: Ty::Str };
+        }
         let (builtin, ty) = match (m, x.ty.clone()) {
             ("len", Ty::Str | Ty::Bytes | Ty::Array(_) | Ty::Map(..)) => (Builtin::Len, Ty::I64),
+            ("to_upper", Ty::Str) => (Builtin::StrUpper, Ty::Str),
+            ("to_lower", Ty::Str) => (Builtin::StrLower, Ty::Str),
+            ("chars", Ty::Str) => (Builtin::StrChars, Ty::Array(Box::new(Ty::Str))),
+            ("join", Ty::Array(e)) if *e == Ty::Str => (Builtin::ArrJoin, Ty::Str),
+            ("fixed", Ty::F64(_)) => (Builtin::FloatFixed { message: fixed_message(&site) }, Ty::Str),
+            ("reversed", t @ Ty::Array(_)) => (Builtin::ArrReversed, t),
+            ("sorted", Ty::Array(e)) if matches!(*e, Ty::I64 | Ty::F64(_) | Ty::Str) => {
+                (Builtin::ArrSorted { message: sorted_message(&site) }, Ty::Array(e))
+            }
             ("xor" | "unsigned_shr", Ty::I64) => {
                 let other = self.expect(b, &args[0].value, &Ty::I64);
                 let op = if m == "xor" { BitOp::Xor } else { BitOp::UShr };
@@ -4323,9 +4389,13 @@ impl<'a> Checker<'a> {
                 }
                 let t = self.show(&x.ty);
                 let have = match x.ty {
-                    Ty::Array(_) => "arrays have len, push and pop",
+                    Ty::Array(_) => {
+                        "arrays have len, push, pop and reversed; sorted on [i64], [f64] and [str]; join on [str]"
+                    }
+                    Ty::F64(_) => "f64 has fixed",
                     Ty::Str => {
-                        "str has len, contains, find, starts_with, ends_with, split, trim, parse_i64, parse_f64 and to_bytes"
+                        "str has len, contains, find, starts_with, ends_with, split, trim, parse_i64, parse_f64, \
+                         to_bytes, replace, to_upper, to_lower and chars"
                     }
                     Ty::I64 => "i64 has xor, unsigned_shr, wrapping_add, wrapping_sub and wrapping_mul",
                     Ty::Bytes => "bytes have len, to_str, hex and to_array",
@@ -4346,12 +4416,19 @@ impl<'a> Checker<'a> {
                 | Builtin::BytesToStr
                 | Builtin::BytesHex
                 | Builtin::BytesToArray
+                | Builtin::StrUpper
+                | Builtin::StrLower
+                | Builtin::StrChars
+                | Builtin::ArrJoin
+                | Builtin::FloatFixed { .. }
+                | Builtin::ArrSorted { .. }
+                | Builtin::ArrReversed
         ) {
             self.note_alloc(b, e.span, &format!("`{m}`"));
         }
         let arg_ty = match &x.ty {
             Ty::Map(k, _) => (**k).clone(),
-            Ty::I64 => Ty::I64,
+            Ty::I64 | Ty::F64(_) => Ty::I64,
             _ => Ty::Str,
         };
         let mut vals = vec![x];
@@ -4481,6 +4558,8 @@ fn cmp_op(op: BinOp) -> CmpOp {
 fn always_returns(stmts: &[ast::Stmt]) -> bool {
     stmts.iter().any(|s| match &s.kind {
         StmtKind::Return(_) => true,
+        // `exit(code)` ends the program, so nothing after it runs.
+        StmtKind::Expr(ast::Expr { kind: AK::Call { callee, .. }, .. }) => callee.name == "exit",
         StmtKind::Match { arms, .. } => !arms.is_empty() && arms.iter().all(|a| always_returns(&a.body.stmts)),
         StmtKind::If { then, else_: Some(e), .. } => {
             always_returns(&then.stmts)

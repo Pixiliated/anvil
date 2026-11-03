@@ -121,6 +121,11 @@ fn tools_answer_over_stdio() {
     let prints: Vec<&str> = v["events"].as_array().unwrap().iter().filter_map(|e| e["print"].as_str()).collect();
     assert_eq!(prints[..3], ["1 argument(s)", "[a]", "sum 59, 0 not a number"], "{v}");
 
+    // What eprint writes comes back apart from stdout, and exit's code is the run's.
+    let (err, v) = c.call("run", json!({ "file": "tests/programs/exit_early.anv" }));
+    assert!(!err && v["exit"] == 3, "{v}");
+    assert_eq!((v["stdout"].as_str(), v["stderr"].as_str()), (Some("1\n"), Some("error: 7 is not in the list\n")));
+
     let (err, v) = c.call("test", json!({ "file": "tests/test_blocks.anv" }));
     assert!(err, "a failing test is a tool error: {v}");
     assert_eq!(v["passed"], 2);
