@@ -14,6 +14,21 @@ use diag::Diagnostic;
 use span::SourceFile;
 use std::collections::HashMap;
 
+/// The standard library: modules written in Anvil and built into the compiler, imported as
+/// `import std.list.{map};` from any file. Their file names are `std/<name>.anv`.
+pub const STD_MODULES: &[(&str, &str)] = &[
+    ("list", include_str!("../std/list.anv")),
+    ("math", include_str!("../std/math.anv")),
+    ("set", include_str!("../std/set.anv")),
+    ("text", include_str!("../std/text.anv")),
+];
+
+/// The source of a standard module from its file name (`std/list.anv`).
+pub fn std_source(file: &str) -> Option<&'static str> {
+    let name = file.strip_prefix("std/")?.strip_suffix(".anv")?;
+    STD_MODULES.iter().find(|(n, _)| *n == name).map(|(_, text)| *text)
+}
+
 /// Reads a module's source given its file name, which is relative in the same way as the root's
 /// name (`tests/programs/lib/shapes.anv` for `import lib.shapes` in `tests/programs/main.anv`).
 pub type Load<'a> = &'a dyn Fn(&str) -> Result<String, String>;
@@ -101,6 +116,10 @@ pub fn analyze_with(src: &SourceFile, load: Load) -> (Vec<SourceFile>, check::An
 /// importer's directory. Every file's imports are relative to itself, so any file can also be
 /// checked, tested or run on its own.
 pub fn module_file(importer: &str, module: &str) -> String {
+    // `std.` is the standard library from any file, wherever it is.
+    if let Some(name) = module.strip_prefix("std.") {
+        return format!("std/{}.anv", name.replace('.', "/"));
+    }
     format!("{}{}.anv", dir_of(importer), module.replace('.', "/"))
 }
 
@@ -217,7 +236,17 @@ impl Loading<'_> {
 
     /// Reads and parses the module in `file`; its index, or why it could not be read.
     fn read(&mut self, file: String) -> Result<usize, String> {
-        let text = (self.load)(&file).map_err(|e| format!("{file}: {e}"))?;
+        let text = if file.starts_with("std/") {
+            match std_source(&file) {
+                Some(text) => text.to_string(),
+                None => {
+                    let names: Vec<&str> = STD_MODULES.iter().map(|(n, _)| *n).collect();
+                    return Err(format!("the standard library has no such module; it has {}", names.join(", ")));
+                }
+            }
+        } else {
+            (self.load)(&file).map_err(|e| format!("{file}: {e}"))?
+        };
         // Functions of a module are named after its path from the root's directory: `lib.shapes.area`.
         let rel = file.strip_prefix(dir_of(&self.root)).unwrap_or(&file);
         let name = rel.strip_suffix(".anv").unwrap_or(rel).replace('/', ".");

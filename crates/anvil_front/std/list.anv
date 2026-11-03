@@ -1,0 +1,278 @@
+// The standard library's array functions: `import std.list.{map, sort_by};`. Arrays are values,
+// so each function returns a new array. The functions passed in are pure.
+
+pub fn map[T, U](xs: [T], f: fn(T) -> U) -> [U] {
+    var out: [U] = [];
+    for x in xs {
+        out.push(f(x));
+    }
+    return out;
+}
+
+pub fn keep[T](xs: [T], holds: fn(T) -> bool) -> [T] {
+    var out: [T] = [];
+    for x in xs {
+        if holds(x) {
+            out.push(x);
+        }
+    }
+    return out;
+}
+
+pub fn fold[T, A](xs: [T], start: A, f: fn(A, T) -> A) -> A {
+    var acc: A = start;
+    for x in xs {
+        acc = f(acc, x);
+    }
+    return acc;
+}
+
+pub fn any[T](xs: [T], holds: fn(T) -> bool) -> bool {
+    for x in xs {
+        if holds(x) {
+            return true;
+        }
+    }
+    return false;
+}
+
+pub fn all[T](xs: [T], holds: fn(T) -> bool) -> bool {
+    for x in xs {
+        if !holds(x) {
+            return false;
+        }
+    }
+    return true;
+}
+
+pub fn count[T](xs: [T], holds: fn(T) -> bool) -> i64 {
+    var n: i64 = 0;
+    for x in xs {
+        if holds(x) {
+            n = n + 1;
+        }
+    }
+    return n;
+}
+
+// The first element that holds, or None.
+pub fn first_where[T](xs: [T], holds: fn(T) -> bool) -> Option[T] {
+    for x in xs {
+        if holds(x) {
+            return Some(x);
+        }
+    }
+    return None;
+}
+
+// The index of the first element equal to x, or None.
+pub fn index_of[T](xs: [T], x: T) -> Option[i64] {
+    for i in 0..xs.len() {
+        if xs[i] == x {
+            return Some(i);
+        }
+    }
+    return None;
+}
+
+pub fn contains[T](xs: [T], x: T) -> bool {
+    return index_of(xs: xs, x: x) != None;
+}
+
+// Stable: elements that are not `before` each other keep their order. A merge sort, so
+// n log n calls of `before`.
+pub fn sort_by[T](xs: [T], before: fn(T, T) -> bool) -> [T] {
+    if xs.len() < 2 {
+        return xs;
+    }
+    let half: i64 = xs.len() / 2;
+    let a: [T] = sort_by(xs: xs[0..half], before: before);
+    let b: [T] = sort_by(xs: xs[half..xs.len()], before: before);
+    var out: [T] = [];
+    var i: i64 = 0;
+    var j: i64 = 0;
+    while i < a.len() && j < b.len() {
+        if before(b[j], a[i]) {
+            out.push(b[j]);
+            j = j + 1;
+        } else {
+            out.push(a[i]);
+            i = i + 1;
+        }
+    }
+    while i < a.len() {
+        out.push(a[i]);
+        i = i + 1;
+    }
+    while j < b.len() {
+        out.push(b[j]);
+        j = j + 1;
+    }
+    return out;
+}
+
+// Sorted by what `key` gives, ascending and stable.
+pub fn sort_by_key[T, K: ordered](xs: [T], key: fn(T) -> K) -> [T] {
+    return sort_by(xs: xs, before: fn(a: T, b: T) -> bool {
+        return key(a) < key(b);
+    });
+}
+
+// The element whose key is smallest (the first of equals), or None for no elements.
+pub fn min_by_key[T, K: ordered](xs: [T], key: fn(T) -> K) -> Option[T] {
+    if xs.len() == 0 {
+        return None;
+    }
+    var best: T = xs[0];
+    for x in xs {
+        if key(x) < key(best) {
+            best = x;
+        }
+    }
+    return Some(best);
+}
+
+// The element whose key is largest (the first of equals), or None for no elements.
+pub fn max_by_key[T, K: ordered](xs: [T], key: fn(T) -> K) -> Option[T] {
+    if xs.len() == 0 {
+        return None;
+    }
+    var best: T = xs[0];
+    for x in xs {
+        if key(best) < key(x) {
+            best = x;
+        }
+    }
+    return Some(best);
+}
+
+pub fn sum(xs: [i64]) -> i64 {
+    var total: i64 = 0;
+    for x in xs {
+        total = total + x;
+    }
+    return total;
+}
+
+// from, from + 1, ..., to - 1.
+pub fn range(from: i64, to: i64) -> [i64] {
+    var out: [i64] = [];
+    for i in from..to {
+        out.push(i);
+    }
+    return out;
+}
+
+pub fn concat[T](a: [T], b: [T]) -> [T] {
+    var out: [T] = a;
+    for x in b {
+        out.push(x);
+    }
+    return out;
+}
+
+pub fn flatten[T](xss: [[T]]) -> [T] {
+    var out: [T] = [];
+    for xs in xss {
+        for x in xs {
+            out.push(x);
+        }
+    }
+    return out;
+}
+
+// The first of each run of equal elements anywhere in xs, in order.
+pub fn unique[T](xs: [T]) -> [T] {
+    var out: [T] = [];
+    for x in xs {
+        if !contains(xs: out, x: x) {
+            out.push(x);
+        }
+    }
+    return out;
+}
+
+// Pieces of `size` elements, the last one shorter when they do not divide evenly.
+pub fn chunks[T](xs: [T], size: i64) -> [[T]]
+    requires size > 0
+{
+    var out: [[T]] = [];
+    var at: i64 = 0;
+    while at < xs.len() {
+        var end: i64 = at + size;
+        if end > xs.len() {
+            end = xs.len();
+        }
+        out.push(xs[at..end]);
+        at = end;
+    }
+    return out;
+}
+
+test "map, keep and fold" {
+    let xs: [i64] = [1, 2, 3, 4];
+    assert(map(xs: xs, f: fn(x: i64) -> str {
+        return "{x}";
+    }) == ["1", "2", "3", "4"]);
+    assert(keep(xs: xs, holds: fn(x: i64) -> bool {
+        return x % 2 == 0;
+    }) == [2, 4]);
+    assert(fold(xs: xs, start: 10, f: fn(acc: i64, x: i64) -> i64 {
+        return acc - x;
+    }) == 0);
+}
+
+test "any, all, count and first_where" {
+    let positive: fn(i64) -> bool = fn(x: i64) -> bool {
+        return x > 0;
+    };
+    assert(any(xs: [-1, 2], holds: positive) && !any(xs: [-1], holds: positive));
+    assert(all(xs: [1, 2], holds: positive) && !all(xs: [1, -2], holds: positive));
+    assert(count(xs: [1, -2, 3], holds: positive) == 2);
+    assert(first_where(xs: [-1, 5, 6], holds: positive) == Some(5));
+    assert(first_where(xs: [-1], holds: positive) == None);
+}
+
+test "index_of, contains and unique" {
+    assert(index_of(xs: ["a", "b", "b"], x: "b") == Some(1));
+    assert(index_of(xs: ["a"], x: "z") == None);
+    assert(contains(xs: [1, 2], x: 2) && !contains(xs: [1, 2], x: 3));
+    assert(unique([3, 1, 3, 2, 1]) == [3, 1, 2]);
+}
+
+test "sorting is stable" {
+    let words: [str] = ["bb", "a", "cc", "d", "eee"];
+    let by_length: [str] = sort_by_key(xs: words, key: fn(w: str) -> i64 {
+        return w.len();
+    });
+    assert(by_length == ["a", "d", "bb", "cc", "eee"]);
+    let down: [i64] = sort_by(xs: [3, 1, 2], before: fn(a: i64, b: i64) -> bool {
+        return a > b;
+    });
+    assert(down == [3, 2, 1]);
+}
+
+test "sort_by sorts" for all xs: [i64] {
+    let sorted: [i64] = sort_by(xs: xs, before: fn(a: i64, b: i64) -> bool {
+        return a < b;
+    });
+    assert(sorted == xs.sorted());
+}
+
+test "min and max by key" {
+    let len: fn(str) -> i64 = fn(w: str) -> i64 {
+        return w.len();
+    };
+    assert(min_by_key(xs: ["ccc", "a", "b"], key: len) == Some("a"));
+    assert(max_by_key(xs: ["ccc", "a", "ddd"], key: len) == Some("ccc"));
+    assert(min_by_key(xs: ["a"][0..0], key: len) == None);
+    assert(max_by_key(xs: ["a"][0..0], key: len) == None);
+}
+
+test "sum, range, concat, flatten and chunks" {
+    assert(sum(range(from: 1, to: 5)) == 10);
+    assert(range(from: 3, to: 3) == []);
+    assert(concat(a: [1], b: [2, 3]) == [1, 2, 3]);
+    assert(flatten([[1], [2, 3], []]) == [1, 2, 3]);
+    assert(chunks(xs: [1, 2, 3, 4, 5], size: 2) == [[1, 2], [3, 4], [5]]);
+}

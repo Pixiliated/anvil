@@ -1,0 +1,98 @@
+// A set: each value at most once, kept in order (i64 by value, str bytewise):
+// `import std.set.{Set, set_of};`. An empty one is written with its type:
+// `let seen: Set[str] = Set { members: [:] };`.
+pub struct Set[T: key] {
+    members: Map[T, bool],
+}
+
+pub fn set_of[T: key](xs: [T]) -> Set[T] {
+    var m: Map[T, bool] = [:];
+    for x in xs {
+        m.set(key: x, value: true);
+    }
+    return Set { members: m };
+}
+
+pub fn Set[T: key].has(self, x: T) -> bool {
+    return self.members.has(x);
+}
+
+pub fn Set[T: key].add(self, x: T) -> Set[T] {
+    var m: Map[T, bool] = self.members;
+    m.set(key: x, value: true);
+    return Set { members: m };
+}
+
+// The set without x (the same set when x is not in it).
+pub fn Set[T: key].remove(self, x: T) -> Set[T] {
+    if !self.members.has(x) {
+        return self;
+    }
+    var m: Map[T, bool] = self.members;
+    m.remove(x);
+    return Set { members: m };
+}
+
+pub fn Set[T: key].len(self) -> i64 {
+    return self.members.len();
+}
+
+// The members in order.
+pub fn Set[T: key].items(self) -> [T] {
+    return self.members.keys();
+}
+
+pub fn Set[T: key].union(self, other: Set[T]) -> Set[T] {
+    var m: Map[T, bool] = self.members;
+    for x in other.members.keys() {
+        m.set(key: x, value: true);
+    }
+    return Set { members: m };
+}
+
+pub fn Set[T: key].intersection(self, other: Set[T]) -> Set[T] {
+    var m: Map[T, bool] = [:];
+    for x in self.members.keys() {
+        if other.members.has(x) {
+            m.set(key: x, value: true);
+        }
+    }
+    return Set { members: m };
+}
+
+// The members of self that are not in other.
+pub fn Set[T: key].difference(self, other: Set[T]) -> Set[T] {
+    var m: Map[T, bool] = [:];
+    for x in self.members.keys() {
+        if !other.members.has(x) {
+            m.set(key: x, value: true);
+        }
+    }
+    return Set { members: m };
+}
+
+test "a set holds each value once, in order" {
+    let s: Set[i64] = set_of([3, 1, 3, 2]);
+    assert(s.len() == 3 && s.items() == [1, 2, 3]);
+    assert(s.has(2) && !s.has(5));
+    assert(s.add(5).add(5).len() == 4);
+    assert(s.remove(1).items() == [2, 3] && s.remove(9).len() == 3);
+    let empty: Set[str] = Set { members: [:] };
+    assert(empty.len() == 0 && empty.add("x").has("x"));
+}
+
+test "union, intersection and difference" {
+    let a: Set[str] = set_of(["a", "b", "c"]);
+    let b: Set[str] = set_of(["b", "c", "d"]);
+    assert(a.union(b).items() == ["a", "b", "c", "d"]);
+    assert(a.intersection(b).items() == ["b", "c"]);
+    assert(a.difference(b).items() == ["a"]);
+}
+
+test "a set of an array has its distinct values" for all xs: [i64] {
+    let s: Set[i64] = set_of(xs);
+    for x in xs {
+        assert(s.has(x));
+    }
+    assert(s.len() <= xs.len());
+}

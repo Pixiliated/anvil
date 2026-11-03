@@ -121,3 +121,10 @@ green and the interpreter and native backend agreeing on every program in `tests
 - [x] Docs site (`anvil docs`), contribution guide, changelog, CI workflow (Windows and Linux)
 - [ ] Publish: a repository URL, the commit email in the history, and the upload itself are the
   owner's decisions; the CI workflow has not run yet
+
+## M19: A standard library in Anvil (v0.20)
+- [x] `std` modules written in Anvil and built into the compiler, imported as `import std.list.{map};`
+  from any file: `std.list`, `std.set`, `std.text`, `std.math`
+- [x] Each has tests and property tests, and is part of the repository's project, so verify holds
+  it to the same rules as any code (every function tested, canonical layout)
+- [x] `anvil std` (modules and their pub items, or one module's source), a docs page, `\r` in strings

@@ -83,12 +83,13 @@ in full (`anvil spec` prints it).
 
 ## Status
 
-v0.19: programs of one or more files (modules with explicit imports and `pub`), generic
+v0.20: programs of one or more files (modules with explicit imports and `pub`), generic
 functions, structs and enums with built-in constraints, i64, f64 with units, bool, strings with interpolation,
 search and split, growable arrays and slices, maps in key order, structs, enums with
 exhaustive `match`, structural `==`, `Option` and `Result` with `?`, function values and
-closures, methods and interfaces, bytes and bit operations, a small standard library (text,
-sorting, stderr, exit codes, the environment and directories),
+closures, methods and interfaces, bytes and bit operations, built-ins for text,
+sorting, stderr, exit codes, the environment and directories, a standard library written in
+Anvil (`std.list`, `std.set`, `std.text`, `std.math`),
 contracts, effects (io with arguments and stdin, files, a clock, seeded random numbers),
 `noalloc`, C functions (`extern`) and tests. There are two backends:
 
@@ -148,7 +149,8 @@ target/release/anvil build examples/orders.anv -o orders.exe
 | `anvil profile f.anv [--test NAME]` | calls and steps per function |
 | `anvil explain [CODE]` | explain an error code or a lint |
 | `anvil spec` | print the language specification |
-| `anvil docs [--out DIR]` | write a static site: the specification, every error code, the built-ins |
+| `anvil std [MODULE]` | the standard library: modules and their pub items, or one module's source |
+| `anvil docs [--out DIR]` | write a static site: the specification, every error code, the built-ins, the standard library |
 
 Every command takes `--json`.
 

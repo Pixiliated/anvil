@@ -412,6 +412,7 @@ fn lex_string(text: &str, i: &mut usize) -> Result<Token, Diagnostic> {
             Some(b'\\') => {
                 let esc = match bytes.get(*i + 1) {
                     Some(b'n') => '\n',
+                    Some(b'r') => '\r',
                     Some(b't') => '\t',
                     Some(b'"') => '"',
                     Some(b'\\') => '\\',
@@ -419,7 +420,7 @@ fn lex_string(text: &str, i: &mut usize) -> Result<Token, Diagnostic> {
                         return Err(Diagnostic::new(
                             "E0002",
                             Span::new(*i, (*i + 2).min(bytes.len())),
-                            "unknown escape; valid escapes are \\n \\t \\\" \\\\",
+                            "unknown escape; valid escapes are \\n \\r \\t \\\" \\\\",
                         ))
                     }
                 };

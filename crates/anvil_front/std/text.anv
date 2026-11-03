@@ -1,0 +1,112 @@
+// The standard library's text functions: `import std.text.{lines, pad_left};`. Widths count
+// characters, not bytes.
+
+// s with `fill` before it until it is `width` characters wide (s itself when it already is).
+pub fn pad_left(s: str, width: i64, fill: str) -> str
+    requires fill.chars().len() == 1
+{
+    var out: str = s;
+    var n: i64 = s.chars().len();
+    while n < width {
+        out = fill + out;
+        n = n + 1;
+    }
+    return out;
+}
+
+// s with `fill` after it until it is `width` characters wide.
+pub fn pad_right(s: str, width: i64, fill: str) -> str
+    requires fill.chars().len() == 1
+{
+    var out: str = s;
+    var n: i64 = s.chars().len();
+    while n < width {
+        out = out + fill;
+        n = n + 1;
+    }
+    return out;
+}
+
+// s, n times.
+pub fn repeat(s: str, n: i64) -> str
+    requires n >= 0
+{
+    var out: str = "";
+    for _i in 0..n {
+        out = out + s;
+    }
+    return out;
+}
+
+// The lines of s, without their "\n" or "\r\n"; a last line without one counts, an empty end
+// does not.
+pub fn lines(s: str) -> [str] {
+    var out: [str] = [];
+    if s.len() == 0 {
+        return out;
+    }
+    let parts: [str] = s.split("\n");
+    var n: i64 = parts.len();
+    if s.ends_with("\n") {
+        n = n - 1;
+    }
+    for i in 0..n {
+        var line: str = parts[i];
+        if line.ends_with("\r") {
+            line = line[0..line.len() - 1];
+        }
+        out.push(line);
+    }
+    return out;
+}
+
+// The words of s: the pieces between spaces, tabs and line breaks, none empty.
+pub fn words(s: str) -> [str] {
+    var out: [str] = [];
+    var word: str = "";
+    for c in s.chars() {
+        if c == " " || c == "\t" || c == "\n" || c == "\r" {
+            if word.len() > 0 {
+                out.push(word);
+                word = "";
+            }
+        } else {
+            word = word + c;
+        }
+    }
+    if word.len() > 0 {
+        out.push(word);
+    }
+    return out;
+}
+
+test "padding counts characters" {
+    assert(pad_left(s: "7", width: 3, fill: "0") == "007");
+    assert(pad_right(s: "é", width: 3, fill: ".") == "é..");
+    assert(pad_left(s: "long", width: 2, fill: " ") == "long");
+}
+
+test "repeat" {
+    assert(repeat(s: "ab", n: 3) == "ababab" && repeat(s: "x", n: 0) == "");
+}
+
+test "lines and words" {
+    assert(lines("a\nb\r\nc") == ["a", "b", "c"]);
+    assert(lines("a\n\nb\n") == ["a", "", "b"]);
+    assert(lines("") == []);
+    assert(words("  two  words\tand\nmore ") == ["two", "words", "and", "more"]);
+}
+
+test "joining lines gives the text back" for all xs: [str] {
+    var parts: [str] = [];
+    for x in xs {
+        if !x.contains("\n") {
+            parts.push(x);
+        }
+    }
+    var text: str = "";
+    for p in parts {
+        text = text + p + "\n";
+    }
+    assert(lines(text) == parts);
+}

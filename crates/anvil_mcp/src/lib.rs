@@ -46,6 +46,13 @@ switches it off). Every CLI command except `watch` and `lsp` is a tool with the 
 /// Tool argument structs reject unknown fields, so a misspelt argument is an error, not ignored.
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
+pub struct StdArgs {
+    /// One module (`list` or `std.list`); leave it out for all of them.
+    pub module: Option<String>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct DocsArgs {
     /// Directory for the pages, relative to the server's root (default out/docs).
     pub out: Option<String>,
@@ -401,9 +408,15 @@ impl AnvilServer {
         self.op(|_| anvil_ops::spec()).await
     }
 
-    #[tool(
-        description = "Write a static site under the server's root: the specification, every error         code and lint with its explanation, and the built-in functions and methods. Returns the files."
-    )]
+    #[tool(description = "The standard library (modules written in Anvil, imported as `import \
+        std.list.{map};`): every module with its pub items' signatures, or with `module` one module's \
+        items and its source.")]
+    async fn std(&self, Parameters(a): Parameters<StdArgs>) -> Result<CallToolResult, ErrorData> {
+        self.op(move |_| anvil_ops::std_modules(a.module.as_deref())).await
+    }
+
+    #[tool(description = "Write a static site under the server's root: the specification, every error \
+        code and lint with its explanation, and the built-in functions and methods. Returns the files.")]
     async fn docs(&self, Parameters(a): Parameters<DocsArgs>) -> Result<CallToolResult, ErrorData> {
         self.op(move |root| anvil_ops::docs(root, a.out.as_deref())).await
     }

@@ -1,0 +1,75 @@
+// The standard library at work: a word count, sorted and laid out as a table.
+import std.list.{fold, keep, map, max_by_key, sort_by, sort_by_key, sum, unique};
+import std.math.{clamp, gcd, pow, round};
+import std.set.{Set, set_of};
+import std.text.{lines, pad_left, pad_right, repeat, words};
+
+struct Count {
+    word: str,
+    n: i64,
+}
+
+fn counts(text: str) -> [Count] {
+    var tally: Map[str, i64] = [:];
+    for line in lines(text) {
+        for w in words(line.to_lower()) {
+            var n: i64 = 0;
+            match tally.get(w) {
+                Some(value: before) => { n = before; }
+                None => {}
+            }
+            tally.set(key: w, value: n + 1);
+        }
+    }
+    var out: [Count] = [];
+    for word in tally.keys() {
+        match tally.get(word) {
+            Some(value: total) => { out.push(Count { word: word, n: total }); }
+            None => {}
+        }
+    }
+    return out;
+}
+
+fn main() uses io {
+    let text: str = "the cat sat\r\non the mat\nThe end\n";
+    let cs: [Count] = counts(text);
+    // Most frequent first; words with the same count stay in key order (sort_by is stable).
+    let ranked: [Count] = sort_by(xs: cs, before: fn(a: Count, b: Count) -> bool {
+        return a.n > b.n;
+    });
+    print(repeat(s: "-", n: 12));
+    for c in ranked {
+        print("{pad_right(s: c.word, width: 6, fill: ".")}{pad_left(s: "{c.n}", width: 6, fill: " ")}");
+    }
+    print(repeat(s: "-", n: 12));
+    let total: i64 = sum(map(xs: cs, f: fn(c: Count) -> i64 {
+        return c.n;
+    }));
+    print("{total} words, {cs.len()} different");
+    match max_by_key(xs: cs, key: fn(c: Count) -> i64 {
+        return c.word.len();
+    }) {
+        Some(value: longest) => { print("longest: {longest.word}"); }
+        None => {}
+    }
+    let short: [str] = map(xs: keep(xs: cs, holds: fn(c: Count) -> bool {
+        return c.word.len() <= 3;
+    }), f: fn(c: Count) -> str {
+        return c.word;
+    });
+    print(short.join(" "));
+    print(sort_by_key(xs: ["pear", "fig", "banana"], key: fn(w: str) -> i64 {
+        return w.len();
+    }).join(" "));
+    print(unique([3, 1, 3, 2, 1]).len());
+    print(fold(xs: [1, 2, 3], start: "", f: fn(acc: str, x: i64) -> str {
+        return "{acc}{x}";
+    }));
+
+    let seen: Set[str] = set_of(words("b a b c"));
+    let more: Set[str] = seen.add("d").remove("a");
+    print("{seen.items().join(",")} then {more.items().join(",")}, common {seen.intersection(more).len()}");
+
+    print("{clamp(x: 120, low: 0, high: 100)} {gcd(a: 84, b: 36)} {pow(base: 3, exp: 4)} {round(2.5)} {round(-1.5)}");
+}

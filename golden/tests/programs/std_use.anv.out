@@ -1,0 +1,18 @@
+exit: 0
+---
+------------
+the...     3
+cat...     1
+end...     1
+mat...     1
+on....     1
+sat...     1
+------------
+8 words, 6 different
+longest: cat
+cat end mat on sat the
+fig pear banana
+3
+123
+a,b,c then b,c,d, common 2
+100 12 81 2.0 -2.0

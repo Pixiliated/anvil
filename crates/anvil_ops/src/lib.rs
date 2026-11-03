@@ -128,6 +128,12 @@ pub const COMMANDS: &[Command] = &[
     },
     Command { name: "spec", positionals: &[], options: &[], summary: "the language specification" },
     Command {
+        name: "std",
+        positionals: &["module?"],
+        options: &[],
+        summary: "the standard library: its modules and their pub items, or one module's source",
+    },
+    Command {
         name: "docs",
         positionals: &[],
         options: &[("out", "DIR", "where to write the pages (default out/docs)")],
@@ -325,6 +331,10 @@ impl<'a> Files<'a> {
 
     pub fn read(&self, name: &str) -> Result<String, String> {
         let name = name.replace('\\', "/");
+        // The standard library is in the binary, not on the disk.
+        if let Some(text) = anvil_front::std_source(&name) {
+            return Ok(text.to_string());
+        }
         if let Some(text) = self.open.and_then(|o| o.get(&name)) {
             return Ok(text.clone());
         }
@@ -645,12 +655,12 @@ pub fn outline_in(files: Files, file: &str) -> Report {
                     s.fields.iter().map(|(f, t)| json!({ "name": f.name, "type": text(t.span) })).collect();
                 let list: Vec<String> = s.fields.iter().map(|(f, t)| format!("{}: {}", f.name, text(t.span))).collect();
                 human.push_str(&format!("{:>4}  struct {} {{ {} }}\n", line(s.span), s.name.name, list.join(", ")));
-                json!({ "kind": "struct", "name": s.name.name, "line": line(s.span), "fields": fields })
+                json!({ "kind": "struct", "name": s.name.name, "pub": s.public, "line": line(s.span), "fields": fields })
             }
             Item::Enum(e) => {
                 let variants: Vec<String> = e.variants.iter().map(|v| one_line(&text(v.span))).collect();
                 human.push_str(&format!("{:>4}  enum {} {{ {} }}\n", line(e.span), e.name.name, variants.join(", ")));
-                json!({ "kind": "enum", "name": e.name.name, "line": line(e.span), "variants": variants })
+                json!({ "kind": "enum", "name": e.name.name, "pub": e.public, "line": line(e.span), "variants": variants })
             }
             Item::Interface(i) => {
                 let methods: Vec<String> =
@@ -665,7 +675,7 @@ pub fn outline_in(files: Files, file: &str) -> Report {
             }
             Item::Unit(u) => {
                 human.push_str(&format!("{:>4}  {}\n", line(u.span), text(u.span)));
-                json!({ "kind": "unit", "name": u.name.name, "line": line(u.span), "text": text(u.span) })
+                json!({ "kind": "unit", "name": u.name.name, "pub": u.public, "line": line(u.span), "text": text(u.span) })
             }
             Item::Test(t) => {
                 human.push_str(&format!("{:>4}  test \"{}\"\n", line(t.span), t.name));
@@ -697,6 +707,54 @@ pub fn formatted_in(files: Files, file: &str) -> Report {
         Ok(text) => Report::ok(json!({ "ok": true, "changed": text != src.text, "text": text }), String::new()),
         Err(d) => diagnostics(std::slice::from_ref(&src), &[d]),
     }
+}
+
+/// The standard library: every module with its pub items, or one module with its source too.
+pub fn std_modules(module: Option<&str>) -> Report {
+    let names: Vec<&str> = anvil_front::STD_MODULES.iter().map(|(n, _)| *n).collect();
+    let wanted: Vec<&str> = match module {
+        None => names.clone(),
+        Some(m) => {
+            let m = m.strip_prefix("std.").unwrap_or(m);
+            if !names.contains(&m) {
+                return Report::usage(format!("the standard library has no module `{m}`; it has {}", names.join(", ")));
+            }
+            vec![m]
+        }
+    };
+    let mut modules = Vec::new();
+    let mut text = String::new();
+    for m in wanted {
+        let file = format!("std/{m}.anv");
+        let outline = outline_in(Files::disk(Path::new(".")), &file);
+        let items: Vec<Value> = outline.json["items"]
+            .as_array()
+            .map(|a| a.iter().filter(|i| i["pub"] == true).cloned().collect())
+            .unwrap_or_default();
+        text.push_str(&format!(
+            "import std.{m}.{{...}}
+"
+        ));
+        for i in &items {
+            let shown = match i["signature"].as_str() {
+                Some(sig) => sig.to_string(),
+                None => format!("pub {} {}", i["kind"].as_str().unwrap_or(""), i["name"].as_str().unwrap_or("")),
+            };
+            text.push_str(&format!(
+                "    {shown}
+"
+            ));
+        }
+        let mut v = json!({ "module": format!("std.{m}"), "file": file, "items": items });
+        if module.is_some() {
+            let source = anvil_front::std_source(&file).unwrap_or_default();
+            v["source"] = json!(source);
+            text.push('\n');
+            text.push_str(source);
+        }
+        modules.push(v);
+    }
+    Report::ok(json!({ "ok": true, "modules": modules }), text)
 }
 
 /// One error code or lint, or every code followed by every lint.

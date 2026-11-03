@@ -3,6 +3,12 @@
 Each version is one roadmap milestone (docs/ROADMAP.md); docs/DECISIONS.md says why things are
 the way they are.
 
+## 0.20.0
+- A standard library written in Anvil and built in: `std.list`, `std.set`, `std.text`,
+  `std.math`, imported as `import std.list.{map};`; `anvil std` lists it, and the docs site has a
+  page for it.
+- `\r` in strings.
+
 ## 0.19.0
 - Ready to publish: the crates package for crates.io as `anvil-lang` (the `anvil` command),
   `anvil-lang-mcp` and five library crates, and pass `cargo publish --dry-run`.

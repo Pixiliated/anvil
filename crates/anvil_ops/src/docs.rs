@@ -95,7 +95,8 @@ fn page(title: &str, body: &str) -> String {
          <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\n\
          <title>{title}</title>\n<link rel=\"stylesheet\" href=\"style.css\">\n</head>\n<body>\n\
          <nav><a href=\"index.html\">Anvil</a><a href=\"spec.html\">Specification</a>\
-         <a href=\"errors.html\">Errors</a><a href=\"builtins.html\">Built-ins</a></nav>\n\
+         <a href=\"errors.html\">Errors</a><a href=\"builtins.html\">Built-ins</a>\
+         <a href=\"std.html\">Standard library</a></nav>\n\
          <main>\n{body}</main>\n</body>\n</html>\n"
     )
 }
@@ -145,11 +146,30 @@ pub fn pages() -> Vec<(&'static str, String)> {
         ));
     }
     builtins.push_str("</table>\n");
+    let mut library = String::from(
+        "<h1>The standard library</h1>\n<p>Modules written in Anvil and built into the compiler; \
+         <code>anvil std MODULE</code> prints one's source.</p>\n",
+    );
+    for m in crate::std_modules(None).json["modules"].as_array().into_iter().flatten() {
+        let name = m["module"].as_str().unwrap_or_default();
+        library.push_str(&format!("<h2 id=\"{}\">{name}</h2>\n<pre><code>", slug(name)));
+        library.push_str(&escape(&format!("import {name}.{{...}};\n\n")));
+        for i in m["items"].as_array().into_iter().flatten() {
+            let line = match i["signature"].as_str() {
+                Some(sig) => sig.to_string(),
+                None => format!("pub {} {}", i["kind"].as_str().unwrap_or(""), i["name"].as_str().unwrap_or("")),
+            };
+            library.push_str(&escape(&line));
+            library.push('\n');
+        }
+        library.push_str("</code></pre>\n");
+    }
     vec![
         ("index.html", page(&format!("Anvil {version}"), &index)),
         ("spec.html", page("The Anvil specification", &spec)),
         ("errors.html", page("Anvil error codes", &errors)),
         ("builtins.html", page("Anvil built-ins", &builtins)),
+        ("std.html", page("The Anvil standard library", &library)),
         ("style.css", STYLE.to_string()),
     ]
 }

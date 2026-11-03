@@ -1,0 +1,4 @@
+// expect: E0601
+import std.lists.{map};
+
+fn main() {}

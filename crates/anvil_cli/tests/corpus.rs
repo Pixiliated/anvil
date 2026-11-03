@@ -44,12 +44,16 @@ fn header<'a>(text: &'a str, key: &str) -> Option<&'a str> {
 fn every_program_matches_its_golden_on_both_backends() {
     let out = anvil(&["golden", "check", "--native", "--json"]);
     let v = json_of(&out);
-    // Modules in tests/programs/lib have no main; every other file is a program with a golden.
+    // Modules in tests/programs/lib and the standard library have no main; every other file is a
+    // program with a golden.
     let bad: Vec<_> = v["results"]
         .as_array()
         .unwrap()
         .iter()
-        .filter(|r| r["status"] != "ok" && !(r["status"] == "no_main" && r["file"].as_str().unwrap().contains("/lib/")))
+        .filter(|r| {
+            let module = ["/lib/", "anvil_front/std/"].iter().any(|d| r["file"].as_str().unwrap().contains(d));
+            r["status"] != "ok" && !(r["status"] == "no_main" && module)
+        })
         .collect();
     assert!(bad.is_empty() && out.status.success(), "{bad:#?}");
     // Every program of the corpus is in the project and has a main.

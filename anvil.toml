@@ -1,7 +1,8 @@
 # The Anvil repository as an Anvil project: its examples and the parity corpus. Every program's
 # approved output is in golden/; `anvil golden check --native` runs them on both backends.
 # tests/errors (programs that must not compile) and tests/test_blocks.anv (a deliberately
-# failing test) are left out on purpose. tests/programs/lib holds modules the programs import.
+# failing test) are left out on purpose. tests/programs/lib holds modules the programs import;
+# crates/anvil_front/std is the standard library, built into the compiler, with its own tests.
 [project]
 name = "anvil"
-files = ["examples/*.anv", "tests/programs/*.anv", "tests/programs/lib/*.anv"]
+files = ["examples/*.anv", "tests/programs/*.anv", "tests/programs/lib/*.anv", "crates/anvil_front/std/*.anv"]

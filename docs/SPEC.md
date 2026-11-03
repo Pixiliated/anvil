@@ -1,4 +1,4 @@
-# Anvil language specification (v0.19)
+# Anvil language specification (v0.20)
 
 Anvil is a small, compiled, general-purpose language designed to be written mostly by AI agents
 and read by humans. Its rules aim at three things: one obvious way to write each thing, code
@@ -73,6 +73,22 @@ pub fn area(s: Shape) -> f64 {
 - Private items of different modules may share a name. Errors and panics inside a module name
   its file. Functions from a module show as `lib.geometry.area` in traces and profiles.
 - A base unit is the same unit in every module that declares or imports its name.
+
+### The standard library
+
+`import std.list.{map, sort_by};` imports from the standard library: modules written in Anvil
+and built into the compiler, the same from every file (so `std` is not a name for a module of
+your own). `anvil std` lists them with their pub items; `anvil std list` prints one's source.
+
+| Module | Has |
+|---|---|
+| `std.list` | `map`, `keep`, `fold`, `any`, `all`, `count`, `first_where`, `index_of`, `contains`, `sort_by` (stable), `sort_by_key`, `min_by_key`, `max_by_key`, `sum`, `range`, `concat`, `flatten`, `unique`, `chunks` |
+| `std.set` | `Set[T: key]` with `has`, `add`, `remove`, `len`, `items`, `union`, `intersection`, `difference`; `set_of` |
+| `std.text` | `pad_left`, `pad_right`, `repeat`, `lines`, `words` |
+| `std.math` | `min`, `max`, `clamp`, `pow`, `gcd`, `sign`, `floor`, `ceil`, `round` (halves to even) |
+
+The functions they take are pure (`fn(T) -> U`). Their functions show as `std.list.map` in
+traces, and they have tests of their own like any module.
 
 ## Layout
 
@@ -365,7 +381,7 @@ either bound falls inside a character (`"héllo"[0..2]`).
 Each `{...}` holds one expression of type `i64`, `f64`, `bool` or `str` and inserts its text
 (the same text `print` writes). The expression must close on the same line and contain no
 braces; it may contain other strings (`"{greet("Ada")}"`). Write `{{` and `}}` for literal
-braces. Escapes: `\n \t \" \\`.
+braces. Escapes: `\n \r \t \" \\`.
 
 ## Bytes
 
@@ -719,8 +735,11 @@ anvil complete file.anv LINE COL       what can be written at a position
 anvil lsp                              a language server on stdio for editors
 anvil explain [CODE]                   long explanation of an error code or a lint
 anvil spec                             print this document
+anvil std     [MODULE]                 the standard library's modules and pub items, or
+                                       one module's source
 anvil docs    [--out DIR]              write a static site (default out/docs): this
-                                       document, every error code and lint, the built-ins
+                                       document, every error code and lint, the built-ins,
+                                       the standard library
 ```
 
 Every command takes `--json`. Every error has a stable code (`E0301`), an exact range and,
