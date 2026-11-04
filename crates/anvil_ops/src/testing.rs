@@ -108,7 +108,7 @@ pub const CONTRACT_STEPS: u64 = 1_000_000;
 /// interpreter's own values stay on its thread).
 pub(crate) enum Checked {
     Unchecked(&'static str),
-    Held { checked: u64, excluded: u64, overflowed: u64 },
+    Held { checked: u64, excluded: u64, overflowed: u64, beyond: u64 },
     Broken { inputs: String, message: String, shrinks: u64 },
     Stopped { inputs: String },
 }
@@ -124,7 +124,7 @@ pub(crate) fn check_contracts(
     let steps = max_steps.map_or(CONTRACT_STEPS, |m| m.min(CONTRACT_STEPS));
     let mut out = Vec::new();
     for (id, f) in program.funcs.iter().enumerate() {
-        let has_contract = !f.requires.is_empty() || !f.ensures.is_empty();
+        let has_contract = !f.requires.is_empty() || !f.ensures.is_empty() || f.steps.is_some();
         if f.module != 0 || f.captures.is_some() || f.external.is_some() || !has_contract {
             continue;
         }
@@ -148,7 +148,9 @@ pub(crate) fn check_contracts(
         let mut err = Vec::new();
         let host = crate::checked_host(ffi, root, &[], None, &mut err, &[]);
         let checked = match anvil_interp::check_contract(program, id, PROPERTY_CASES, 0, Some(steps), host) {
-            Contract::Held { checked, excluded, overflowed } => Checked::Held { checked, excluded, overflowed },
+            Contract::Held { checked, excluded, overflowed, beyond } => {
+                Checked::Held { checked, excluded, overflowed, beyond }
+            }
             Contract::Broken { inputs, message, shrinks } => Checked::Broken { inputs: shown(&inputs), message, shrinks },
             Contract::Stopped { inputs } => Checked::Stopped { inputs: shown(&inputs) },
         };

@@ -439,7 +439,9 @@ pub const LINTS: &[(&str, &str)] = &[
          accept, it must return and its ensures must hold (a call that overflows i64 counts as \
          one its requires excluded: the language refuses it). A failure is shrunk to small \
          arguments and reported with the panic. A requires that accepts none of them, or a call \
-         that runs past a million steps, is a finding too: the contract went unchecked. Fix the \
+         that runs past a million steps, is a finding too: the contract went unchecked. A \
+         `steps` bound is computed from the arguments first, and a call that takes more steps is \
+         a finding; arguments whose bound is more than a check may run are not run. Fix the \
          function or its contract (a requires is how a function says which inputs it takes), \
          or write `allow contract \"why\"` before its `fn`; an allow on a function that keeps \
          its contract is reported as stale.",

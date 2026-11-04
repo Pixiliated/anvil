@@ -509,6 +509,9 @@ pub enum Called {
     /// Integer arithmetic overflowed: the arguments are beyond what i64 holds for this work,
     /// which the language itself refuses, so the call says nothing about the contract either.
     Overflowed,
+    /// Its steps bound for the arguments is more than the check may run, so it is not run: the
+    /// function says it may take that long.
+    Beyond,
     /// It panicked with its requires met: an ensures failed, or something in its body.
     Panicked(String),
     Stopped,
@@ -516,6 +519,8 @@ pub enum Called {
 
 /// Calls function `fid` with `args`: its requires first on their own (so a call they exclude is
 /// told apart from one that breaks the contract), then the call itself, which checks its ensures.
+/// A steps bound is evaluated from the arguments before the call, which may then take that many
+/// steps and no more.
 pub fn call_checked(program: &Program, fid: FuncId, args: &[Value], max_steps: Option<u64>, host: Host) -> Called {
     let mut out = Vec::new();
     let mut it = Interp::new(program, &mut out, max_steps, None, host);
@@ -538,15 +543,37 @@ pub fn call_checked(program: &Program, fid: FuncId, args: &[Value], max_steps: O
             Err(e) => return outcome(Err(e)),
         }
     }
-    outcome(it.call(fid, args.to_vec()))
+    let mut bound = None;
+    if let Some(c) = &f.steps {
+        match it.eval(&c.expr, &mut frame) {
+            Ok(v) => bound = Some((v.as_i64().max(0) as u64, c)),
+            Err(e) => return outcome(Err(e)),
+        }
+    }
+    if let Some((b, _)) = bound {
+        if it.steps_left.is_some_and(|left| b >= left) {
+            return Called::Beyond;
+        }
+        let cap = b.saturating_add(1);
+        it.steps_left = Some(it.steps_left.map_or(cap, |left| left.min(cap)));
+    }
+    let before = it.taken;
+    match (it.call(fid, args.to_vec()), bound) {
+        // Stopped by the bound, not by the check's own limit: one step past it.
+        (Err(Unwind::OutOfSteps), Some((b, c))) if it.taken - before > b => {
+            Called::Panicked(format!("takes more than {b} steps, past {}", c.message))
+        }
+        (r, _) => outcome(r),
+    }
 }
 
 /// What checking a contract found.
 #[derive(Debug)]
 pub enum Contract {
-    /// No generated arguments broke it: `checked` met its requires, `excluded` did not, and
-    /// `overflowed` overflowed i64.
-    Held { checked: u64, excluded: u64, overflowed: u64 },
+    /// No generated arguments broke it: `checked` met its requires, `excluded` did not,
+    /// `overflowed` overflowed i64, and `beyond` were not run, their steps bound being more than
+    /// the check may run.
+    Held { checked: u64, excluded: u64, overflowed: u64, beyond: u64 },
     /// The smallest arguments found (after `shrinks` steps) that meet its requires and make it
     /// panic, with the panic.
     Broken { inputs: Vec<Value>, message: String, shrinks: u64 },
@@ -568,7 +595,7 @@ pub fn check_contract(
     let f = &program.funcs[fid];
     let types: Vec<Ty> = f.params.iter().map(|p| f.locals[*p].ty.clone()).collect();
     let mut rng = gen::Rng::new(gen::test_seed(&f.name, seed));
-    let (mut checked, mut excluded, mut overflowed) = (0, 0, 0);
+    let (mut checked, mut excluded, mut overflowed, mut beyond) = (0, 0, 0, 0);
     for case in 0..cases {
         let size = 1 + case * 30 / cases.max(1);
         let inputs: Vec<Value> = types.iter().map(|t| gen::generate(t, program, &mut rng, size)).collect();
@@ -576,6 +603,7 @@ pub fn check_contract(
             Called::Returned => checked += 1,
             Called::Excluded => excluded += 1,
             Called::Overflowed => overflowed += 1,
+            Called::Beyond => beyond += 1,
             Called::Stopped => return Contract::Stopped { inputs },
             Called::Panicked(mut message) => {
                 let mut inputs = inputs;
@@ -602,7 +630,7 @@ pub fn check_contract(
             }
         }
     }
-    Contract::Held { checked, excluded, overflowed }
+    Contract::Held { checked, excluded, overflowed, beyond }
 }
 
 /// Whether values of `ty` can be generated: everything but function types (and what holds them).

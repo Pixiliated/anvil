@@ -177,3 +177,12 @@ green and the interpreter and native backend agreeing on every program in `tests
 - [x] `anvil api approve FILE` (removes the approved API when no pub items are left); CLI and MCP
 - [x] verify reports every difference and unapproved APIs, naming the project files a removal or
   change breaks; the standard library's and the corpus modules' APIs are approved
+
+## M26: Step bounds (v0.27)
+- [x] `steps EXPR`, the last contract clause: an i64 of the parameters bounding a call's steps
+  (statements and loop iterations, callees included); `steps` stays a name everywhere else
+- [x] Checked by the contract lint on generated arguments, never at run time (native code does
+  not count steps): a call over its bound is a finding, shrunk; arguments bounded beyond what a
+  check may run are not run
+- [x] Bounds on the standard library's `sum`, `concat`, `unique`, `pow`, `gcd`, `repeat` and
+  `words`, approved as part of their APIs

@@ -3,6 +3,12 @@
 Each version is one roadmap milestone (docs/ROADMAP.md); docs/DECISIONS.md says why things are
 the way they are.
 
+## 0.27.0
+- Step bounds: `steps EXPR`, a contract clause bounding a call's steps, checked by verify's
+  contract lint on generated arguments (shrunk counterexamples); arguments bounded beyond what a
+  check may run are skipped.
+- Bounds on the standard library's `sum`, `concat`, `unique`, `pow`, `gcd`, `repeat` and `words`.
+
 ## 0.26.0
 - API goldens: `anvil api [FILE]` and `anvil api approve FILE`; each file's public API is
   approved in `golden/FILE.api`, and verify reports added, removed and changed items, naming the

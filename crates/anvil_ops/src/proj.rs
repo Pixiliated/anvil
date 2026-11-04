@@ -366,17 +366,20 @@ fn contract_findings(
         let fix = "fix the function or its contract, or write `allow contract \"why\"` before it";
         let json = match result {
             Checked::Unchecked(why) => json!({ "function": name, "status": "unchecked", "why": why }),
-            Checked::Held { checked, excluded, overflowed } => {
+            Checked::Held { checked, excluded, overflowed, beyond } => {
                 if allowed {
                     add("allow", format!("`{name}` keeps its contract on every generated input, so its `allow contract` is stale: remove it"), at.clone());
                 } else if checked == 0 {
                     add(
                         "contract",
-                        format!("`{name}` was checked on none of {} generated inputs ({excluded} outside its requires, {overflowed} overflowing i64), so its contract went unchecked; test it, or write `allow contract \"why\"` before it", excluded + overflowed),
+                        format!("`{name}` was checked on none of {} generated inputs ({excluded} outside its requires, {overflowed} overflowing i64, {beyond} bounded beyond what a check may run), so its contract went unchecked; test it, or write `allow contract \"why\"` before it", excluded + overflowed + beyond),
                         at.clone(),
                     );
                 }
-                json!({ "function": name, "status": "held", "checked": checked, "excluded": excluded, "overflowed": overflowed })
+                json!({
+                    "function": name, "status": "held", "checked": checked, "excluded": excluded,
+                    "overflowed": overflowed, "beyond": beyond,
+                })
             }
             Checked::Broken { inputs, message, shrinks } => {
                 if !allowed {

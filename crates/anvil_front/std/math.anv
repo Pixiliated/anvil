@@ -31,6 +31,7 @@ pub fn clamp[T: ordered](x: T, low: T, high: T) -> T
 // base is squared only while bits of exp remain, so it overflows only when the power does.
 pub fn pow(base: i64, exp: i64) -> i64
     requires exp >= 0
+    steps 400
 {
     var out: i64 = 1;
     var b: i64 = base;
@@ -48,7 +49,9 @@ pub fn pow(base: i64, exp: i64) -> i64
 }
 
 // The greatest common divisor, never negative; gcd(0, 0) is 0.
-pub fn gcd(a: i64, b: i64) -> i64 {
+pub fn gcd(a: i64, b: i64) -> i64
+    steps 400
+{
     var x: i64 = abs(a);
     var y: i64 = abs(b);
     while y != 0 {

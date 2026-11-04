@@ -1,5 +1,5 @@
 fn lines(s: str) -> [str]
 fn pad_left(s: str, width: i64, fill: str) -> str requires fill.chars().len() == 1
 fn pad_right(s: str, width: i64, fill: str) -> str requires fill.chars().len() == 1
-fn repeat(s: str, n: i64) -> str requires n >= 0
-fn words(s: str) -> [str]
+fn repeat(s: str, n: i64) -> str requires n >= 0 steps 2 * n + 3
+fn words(s: str) -> [str] steps 5 * s.len() + 5

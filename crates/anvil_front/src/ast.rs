@@ -150,6 +150,8 @@ pub struct FnDecl {
     pub external: Option<Extern>,
     pub requires: Vec<Expr>,
     pub ensures: Vec<Expr>,
+    /// `steps EXPR`: at most this many steps per call, checked by verify, not at run time.
+    pub steps: Option<Expr>,
     pub body: Block,
     pub span: Span,
     /// `allow LINT "reason"` lines written before `fn`.

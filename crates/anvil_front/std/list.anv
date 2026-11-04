@@ -162,7 +162,9 @@ pub fn max_by_key[T, K: ordered](xs: [T], key: fn(T) -> K) -> Option[T] {
 
 // The total of the elements, 0 for none; overflow panics, as for +.
 // example: sum([1, 2, 3]) == 6
-pub fn sum(xs: [i64]) -> i64 {
+pub fn sum(xs: [i64]) -> i64
+    steps 2 * xs.len() + 3
+{
     var total: i64 = 0;
     for x in xs {
         total = total + x;
@@ -181,7 +183,9 @@ pub fn range(from: i64, to: i64) -> [i64] {
 
 // a's elements, then b's.
 // example: concat(a: [1], b: [2, 3]) == [1, 2, 3]
-pub fn concat[T](a: [T], b: [T]) -> [T] {
+pub fn concat[T](a: [T], b: [T]) -> [T]
+    steps 2 * b.len() + 3
+{
     var out: [T] = a;
     for x in b {
         out.push(x);
@@ -202,7 +206,9 @@ pub fn flatten[T](xss: [[T]]) -> [T] {
 }
 
 // The first of each run of equal elements anywhere in xs, in order.
-pub fn unique[T](xs: [T]) -> [T] {
+pub fn unique[T](xs: [T]) -> [T]
+    steps 4 * xs.len() * xs.len() + 8 * xs.len() + 3
+{
     var out: [T] = [];
     for x in xs {
         if !contains(xs: out, x: x) {

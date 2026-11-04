@@ -1794,6 +1794,7 @@ impl<'a> Checker<'a> {
             external: Some(ExternFn { symbol: d.name.name.clone(), file }),
             requires: Vec::new(),
             ensures: Vec::new(),
+            steps: None,
             result_local: None,
             locals: b.locals,
             body: Vec::new(),
@@ -1858,6 +1859,11 @@ impl<'a> Checker<'a> {
             ensures.push(Check { expr: x, message });
         }
         b.in_ensures = false;
+        // The steps bound reads the parameters only: it is known before the call runs.
+        let steps = d.steps.as_ref().map(|e| {
+            let x = self.expect(&mut b, e, &Ty::I64);
+            Check { expr: x, message: format!("its steps bound at {}: {}", self.site(e.span), self.text(e.span)) }
+        });
         b.in_contract = false;
         let body = self.block(&mut b, &d.body);
         self.close_scope(&mut b, d.body.span.end);
@@ -1886,6 +1892,7 @@ impl<'a> Checker<'a> {
             external: None,
             requires,
             ensures,
+            steps,
             result_local,
             locals: b.locals,
             body,
@@ -1987,6 +1994,7 @@ impl<'a> Checker<'a> {
                     external: None,
                     requires: Vec::new(),
                     ensures: Vec::new(),
+                    steps: None,
                     result_local: None,
                     locals: ib.locals,
                     body,

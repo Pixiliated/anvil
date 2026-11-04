@@ -475,3 +475,19 @@ Short records of choices that are not obvious from the code. Newest last.
   module, from the files each one read, so a user that no longer compiles is still named.
 - The standard library's API is approved with the rest of the project, so a change to it is a
   decision, recorded in `golden/`.
+
+## M26 (v0.27)
+
+- **Work is a contract, in steps**: an agent that makes a function quadratic breaks no test, so
+  the bound is declared (`steps 2 * xs.len() + 3`) and checked like requires and ensures. Steps
+  are the interpreter's deterministic unit, so a bound is exact on every machine, with no timers
+  and no tolerance.
+- **Checked by verify, not at run time**: native code does not count steps, and the backends
+  must agree on every program; the contract lint already runs each function on generated
+  arguments, so it measures each call against its bound there.
+- **A bound also says what may be slow**: arguments whose bound is beyond what a check may run
+  are skipped, not reported, so `std.text.repeat` no longer needs an allow for huge `n`.
+- **`steps` is contextual**: it only starts a clause after a signature, so the many programs
+  that name a variable `steps` keep working.
+- The bound is part of the signature, so the API goldens caught that the standard library's
+  promises changed; they were approved with the bounds.

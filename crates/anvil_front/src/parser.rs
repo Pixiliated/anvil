@@ -410,6 +410,7 @@ impl Parser {
                 external: None,
                 requires: Vec::new(),
                 ensures: Vec::new(),
+                steps: None,
                 body: Block { stmts: Vec::new(), span: semi },
                 span: fstart.to(semi),
                 allows: Vec::new(),
@@ -594,6 +595,7 @@ impl Parser {
                 external: None,
                 requires: Vec::new(),
                 ensures: Vec::new(),
+                steps: None,
                 body: Block { stmts: Vec::new(), span: semi },
                 span: start.to(semi),
                 allows,
@@ -602,8 +604,20 @@ impl Parser {
         }
         let mut requires = Vec::new();
         let mut ensures = Vec::new();
+        let mut steps = None;
         loop {
             match self.peek() {
+                // `steps` is a name everywhere else: only here, among the clauses, does it start one.
+                Tok::Requires | Tok::Ensures if steps.is_some() => {
+                    return Err(Diagnostic::new("E0100", self.span(), "the steps clause comes after every other clause"));
+                }
+                Tok::Ident(n) if n == "steps" => {
+                    if steps.is_some() {
+                        return Err(Diagnostic::new("E0100", self.span(), "a function has at most one steps clause"));
+                    }
+                    self.bump();
+                    steps = Some(self.expr_no_struct()?);
+                }
                 Tok::Requires => {
                     if !ensures.is_empty() {
                         return Err(Diagnostic::new(
@@ -637,6 +651,7 @@ impl Parser {
             external: None,
             requires,
             ensures,
+            steps,
             body,
             span,
             allows,
@@ -1044,6 +1059,7 @@ impl Parser {
             external: None,
             requires: Vec::new(),
             ensures: Vec::new(),
+            steps: None,
             span: start.to(body.span),
             body,
             allows: Vec::new(),

@@ -1189,6 +1189,86 @@ fn public_apis_are_approved_like_goldens() {
 }
 
 #[test]
+fn steps_bounds_are_checked_on_generated_arguments() {
+    let p = hello_project("steps");
+    p.write(
+        "src/maths.anv",
+        r#"// The total of xs.
+fn total(xs: [i64]) -> i64
+    steps 2 * xs.len() + 3
+{
+    var t: i64 = 0;
+    for x in xs {
+        t = t + x;
+    }
+    return t;
+}
+
+// Whether xs has a repeat, comparing every pair: more than its linear bound.
+fn has_repeat(xs: [i64]) -> bool
+    steps 4 * xs.len() + 3
+{
+    for i in 0..xs.len() {
+        for j in 0..i {
+            if xs[i] == xs[j] {
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
+// 0 + 1 + ... + (n - 1), one step at a time; `steps` is still a name.
+fn count_to(n: i64) -> i64
+    requires n >= 0
+    steps 2 * n + 3
+{
+    var steps: i64 = 0;
+    for i in 0..n {
+        steps = steps + i;
+    }
+    return steps;
+}
+
+test "they work" {
+    assert(total([1, 2]) == 3 && has_repeat([1, 1]) && count_to(4) == 6);
+}
+"#,
+    );
+    let v = json_of(&p.anvil(&["verify", "--json"]));
+    let found: Vec<(&str, &str, &str)> = v["open"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|f| f["check"] == "contract")
+        .map(|f| (f["check"].as_str().unwrap(), f["at"].as_str().unwrap(), f["message"].as_str().unwrap()))
+        .collect();
+    assert_eq!(found.len(), 1, "{v}");
+    assert_eq!(found[0].1, "13:4", "{v}");
+    assert!(found[0].2.contains("takes more than"), "{v}");
+    assert!(found[0].2.contains("past its steps bound at src/maths.anv:14:11: 4 * xs.len() + 3"), "{v}");
+    let file = v["files"].as_array().unwrap().iter().find(|f| f["file"] == "src/maths.anv").unwrap();
+    let contract = |name: &str| file["contracts"].as_array().unwrap().iter().find(|c| c["function"] == name).unwrap().clone();
+    assert_eq!(contract("total")["status"], "held", "{file}");
+    // count_to's bound for its largest inputs is more than a check may run: those are not run.
+    assert_eq!(contract("count_to")["status"], "held", "{file}");
+    assert!(contract("count_to")["beyond"].as_u64().unwrap() + contract("count_to")["overflowed"].as_u64().unwrap() > 0, "{file}");
+    // The bound is part of the signature: outline shows it, and fmt keeps it.
+    let outline = p.json(&["outline", "src/maths.anv"]);
+    assert_eq!(outline["items"][0]["signature"], "fn total(xs: [i64]) -> i64 steps 2 * xs.len() + 3", "{outline}");
+    assert!(p.anvil(&["fmt", "src/maths.anv", "--check"]).status.success());
+
+    // The bound is an i64 of the parameters, and the last clause.
+    let code = |text: &str| {
+        p.write("src/bad.anv", text);
+        p.json(&["check", "src/bad.anv"])["diagnostics"][0]["code"].as_str().unwrap().to_string()
+    };
+    assert_eq!(code("fn f(n: i64) -> i64\n    steps n > 0\n{\n    return n;\n}\n"), "E0300");
+    assert_eq!(code("fn f(n: i64) -> i64\n    steps result\n{\n    return n;\n}\n"), "E0322");
+    assert_eq!(code("fn f(n: i64) -> i64\n    steps n\n    ensures result == n\n{\n    return n;\n}\n"), "E0100");
+}
+
+#[test]
 fn a_differing_golden_leaves_the_actual_output_and_a_diff() {
     let p = hello_project("golden_diff");
     let program = |second: &str| {

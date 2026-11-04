@@ -83,7 +83,7 @@ in full (`anvil spec` prints it).
 
 ## Status
 
-v0.26: programs of one or more files (modules with explicit imports and `pub`), generic
+v0.27: programs of one or more files (modules with explicit imports and `pub`), generic
 functions, structs and enums with built-in constraints, i64, f64 with units, bool, strings with interpolation,
 search and split, growable arrays and slices, maps in key order, structs, enums with
 exhaustive `match`, structural `==`, `Option` and `Result` with `?`, function values and
@@ -91,7 +91,8 @@ closures, methods and interfaces, bytes and bit operations, deterministic parall
 (`parallel_map`), built-ins for text,
 sorting, stderr, exit codes, the environment and directories, a standard library written in
 Anvil (`std.list`, `std.set`, `std.text`, `std.math`),
-contracts, effects (io with arguments and stdin, files, a clock, seeded random numbers),
+contracts (including `steps` bounds on a call's work, checked by verify), effects (io with
+arguments and stdin, files, a clock, seeded random numbers),
 `noalloc`, C functions (`extern`) and tests. There are two backends:
 
 - an **interpreter**, which is the reference semantics;

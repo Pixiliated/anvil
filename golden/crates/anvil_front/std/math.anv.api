@@ -1,9 +1,9 @@
 fn ceil(x: f64) -> f64
 fn clamp[T: ordered](x: T, low: T, high: T) -> T requires !(high < low)
 fn floor(x: f64) -> f64
-fn gcd(a: i64, b: i64) -> i64
+fn gcd(a: i64, b: i64) -> i64 steps 400
 fn max[T: ordered](a: T, b: T) -> T
 fn min[T: ordered](a: T, b: T) -> T
-fn pow(base: i64, exp: i64) -> i64 requires exp >= 0
+fn pow(base: i64, exp: i64) -> i64 requires exp >= 0 steps 400
 fn round(x: f64) -> f64
 fn sign(x: i64) -> i64

@@ -28,9 +28,9 @@ pub fn pad_right(s: str, width: i64, fill: str) -> str
 }
 
 // s, n times.
-allow contract "it takes n steps, so n near i64::MAX runs past what a check may take"
 pub fn repeat(s: str, n: i64) -> str
     requires n >= 0
+    steps 2 * n + 3
 {
     var out: str = "";
     for _i in 0..n {
@@ -62,7 +62,9 @@ pub fn lines(s: str) -> [str] {
 }
 
 // The words of s: the pieces between spaces, tabs and line breaks, none empty.
-pub fn words(s: str) -> [str] {
+pub fn words(s: str) -> [str]
+    steps 5 * s.len() + 5
+{
     var out: [str] = [];
     var word: str = "";
     for c in s.chars() {

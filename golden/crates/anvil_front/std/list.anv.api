@@ -1,7 +1,7 @@
 fn all[T](xs: [T], holds: fn(T) -> bool) -> bool
 fn any[T](xs: [T], holds: fn(T) -> bool) -> bool
 fn chunks[T](xs: [T], size: i64) -> [[T]] requires size > 0
-fn concat[T](a: [T], b: [T]) -> [T]
+fn concat[T](a: [T], b: [T]) -> [T] steps 2 * b.len() + 3
 fn contains[T](xs: [T], x: T) -> bool
 fn count[T](xs: [T], holds: fn(T) -> bool) -> i64
 fn first_where[T](xs: [T], holds: fn(T) -> bool) -> Option[T]
@@ -15,5 +15,5 @@ fn min_by_key[T, K: ordered](xs: [T], key: fn(T) -> K) -> Option[T]
 fn range(from: i64, to: i64) -> [i64]
 fn sort_by[T](xs: [T], before: fn(T, T) -> bool) -> [T]
 fn sort_by_key[T, K: ordered](xs: [T], key: fn(T) -> K) -> [T]
-fn sum(xs: [i64]) -> i64
-fn unique[T](xs: [T]) -> [T]
+fn sum(xs: [i64]) -> i64 steps 2 * xs.len() + 3
+fn unique[T](xs: [T]) -> [T] steps 4 * xs.len() * xs.len() + 8 * xs.len() + 3

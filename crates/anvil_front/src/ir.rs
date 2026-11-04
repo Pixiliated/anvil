@@ -197,6 +197,9 @@ pub struct Func {
     pub external: Option<ExternFn>,
     pub requires: Vec<Check>,
     pub ensures: Vec<Check>,
+    /// `steps EXPR`: how many steps a call may take (an i64 of the parameters), with the text
+    /// the contract lint reports; checked by verify on generated arguments, never at run time.
+    pub steps: Option<Check>,
     /// Bound to the return value while ensures clauses run.
     pub result_local: Option<LocalId>,
     pub locals: Vec<Local>,
