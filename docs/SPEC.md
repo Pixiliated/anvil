@@ -1,4 +1,4 @@
-# Anvil language specification (v0.23)
+# Anvil language specification (v0.24)
 
 Anvil is a small, compiled, general-purpose language designed to be written mostly by AI agents
 and read by humans. Its rules aim at three things: one obvious way to write each thing, code
@@ -289,6 +289,11 @@ fn safe_div(n: i64, d: i64) -> i64
 `requires` clauses run on entry, `ensures` clauses before returning (including returns made by
 `?`), with `result` naming the return value. A false clause is a panic naming the clause.
 Contracts must be pure. All `requires` come before all `ensures`.
+
+A contract is also checked without any test: `verify` calls each pure function that has one on
+generated arguments (the `contract` lint, under Projects). Its `requires` say which inputs the
+function takes, so a requires is the fix when the function is right but its inputs are not
+all good ones.
 
 ### C functions
 
@@ -856,12 +861,25 @@ covered by the files that import it):
   is missing), and an `else if` is not a branch of its own; its blocks are. A function
   literal's branches belong to the function it is written in, and a generic's are counted over
   all its instances. `&&`, `||` and `?` are not branches.
+- **`contract`**: a function with a contract that breaks it. Each pure function of the file
+  that has a `requires` or an `ensures` (a generic's instances too) is called on 100 generated
+  arguments, as a property test's inputs are generated (small first, with edge values such as
+  `i64::MAX`). For those its requires accept, it must return with its ensures holding; a
+  panic (an ensures, a callee's requires, an index out of bounds, ...) is a finding, shrunk to
+  small arguments and shown as Anvil values. A call that overflows i64 counts as one the
+  requires excluded, since the language itself refuses it. A call that runs past 1,000,000
+  steps is a finding (a loop that never ends, or inputs a requires should bound), and so is a
+  requires that accepts none of the 100: the contract went unchecked. A function with effects,
+  or a function parameter, is not checked (`verify --json` says so in `contracts`).
 
-Fix a finding with a test; where no test can reach it, write `allow untested "reason"` or
-`allow unreached "reason"` on its own line before the `fn`. The reason is required, an unknown
+Fix a finding with a test, or for `contract` in the function or its contract; where that cannot
+be, write `allow untested "reason"`, `allow unreached "reason"` or `allow contract "reason"` on
+its own line before the `fn`. The reason is required, an unknown
 lint or a repeated allow is an error, and an allow that switches nothing off is reported as
-stale. `verify --json` gives each file's `untested` functions, `unreached` branches and
-`branches` (`total` and `taken`); the review sheet sums them.
+stale. `verify --json` gives each file's `untested` functions, `unreached` branches,
+`branches` (`total` and `taken`) and `contracts` (each function's status: `held` with the
+cases `checked`, `excluded` and `overflowed`, `broken`, `stopped` or `unchecked`); the review
+sheet sums the branches.
 
 **Mutation testing.** Coverage says what the tests run; `anvil mutate FILE` asks whether they
 would notice it being wrong. Each **mutant** changes one thing in one function of FILE (a

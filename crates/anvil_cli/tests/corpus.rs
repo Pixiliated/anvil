@@ -984,6 +984,87 @@ test "ages and doubles" {
 }
 
 #[test]
+fn verify_checks_contracts_on_generated_arguments() {
+    let p = hello_project("contracts");
+    p.write(
+        "src/maths.anv",
+        r#"fn half_up(n: i64) -> i64
+    ensures result * 2 >= n
+{
+    return n / 2;
+}
+
+fn second(xs: [i64]) -> i64
+    requires xs.len() > 0
+{
+    return xs[1];
+}
+
+allow contract "kept"
+fn first(xs: [i64]) -> i64
+    requires xs.len() > 0
+{
+    return xs[0];
+}
+
+fn exact(n: i64) -> i64
+    requires n == 12345
+{
+    return n;
+}
+
+fn spin(n: i64) -> i64
+    requires n >= 0
+{
+    var i: i64 = 0;
+    while i < n {
+        i = i + 1;
+    }
+    return i;
+}
+
+fn shout(s: str) uses io
+    requires s.len() > 0
+{
+    print(s);
+}
+
+fn grow(n: i64) -> i64
+    ensures result > n
+{
+    return n + 1;
+}
+"#,
+    );
+    let v = json_of(&p.anvil(&["verify", "--json"]));
+    let found: Vec<(&str, &str, &str)> = v["open"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|f| f["check"] == "contract" || f["check"] == "allow")
+        .map(|f| (f["check"].as_str().unwrap(), f["at"].as_str().unwrap(), f["message"].as_str().unwrap()))
+        .collect();
+    let at: Vec<(&str, &str)> = found.iter().map(|(c, a, _)| (*c, *a)).collect();
+    // half_up breaks its ensures, second panics within its requires, first's allow is stale,
+    // exact's requires admits nothing generated, spin runs too long; shout has effects and is
+    // not checked, and grow only overflows, which counts as outside its contract.
+    assert_eq!(at, [("contract", "1:4"), ("contract", "7:4"), ("allow", "14:4"), ("contract", "20:4"), ("contract", "26:4")], "{v}");
+    assert!(found[0].2.starts_with("`half_up` breaks its contract for n: 1: ensures failed at src/maths.anv:2:13"), "{v}");
+    assert!(found[1].2.contains("for xs: [0]: index 1 out of bounds"), "{v}");
+    assert!(found[3].2.contains("checked on none of 100 generated inputs"), "{v}");
+    assert!(found[4].2.contains("runs past 1000000 steps for n: 9223372036854775807"), "{v}");
+    let file = v["files"].as_array().unwrap().iter().find(|f| f["file"] == "src/maths.anv").unwrap();
+    let status = |name: &str| {
+        let c = file["contracts"].as_array().unwrap().iter().find(|c| c["function"] == name).unwrap().clone();
+        c
+    };
+    assert_eq!(status("shout")["status"], "unchecked", "{file}");
+    assert_eq!(status("grow")["status"], "held", "{file}");
+    assert!(status("grow")["overflowed"].as_u64().unwrap() > 0, "{file}");
+    assert!(String::from_utf8(anvil(&["explain", "contract"]).stdout).unwrap().starts_with("contract: "));
+}
+
+#[test]
 fn a_differing_golden_leaves_the_actual_output_and_a_diff() {
     let p = hello_project("golden_diff");
     let program = |second: &str| {

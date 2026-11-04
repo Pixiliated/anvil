@@ -21,6 +21,7 @@ fn step(body: Body, force: f64[N], dt: f64[s]) -> Body
 }
 
 fn weight(mass: f64[kg]) -> f64[N]
+    requires mass >= 0.0[kg]
     ensures result <= 0.0[N]
 {
     return mass * -9.81[m/s^2];
@@ -28,6 +29,8 @@ fn weight(mass: f64[kg]) -> f64[N]
 
 fn flight_steps(start: Body, dt: f64[s]) -> i64
     requires start.height >= 0.0[m]
+    requires start.mass > 0.0[kg]
+    requires dt > 0.0[s]
     ensures result >= 0
 {
     var body: Body = start;

@@ -500,6 +500,135 @@ fn shrink_failure(
     (inputs, message, output, kept)
 }
 
+/// How one call of a function went, when checking its contract on generated arguments.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Called {
+    Returned,
+    /// Its requires do not hold for the arguments, so the call says nothing about it.
+    Excluded,
+    /// Integer arithmetic overflowed: the arguments are beyond what i64 holds for this work,
+    /// which the language itself refuses, so the call says nothing about the contract either.
+    Overflowed,
+    /// It panicked with its requires met: an ensures failed, or something in its body.
+    Panicked(String),
+    Stopped,
+}
+
+/// Calls function `fid` with `args`: its requires first on their own (so a call they exclude is
+/// told apart from one that breaks the contract), then the call itself, which checks its ensures.
+pub fn call_checked(program: &Program, fid: FuncId, args: &[Value], max_steps: Option<u64>, host: Host) -> Called {
+    let mut out = Vec::new();
+    let mut it = Interp::new(program, &mut out, max_steps, None, host);
+    let f = &program.funcs[fid];
+    let mut frame = vec![Value::Void; f.locals.len()];
+    for (p, a) in f.params.iter().zip(args) {
+        frame[*p] = a.clone();
+    }
+    let outcome = |r: R<Value>| match r {
+        Ok(_) => Called::Returned,
+        Err(Unwind::Panic(m)) if is_overflow(&m) => Called::Overflowed,
+        Err(Unwind::Panic(m)) => Called::Panicked(m),
+        Err(Unwind::OutOfSteps) => Called::Stopped,
+        Err(other) => unreachable!("{other:?} out of a pure function"),
+    };
+    for c in &f.requires {
+        match it.eval(&c.expr, &mut frame) {
+            Ok(v) if v.as_bool() => {}
+            Ok(_) => return Called::Excluded,
+            Err(e) => return outcome(Err(e)),
+        }
+    }
+    outcome(it.call(fid, args.to_vec()))
+}
+
+/// What checking a contract found.
+#[derive(Debug)]
+pub enum Contract {
+    /// No generated arguments broke it: `checked` met its requires, `excluded` did not, and
+    /// `overflowed` overflowed i64.
+    Held { checked: u64, excluded: u64, overflowed: u64 },
+    /// The smallest arguments found (after `shrinks` steps) that meet its requires and make it
+    /// panic, with the panic.
+    Broken { inputs: Vec<Value>, message: String, shrinks: u64 },
+    /// Arguments on which it ran out of steps.
+    Stopped { inputs: Vec<Value> },
+}
+
+/// Checks the contract of pure function `fid` on `cases` generated arguments (seeded by its name
+/// and `seed`): with its requires met, it must return, its ensures holding. A breaking case is
+/// shrunk while it keeps breaking.
+pub fn check_contract(
+    program: &Program,
+    fid: FuncId,
+    cases: u64,
+    seed: u64,
+    max_steps: Option<u64>,
+    mut host: Host,
+) -> Contract {
+    let f = &program.funcs[fid];
+    let types: Vec<Ty> = f.params.iter().map(|p| f.locals[*p].ty.clone()).collect();
+    let mut rng = gen::Rng::new(gen::test_seed(&f.name, seed));
+    let (mut checked, mut excluded, mut overflowed) = (0, 0, 0);
+    for case in 0..cases {
+        let size = 1 + case * 30 / cases.max(1);
+        let inputs: Vec<Value> = types.iter().map(|t| gen::generate(t, program, &mut rng, size)).collect();
+        match call_checked(program, fid, &inputs, max_steps, host.reborrow()) {
+            Called::Returned => checked += 1,
+            Called::Excluded => excluded += 1,
+            Called::Overflowed => overflowed += 1,
+            Called::Stopped => return Contract::Stopped { inputs },
+            Called::Panicked(mut message) => {
+                let mut inputs = inputs;
+                let (mut tries, mut kept) = (0, 0);
+                'smaller: loop {
+                    for i in 0..inputs.len() {
+                        for c in gen::shrink(&inputs[i], &types[i], program) {
+                            if tries == MAX_SHRINKS {
+                                break 'smaller;
+                            }
+                            tries += 1;
+                            let mut trial = inputs.clone();
+                            trial[i] = c;
+                            if let Called::Panicked(m) = call_checked(program, fid, &trial, max_steps, host.reborrow()) {
+                                (inputs, message) = (trial, m);
+                                kept += 1;
+                                continue 'smaller;
+                            }
+                        }
+                    }
+                    break;
+                }
+                return Contract::Broken { inputs, message, shrinks: kept };
+            }
+        }
+    }
+    Contract::Held { checked, excluded, overflowed }
+}
+
+/// Whether values of `ty` can be generated: everything but function types (and what holds them).
+pub fn generatable(ty: &Ty, program: &Program) -> bool {
+    fn go(ty: &Ty, program: &Program, seen: &mut Vec<String>) -> bool {
+        match ty {
+            Ty::I64 | Ty::F64(_) | Ty::Bool | Ty::Str | Ty::Bytes => true,
+            Ty::Array(t) => go(t, program, seen),
+            Ty::Map(k, v) => go(k, program, seen) && go(v, program, seen),
+            Ty::Struct(id) | Ty::Enum(id) => {
+                let key = format!("{ty:?}");
+                if seen.contains(&key) {
+                    return true;
+                }
+                seen.push(key);
+                match ty {
+                    Ty::Struct(_) => program.structs[*id].fields.iter().all(|(_, t)| go(t, program, seen)),
+                    _ => program.enums[*id].variants.iter().all(|v| v.fields.iter().all(|(_, t)| go(t, program, seen))),
+                }
+            }
+            Ty::Void | Ty::Fn(_) | Ty::Param(_) | Ty::Error => false,
+        }
+    }
+    go(ty, program, &mut Vec::new())
+}
+
 /// Runs `f` on a thread with a stack big enough for MAX_CALL_DEPTH interpreted calls.
 pub fn run_on_big_stack<T: Send + 'static>(f: impl FnOnce() -> T + Send + 'static) -> T {
     std::thread::Builder::new()

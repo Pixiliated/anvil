@@ -152,3 +152,13 @@ green and the interpreter and native backend agreeing on every program in `tests
 - [x] Killed, survived and invalid mutants with what killed each; `allow mutants "why"` for
   equivalent ones, stale when nothing survives; an `anvil explain mutants` entry
 - [x] The standard library is mutation-clean: the survivors it found have tests or reasoned allows
+
+## M23: Contracts checked without tests (v0.24)
+- [x] The `contract` lint in verify: each pure function with a requires or ensures is called on
+  100 generated arguments; one its requires accept that makes it panic or break its ensures is
+  a finding, shrunk and shown as Anvil values; so are calls past a million steps and requires
+  that accept nothing; `allow contract "why"` with stale allows
+- [x] Overflow of i64 counts as excluded input; functions with effects or function parameters
+  are listed as unchecked in `verify --json`
+- [x] What it found is fixed: `pow` by squaring (it looped `exp` times), the projectile
+  example's missing requires (negative mass, zero `dt`)

@@ -3,6 +3,13 @@
 Each version is one roadmap milestone (docs/ROADMAP.md); docs/DECISIONS.md says why things are
 the way they are.
 
+## 0.24.0
+- The `contract` lint: verify calls each pure function with a `requires` or `ensures` on 100
+  generated arguments and reports, shrunk, any its requires accept on which it panics, breaks
+  its ensures or runs past a million steps; `allow contract "why"`.
+- `std.math.pow` squares (at most 63 rounds; it used to loop `exp` times); the projectile
+  example states the inputs it takes.
+
 ## 0.23.0
 - `anvil mutate FILE`: mutation testing. One operator, literal, `!`/`-`/`~` or call statement
   changed at a time, run against the tests and goldens of the file and its importers; survivors

@@ -433,6 +433,18 @@ pub const LINTS: &[(&str, &str)] = &[
          reported as stale.",
     ),
     (
+        "contract",
+        "A function with a contract (requires or ensures) that breaks it. verify calls every pure \
+         function of the file that has one on 100 generated arguments; for those its requires \
+         accept, it must return and its ensures must hold (a call that overflows i64 counts as \
+         one its requires excluded: the language refuses it). A failure is shrunk to small \
+         arguments and reported with the panic. A requires that accepts none of them, or a call \
+         that runs past a million steps, is a finding too: the contract went unchecked. Fix the \
+         function or its contract (a requires is how a function says which inputs it takes), \
+         or write `allow contract \"why\"` before its `fn`; an allow on a function that keeps \
+         its contract is reported as stale.",
+    ),
+    (
         "mutants",
         "Applied by `anvil mutate`, not verify: a mutant of a function (one operator, literal or call \
          changed) that no test or golden notices. Add a test that tells them apart, or, when the \

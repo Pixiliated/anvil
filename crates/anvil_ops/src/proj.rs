@@ -255,14 +255,15 @@ fn verify_file(
         }
     };
     let branches = program.branches.clone();
-    let (results, mut ran, mut reached) = anvil_interp::run_on_big_stack(move || {
+    let (results, mut ran, mut reached, contracts) = anvil_interp::run_on_big_stack(move || {
         let mut ran = vec![false; p2.funcs.len()];
         let mut reached = vec![false; p2.branches.len()];
         let mut rec = Recorder::new(&p2);
         let results =
             crate::testing::run_all(&p2, crate::PROPERTY_CASES, 0, max_steps, Some(&mut rec), &mut ffi, &root2);
         mark_ran(&mut ran, &mut reached, &Counts::of(&rec));
-        (results, ran, reached)
+        let contracts = crate::testing::check_contracts(&p2, max_steps, &mut ffi, &root2);
+        (results, ran, reached, contracts)
     });
     let mut test_failures = 0;
     for r in &results {
@@ -272,6 +273,7 @@ fn verify_file(
             add("test", format!("test \"{}\" fails{inputs}: {m}", r.name), String::new());
         }
     }
+    let contracts = contract_findings(&program, &src, contracts, &mut add);
     let g = golden::check_file(project, &src, program, native, max_steps);
     if g.failed() {
         add("golden", format!("{}: {}", g.status, g.detail.clone().unwrap_or_default()), String::new());
@@ -328,9 +330,63 @@ fn verify_file(
     let steps = g.counts.as_ref().map(|c| c.steps);
     let json = json!({
         "file": file, "errors": 0, "tests": tests.len(), "tests_failed": test_failures, "golden": g.status,
-        "steps": steps, "untested": [], "unreached": [],
+        "steps": steps, "untested": [], "unreached": [], "contracts": contracts,
     });
     (json, Some(Coverage { file: file.to_string(), own, ran, branches: own_branches, reached }))
+}
+
+/// The `contract` lint: a function whose requires hold for generated arguments must return, its
+/// ensures holding. Its findings are added; the JSON says what was checked.
+fn contract_findings(
+    program: &anvil_front::ir::Program,
+    src: &anvil_front::span::SourceFile,
+    contracts: Vec<(usize, crate::testing::Checked)>,
+    add: &mut impl FnMut(&str, String, String),
+) -> Vec<Value> {
+    use crate::testing::Checked;
+    let mut out = Vec::new();
+    for (id, result) in contracts {
+        let f = &program.funcs[id];
+        let (l, c) = src.line_col(f.span.start);
+        let at = format!("{l}:{c}");
+        let allowed = allows(&f.allows, "contract");
+        let name = &f.name;
+        let fix = "fix the function or its contract, or write `allow contract \"why\"` before it";
+        let json = match result {
+            Checked::Unchecked(why) => json!({ "function": name, "status": "unchecked", "why": why }),
+            Checked::Held { checked, excluded, overflowed } => {
+                if allowed {
+                    add("allow", format!("`{name}` keeps its contract on every generated input, so its `allow contract` is stale: remove it"), at.clone());
+                } else if checked == 0 {
+                    add(
+                        "contract",
+                        format!("`{name}` was checked on none of {} generated inputs ({excluded} outside its requires, {overflowed} overflowing i64), so its contract went unchecked; test it, or write `allow contract \"why\"` before it", excluded + overflowed),
+                        at.clone(),
+                    );
+                }
+                json!({ "function": name, "status": "held", "checked": checked, "excluded": excluded, "overflowed": overflowed })
+            }
+            Checked::Broken { inputs, message, shrinks } => {
+                if !allowed {
+                    add("contract", format!("`{name}` breaks its contract for {inputs}: {message}; {fix}"), at.clone());
+                }
+                json!({ "function": name, "status": "broken", "inputs": inputs, "message": message, "shrinks": shrinks })
+            }
+            Checked::Stopped { inputs } => {
+                let limit = crate::testing::CONTRACT_STEPS;
+                if !allowed {
+                    add(
+                        "contract",
+                        format!("`{name}` runs past {limit} steps for {inputs}; bound its inputs with a requires, or write `allow contract \"why\"` before it"),
+                        at.clone(),
+                    );
+                }
+                json!({ "function": name, "status": "stopped", "inputs": inputs })
+            }
+        };
+        out.push(json);
+    }
+    out
 }
 
 fn allows(list: &[(String, String)], lint: &str) -> bool {

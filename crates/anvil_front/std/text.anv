@@ -28,6 +28,7 @@ pub fn pad_right(s: str, width: i64, fill: str) -> str
 }
 
 // s, n times.
+allow contract "it takes n steps, so n near i64::MAX runs past what a check may take"
 pub fn repeat(s: str, n: i64) -> str
     requires n >= 0
 {

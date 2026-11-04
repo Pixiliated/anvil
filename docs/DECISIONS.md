@@ -429,3 +429,21 @@ Short records of choices that are not obvious from the code. Newest last.
   tests, so they are not held to it; the standard library is.
 - Its first run on the standard library found tests that could not tell `sign(1)` from 0, the
   first of equal keys in `min_by_key`/`max_by_key`, or one-letter words; they have tests now.
+
+## M23 (v0.24)
+
+- **A contract is a specification verify can run**: with requires naming the inputs a
+  function takes and ensures what it promises, generated arguments check it with no test
+  written. It is a lint in verify (one verdict), using the property tests' generator and
+  shrinker, seeded by the function's name, so it finds the same thing every run.
+- **Requires are evaluated first, on their own**, so an input they exclude is told apart from
+  one the function fails on; a callee's requires failing is the caller's finding, since its own
+  requires let the input through.
+- **Overflow counts as excluded, not broken.** Generated inputs include i64's extremes, so nearly
+  every arithmetic function would otherwise be flagged, and contracts would become something to
+  avoid. Overflow is the language refusing the input range, loudly, at run time either way.
+- **Too slow is a finding** (over a million steps on one call): an endless loop looks the same,
+  and a requires can bound the inputs. Only pure functions are checked: generated arguments
+  cannot stand in for files, stdin or the clock.
+- It found `pow` looping `exp` times (`pow(1, i64::MAX)` never finished; it squares now, in at
+  most 63 rounds) and the projectile example accepting a negative mass and a zero time step.

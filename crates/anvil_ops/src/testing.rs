@@ -3,8 +3,8 @@
 //! the interpreter's (pass or the same panic, the same output, every object freed).
 
 use crate::{compile, golden, unique, Report, EXIT_FAILED, EXIT_OK};
-use anvil_front::ir::Program;
-use anvil_interp::{Property, TestFail};
+use anvil_front::ir::{FuncId, Program};
+use anvil_interp::{Contract, Property, TestFail};
 use serde_json::json;
 use std::path::Path;
 
@@ -96,6 +96,63 @@ pub(crate) fn run_all(
             }
         }
         out.push(ran);
+    }
+    out
+}
+
+/// The steps one call may take while its contract is checked: a call that takes more loops, or
+/// does more work than a check should.
+pub const CONTRACT_STEPS: u64 = 1_000_000;
+
+/// What checking one function's contract found, with arguments written as Anvil values (the
+/// interpreter's own values stay on its thread).
+pub(crate) enum Checked {
+    Unchecked(&'static str),
+    Held { checked: u64, excluded: u64, overflowed: u64 },
+    Broken { inputs: String, message: String, shrinks: u64 },
+    Stopped { inputs: String },
+}
+
+/// Checks the contract of every function of the root module that has one, on generated
+/// arguments: the checked ones' results, and why the others were not checked.
+pub(crate) fn check_contracts(
+    program: &Program,
+    max_steps: Option<u64>,
+    ffi: &mut Option<crate::Ffi>,
+    root: &Path,
+) -> Vec<(FuncId, Checked)> {
+    let steps = max_steps.map_or(CONTRACT_STEPS, |m| m.min(CONTRACT_STEPS));
+    let mut out = Vec::new();
+    for (id, f) in program.funcs.iter().enumerate() {
+        let has_contract = !f.requires.is_empty() || !f.ensures.is_empty();
+        if f.module != 0 || f.captures.is_some() || f.external.is_some() || !has_contract {
+            continue;
+        }
+        if !f.effects.is_pure() {
+            out.push((id, Checked::Unchecked("it has effects, which generated arguments cannot stand in for")));
+            continue;
+        }
+        if !f.params.iter().all(|p| anvil_interp::generatable(&f.locals[*p].ty, program)) {
+            out.push((id, Checked::Unchecked("a parameter is a function, and functions are not generated")));
+            continue;
+        }
+        let shown = |inputs: &[anvil_interp::Value]| {
+            let parts: Vec<String> = f
+                .params
+                .iter()
+                .zip(inputs)
+                .map(|(p, v)| format!("{}: {}", f.locals[*p].name, anvil_interp::show(v, &f.locals[*p].ty, program)))
+                .collect();
+            parts.join(", ")
+        };
+        let mut err = Vec::new();
+        let host = crate::checked_host(ffi, root, &[], None, &mut err, &[]);
+        let checked = match anvil_interp::check_contract(program, id, PROPERTY_CASES, 0, Some(steps), host) {
+            Contract::Held { checked, excluded, overflowed } => Checked::Held { checked, excluded, overflowed },
+            Contract::Broken { inputs, message, shrinks } => Checked::Broken { inputs: shown(&inputs), message, shrinks },
+            Contract::Stopped { inputs } => Checked::Stopped { inputs: shown(&inputs) },
+        };
+        out.push((id, checked));
     }
     out
 }

@@ -609,6 +609,10 @@ pub const PANIC_EXIT_CODE: i32 = 101;
 pub fn overflow_message(op: &str, site: &str) -> String {
     format!("integer overflow in `{op}` at {site}")
 }
+/// Whether a panic is integer overflow (of `+`, `-`, `*`, `/`, negation or `abs`).
+pub fn is_overflow(message: &str) -> bool {
+    message.starts_with("integer overflow in `")
+}
 pub fn div_zero_message(site: &str) -> String {
     format!("division by zero at {site}")
 }

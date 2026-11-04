@@ -23,13 +23,22 @@ pub fn clamp[T: ordered](x: T, low: T, high: T) -> T
     return max(a: low, b: min(a: x, b: high));
 }
 
-// base to the power exp; overflow panics, as for *.
+// base to the power exp; overflow panics, as for *. By squaring, so it takes at most 63 rounds;
+// base is squared only while bits of exp remain, so it overflows only when the power does.
 pub fn pow(base: i64, exp: i64) -> i64
     requires exp >= 0
 {
     var out: i64 = 1;
-    for _i in 0..exp {
-        out = out * base;
+    var b: i64 = base;
+    var e: i64 = exp;
+    while e > 0 {
+        if e % 2 == 1 {
+            out = out * b;
+        }
+        e = e / 2;
+        if e > 0 {
+            b = b * b;
+        }
     }
     return out;
 }
@@ -114,6 +123,8 @@ test "min, max and clamp" {
 
 test "pow, gcd and sign" {
     assert(pow(base: 2, exp: 10) == 1024 && pow(base: -3, exp: 3) == -27 && pow(base: 7, exp: 0) == 1);
+    assert(pow(base: 2, exp: 62) == 4611686018427387904 && pow(base: -2, exp: 63) == -9223372036854775807 - 1);
+    assert(pow(base: 1, exp: 9223372036854775807) == 1 && pow(base: -1, exp: 9223372036854775807) == -1);
     assert(gcd(a: 84, b: -36) == 12 && gcd(a: 0, b: 0) == 0 && gcd(a: 0, b: 5) == 5);
     assert(sign(-4) == -1 && sign(0) == 0 && sign(9) == 1 && sign(1) == 1 && sign(-1) == -1);
 }
@@ -130,4 +141,14 @@ test "floor and ceil are within one of x" for all x: f64 {
     let f: f64 = floor(x);
     assert(f <= x && x - f < 1.0);
     assert(ceil(x) >= x && ceil(x) - x < 1.0);
+}
+
+test "pow agrees with repeated multiplication" for all base: i64, exp: i64 {
+    let b: i64 = base % 100;
+    let e: i64 = (exp % 8 + 8) % 8;
+    var want: i64 = 1;
+    for _i in 0..e {
+        want = want * b;
+    }
+    assert(pow(base: b, exp: e) == want);
 }
