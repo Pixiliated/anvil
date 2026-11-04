@@ -3,6 +3,7 @@
 pub mod ast;
 pub mod check;
 pub mod diag;
+pub mod doc;
 pub mod fmt;
 pub mod ir;
 pub mod lexer;
@@ -98,6 +99,21 @@ pub fn analyze_with(src: &SourceFile, load: Load) -> (Vec<SourceFile>, check::An
         return (l.sources, a);
     }
     let asts: Vec<ast::File> = l.asts.into_iter().map(|a| a.expect("parsed")).collect();
+    // Each file's doc examples become tests of it (run when it is the root).
+    let mut examples = Vec::new();
+    let mut bad = Vec::new();
+    for (i, ast) in asts.iter().enumerate() {
+        let (tests, errors) = doc::examples(&l.sources[i], ast);
+        examples.push(tests);
+        bad.extend(errors.into_iter().map(|mut d| {
+            d.file = i;
+            d
+        }));
+    }
+    if !bad.is_empty() {
+        let a = check::Analysis { program: None, diags: bad, facts: check::Facts::default() };
+        return (l.sources, a);
+    }
     let modules: Vec<check::Module> = (0..l.sources.len())
         .map(|i| check::Module {
             src: &l.sources[i],
@@ -105,6 +121,7 @@ pub fn analyze_with(src: &SourceFile, load: Load) -> (Vec<SourceFile>, check::An
             name: l.names[i].clone(),
             imports: l.imports[i].clone(),
             c_files: l.c_files[i].clone(),
+            examples: &examples[i],
         })
         .collect();
     let a = check::analyze_modules(&modules, &l.order);

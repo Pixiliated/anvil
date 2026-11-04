@@ -5,6 +5,8 @@ pub struct Set[T: key] {
     members: Map[T, bool],
 }
 
+// The set of the elements of xs.
+// example: set_of([3, 1, 3]).items() == [1, 3]
 allow mutants "a member's value is never read: the map holds keys only"
 pub fn set_of[T: key](xs: [T]) -> Set[T] {
     var m: Map[T, bool] = [:];
@@ -14,10 +16,14 @@ pub fn set_of[T: key](xs: [T]) -> Set[T] {
     return Set { members: m };
 }
 
+// Whether x is a member.
+// example: set_of(["a"]).has("a") && !set_of(["a"]).has("b")
 pub fn Set[T: key].has(self, x: T) -> bool {
     return self.members.has(x);
 }
 
+// The set with x in it (the same set when it already is).
+// example: set_of([2]).add(1).items() == [1, 2]
 allow mutants "a member's value is never read: the map holds keys only"
 pub fn Set[T: key].add(self, x: T) -> Set[T] {
     var m: Map[T, bool] = self.members;
@@ -35,6 +41,8 @@ pub fn Set[T: key].remove(self, x: T) -> Set[T] {
     return Set { members: m };
 }
 
+// How many members it has.
+// example: set_of([1, 1, 2]).len() == 2
 pub fn Set[T: key].len(self) -> i64 {
     return self.members.len();
 }
@@ -44,6 +52,8 @@ pub fn Set[T: key].items(self) -> [T] {
     return self.members.keys();
 }
 
+// The members of either set.
+// example: set_of([1, 2]).union(set_of([2, 3])).items() == [1, 2, 3]
 allow mutants "a member's value is never read: the map holds keys only"
 pub fn Set[T: key].union(self, other: Set[T]) -> Set[T] {
     var m: Map[T, bool] = self.members;
@@ -53,6 +63,8 @@ pub fn Set[T: key].union(self, other: Set[T]) -> Set[T] {
     return Set { members: m };
 }
 
+// The members of both sets.
+// example: set_of([1, 2]).intersection(set_of([2, 3])).items() == [2]
 allow mutants "a member's value is never read: the map holds keys only"
 pub fn Set[T: key].intersection(self, other: Set[T]) -> Set[T] {
     var m: Map[T, bool] = [:];

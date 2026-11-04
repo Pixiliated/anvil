@@ -83,7 +83,7 @@ in full (`anvil spec` prints it).
 
 ## Status
 
-v0.24: programs of one or more files (modules with explicit imports and `pub`), generic
+v0.25: programs of one or more files (modules with explicit imports and `pub`), generic
 functions, structs and enums with built-in constraints, i64, f64 with units, bool, strings with interpolation,
 search and split, growable arrays and slices, maps in key order, structs, enums with
 exhaustive `match`, structural `==`, `Option` and `Result` with `?`, function values and
@@ -176,7 +176,9 @@ decisions and findings with their history, and a review sheet for sign-off:
 golden-checked `main` (`untested`), and so must every branch of it: each `if` and `else` block,
 match arm and loop body (`unreached`). Where that cannot be, `allow untested "why"` or
 `allow unreached "why"` before the `fn` says so, and an allow that is no longer needed is
-reported too. A function's contract is checked without tests: verify calls every pure function
+reported too. Every `pub` item needs a doc comment (`undocumented`): the `//` lines above it,
+which outline, completion, hover, `anvil std` and the docs site show with its signature; a doc
+line `// example: EXPR` is also a test. A function's contract is checked without tests: verify calls every pure function
 that has a `requires` or `ensures` on 100 generated arguments and reports, shrunk, any its
 requires accept on which it panics or breaks its ensures (`contract`). `anvil mutate FILE` goes further: it changes the code one operator, literal or
 call at a time and reports each change that no test or golden notices. A program that no longer matches its golden

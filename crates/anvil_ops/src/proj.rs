@@ -274,6 +274,7 @@ fn verify_file(
         }
     }
     let contracts = contract_findings(&program, &src, contracts, &mut add);
+    undocumented(&src, &mut add);
     let g = golden::check_file(project, &src, program, native, max_steps);
     if g.failed() {
         add("golden", format!("{}: {}", g.status, g.detail.clone().unwrap_or_default()), String::new());
@@ -387,6 +388,49 @@ fn contract_findings(
         out.push(json);
     }
     out
+}
+
+/// The `undocumented` lint: every pub item needs a doc comment, since the tools show it, with the
+/// signature, to whoever uses the item instead of its source.
+fn undocumented(src: &anvil_front::span::SourceFile, add: &mut impl FnMut(&str, String, String)) {
+    use anvil_front::ast::Item;
+    // The file compiled, so it parses.
+    let Ok(ast) = anvil_front::parse(src) else { return };
+    for item in &ast.items {
+        let (what, name, span, allows) = match item {
+            Item::Fn(f) if f.public => {
+                let name = match &f.receiver {
+                    Some(r) => format!("{}.{}", r.ty.name, f.name.name),
+                    None => f.name.name.clone(),
+                };
+                ("fn", name, f.name.span, f.allows.as_slice())
+            }
+            Item::Struct(s) if s.public => ("struct", s.name.name.clone(), s.name.span, &[][..]),
+            Item::Enum(e) if e.public => ("enum", e.name.name.clone(), e.name.span, &[][..]),
+            Item::Interface(i) if i.public => ("interface", i.name.name.clone(), i.name.span, &[][..]),
+            Item::Unit(u) if u.public => ("unit", u.name.name.clone(), u.name.span, &[][..]),
+            _ => continue,
+        };
+        let documented = anvil_front::doc::doc_above(&src.text, span.start).is_some();
+        let allowed = allows.iter().any(|a| a.lint.name == "undocumented");
+        let (l, c) = src.line_col(span.start);
+        match (documented, allowed) {
+            (false, false) => add(
+                "undocumented",
+                format!(
+                    "pub {what} `{name}` has no doc comment; say what it is for in `//` lines right above it \
+                     (a line `// example: EXPR` is also a test)"
+                ),
+                format!("{l}:{c}"),
+            ),
+            (true, true) => add(
+                "allow",
+                format!("`{name}` has a doc comment, so its `allow undocumented` is stale: remove it"),
+                format!("{l}:{c}"),
+            ),
+            _ => {}
+        }
+    }
 }
 
 fn allows(list: &[(String, String)], lint: &str) -> bool {

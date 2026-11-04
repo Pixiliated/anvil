@@ -1,4 +1,4 @@
-# Anvil language specification (v0.24)
+# Anvil language specification (v0.25)
 
 Anvil is a small, compiled, general-purpose language designed to be written mostly by AI agents
 and read by humans. Its rules aim at three things: one obvious way to write each thing, code
@@ -28,7 +28,7 @@ test "description" { body }
 allow untested "reason"       // before a fn: switches one lint off for it (see Projects)
 ```
 
-Comments start with `//` and run to the end of the line. Identifiers are ASCII letters, digits
+Comments start with `//` and run to the end of the line (see Doc comments below). Identifiers are ASCII letters, digits
 and `_`, not starting with a digit. Keywords: `allow fn import let pub var if else while for in
 match return break continue struct enum unit test requires ensures uses noalloc extern interface
 self true false result`. The names
@@ -294,6 +294,24 @@ A contract is also checked without any test: `verify` calls each pure function t
 generated arguments (the `contract` lint, under Projects). Its `requires` say which inputs the
 function takes, so a requires is the fix when the function is right but its inputs are not
 all good ones.
+
+### Doc comments
+
+The `//` lines right above an item, field or variant (above its `allow` lines), with no blank
+line between, are its **documentation**. `outline`, `std`, `type-at`, completion, hover and the
+docs site show it with the signature, so whoever uses an item reads its doc, not its source.
+
+```
+// The greatest common divisor, never negative; gcd(0, 0) is 0.
+// example: gcd(a: 84, b: -36) == 12
+pub fn gcd(a: i64, b: i64) -> i64 {
+```
+
+A doc line `// example: EXPR` above a function is also a **test** of the file, named
+`example of gcd on line 2`: `EXPR` must be a pure bool expression that is true. It is checked like
+any code (an error in it is reported at its place in the comment), runs with the file's tests
+in both backends, and counts for coverage and mutation testing, so the examples a reader is
+shown cannot go stale.
 
 ### C functions
 
@@ -871,10 +889,12 @@ covered by the files that import it):
   steps is a finding (a loop that never ends, or inputs a requires should bound), and so is a
   requires that accepts none of the 100: the contract went unchecked. A function with effects,
   or a function parameter, is not checked (`verify --json` says so in `contracts`).
+- **`undocumented`**: a `pub` function, method, struct, enum, interface or unit with no doc
+  comment.
 
-Fix a finding with a test, or for `contract` in the function or its contract; where that cannot
-be, write `allow untested "reason"`, `allow unreached "reason"` or `allow contract "reason"` on
-its own line before the `fn`. The reason is required, an unknown
+Fix a finding with a test, for `contract` in the function or its contract, and for
+`undocumented` with a doc; where that cannot be, write `allow untested "reason"` (or
+`unreached`, `contract`, `undocumented`) on its own line before the `fn`. The reason is required, an unknown
 lint or a repeated allow is an error, and an allow that switches nothing off is reported as
 stale. `verify --json` gives each file's `untested` functions, `unreached` branches,
 `branches` (`total` and `taken`) and `contracts` (each function's status: `held` with the

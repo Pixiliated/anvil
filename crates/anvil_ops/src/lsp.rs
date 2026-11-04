@@ -381,6 +381,9 @@ impl Server<'_> {
                 at["col"],
                 d["detail"].as_str().unwrap_or_default()
             ));
+            if let Some(doc) = d["doc"].as_str() {
+                parts.push(doc.to_string());
+            }
         }
         Ok(json!({ "contents": { "kind": "markdown", "value": parts.join("\n\n") } }))
     }
@@ -424,13 +427,17 @@ impl Server<'_> {
             .flatten()
             .enumerate()
             .map(|(i, item)| {
-                json!({
+                let mut c = json!({
                     "label": item["label"],
                     "kind": completion_kind(item["kind"].as_str().unwrap_or_default()),
                     "detail": item["detail"],
                     // Keep the order complete gives: names in scope first, keywords last.
                     "sortText": format!("{i:05}"),
-                })
+                });
+                if let Some(doc) = item["doc"].as_str() {
+                    c["documentation"] = json!(doc);
+                }
+                c
             })
             .collect();
         Ok(json!({ "isIncomplete": false, "items": items }))

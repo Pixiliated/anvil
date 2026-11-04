@@ -418,7 +418,8 @@ impl<'a> Checker<'a> {
             }
         }
         for (span, name, kind, detail) in defs {
-            self.facts.defs.push(Def { file, span, name, kind, detail, scope: None });
+            // The generic's own declaration carries its doc; these members are looked up through it.
+            self.facts.defs.push(Def { file, span, name, kind, detail, scope: None, doc: None });
         }
     }
 

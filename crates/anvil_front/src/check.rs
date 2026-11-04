@@ -151,6 +151,8 @@ pub struct Module<'a> {
     /// The C files its extern functions name, by the text in quotes: the file's path and text,
     /// or why it could not be read.
     pub c_files: HashMap<String, Result<(String, String), String>>,
+    /// The tests its doc comments' examples make (see `doc`).
+    pub examples: &'a [ast::TestDecl],
 }
 
 /// What a checked module declares itself (never what it imports), and which of it is pub.
@@ -189,6 +191,8 @@ pub struct Def {
     /// For parameters and locals: where the name can be used, from its declaration to the end
     /// of its block.
     pub scope: Option<Span>,
+    /// For items, fields and variants: the doc comment above the declaration (see `doc`).
+    pub doc: Option<String>,
 }
 
 impl Def {
@@ -361,7 +365,8 @@ pub fn check(src: &SourceFile, file: &ast::File) -> Result<Program, Vec<Diagnost
 /// A program of one file. Its imports find no module (E0601); `analyze_modules` is the way to
 /// check a file with imports.
 pub fn analyze(src: &SourceFile, file: &ast::File) -> Analysis {
-    analyze_modules(&[Module { src, file, name: String::new(), imports: Vec::new(), c_files: HashMap::new() }], &[0])
+    let m = Module { src, file, name: String::new(), imports: Vec::new(), c_files: HashMap::new(), examples: &[] };
+    analyze_modules(&[m], &[0])
 }
 
 /// Checks the modules of a program in `order` (each after the modules it imports, the root
@@ -551,7 +556,11 @@ impl<'a> Checker<'a> {
         if self.quiet > 0 || (self.module != 0 && !item) {
             return None;
         }
-        let def = Def { file: self.module, span, name: name.into(), kind, detail: detail.into(), scope: None };
+        let doc = match kind {
+            "param" | "local" => None,
+            _ => crate::doc::doc_above(&self.src.text, span.start),
+        };
+        let def = Def { file: self.module, span, name: name.into(), kind, detail: detail.into(), scope: None, doc };
         self.facts.defs.push(def);
         Some(self.facts.defs.len() - 1)
     }
@@ -649,6 +658,7 @@ impl<'a> Checker<'a> {
                 ast::Item::Test(t) => test_decls.push(t),
             }
         }
+        test_decls.extend(me.examples.iter());
         for (k, imp) in import_decls.iter().enumerate() {
             self.import(imp, k, me.imports.get(k).copied());
         }

@@ -1,7 +1,9 @@
 // Units declared once and imported wherever they are needed.
 pub unit m;
+// Seconds.
 pub unit s;
 
+// Distance over time.
 pub fn speed(d: f64[m], t: f64[s]) -> f64[m/s] {
     return d / t;
 }

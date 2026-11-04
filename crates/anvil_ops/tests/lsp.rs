@@ -4,7 +4,7 @@
 use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
 
-const GEO: &str = "pub struct Point {\n    x: i64,\n    y: i64,\n}\n\npub fn norm2(p: Point) -> i64 {\n    return p.x * p.x + p.y * p.y;\n}\n";
+const GEO: &str = "pub struct Point {\n    x: i64,\n    y: i64,\n}\n\n// The squared length of p.\npub fn norm2(p: Point) -> i64 {\n    return p.x * p.x + p.y * p.y;\n}\n";
 // The emoji takes two UTF-16 units and one character, so the encodings give different columns.
 const MAIN: &str = "import lib.geo.{Point, norm2};\n\nfn main() uses io {\n    let p: Point = Point { x: 3, y: 4 };\n    print(\"\u{1F600} {norm2(p)} {p.x}\");\n}\n";
 
@@ -138,13 +138,14 @@ fn answers_come_from_the_same_facts_as_the_commands() {
 
     let hover = answer(&out, 2)["result"]["contents"]["value"].as_str().unwrap().to_string();
     assert!(hover.contains("norm2(p): i64"), "{hover}");
-    assert!(hover.contains("fn `norm2` declared at lib/geo.anv:6:8"), "{hover}");
+    assert!(hover.contains("fn `norm2` declared at lib/geo.anv:7:8"), "{hover}");
+    assert!(hover.ends_with("The squared length of p."), "the doc comment comes last: {hover}");
 
-    // Into the module, at the name: `pub fn norm2` is line 6 (index 5), the name at column 8.
+    // Into the module, at the name: `pub fn norm2` is line 7 (index 6), the name at column 8.
     let def = &answer(&out, 3)["result"];
     assert!(def["uri"].as_str().unwrap().ends_with("/lib/geo.anv"), "{def}");
-    assert_eq!(def["range"]["start"], json!({ "line": 5, "character": 7 }));
-    assert_eq!(def["range"]["end"], json!({ "line": 5, "character": 12 }));
+    assert_eq!(def["range"]["start"], json!({ "line": 6, "character": 7 }));
+    assert_eq!(def["range"]["end"], json!({ "line": 6, "character": 12 }));
 
     // The local `p`: its declaration and both uses, the second after the emoji.
     let refs = answer(&out, 4)["result"].as_array().unwrap().clone();
@@ -261,7 +262,7 @@ fn errors_in_an_imported_module_are_published_to_that_module() {
         .collect();
     assert_eq!(geo.len(), 1, "{out:#?}");
     assert_eq!(geo[0]["params"]["diagnostics"][0]["code"], "E0306");
-    assert_eq!(geo[0]["params"]["diagnostics"][0]["range"]["start"]["line"], 6);
+    assert_eq!(geo[0]["params"]["diagnostics"][0]["range"]["start"]["line"], 7);
 }
 
 #[test]

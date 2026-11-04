@@ -246,7 +246,7 @@ pub fn lex(text: &str) -> Result<Vec<Token>, Diagnostic> {
 }
 
 /// Lexes text[start..end]; spans stay relative to the whole text. Used again for `{expr}` parts.
-fn lex_range(text: &str, start: usize, end: usize) -> Result<Vec<Token>, Diagnostic> {
+pub(crate) fn lex_range(text: &str, start: usize, end: usize) -> Result<Vec<Token>, Diagnostic> {
     let bytes = text.as_bytes();
     let mut out = Vec::new();
     let mut i = start;

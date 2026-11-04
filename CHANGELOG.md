@@ -3,6 +3,12 @@
 Each version is one roadmap milestone (docs/ROADMAP.md); docs/DECISIONS.md says why things are
 the way they are.
 
+## 0.25.0
+- Doc comments: the `//` lines above an item are its doc, shown by outline, std, type-at,
+  completion, hover and the docs site.
+- `// example: EXPR` doc lines are tests.
+- The `undocumented` lint for pub items; the standard library is documented, with examples.
+
 ## 0.24.0
 - The `contract` lint: verify calls each pure function with a `requires` or `ensures` on 100
   generated arguments and reports, shrunk, any its requires accept on which it panics, breaks

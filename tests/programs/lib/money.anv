@@ -3,23 +3,28 @@ pub struct Money {
     cents: i64,
 }
 
+// Anything with a price and a label.
 pub interface Priced {
     fn price(self) -> Money;
     fn label(self) -> str;
 }
 
+// An amount in cents.
 pub fn money(cents: i64) -> Money {
     return Money { cents: cents };
 }
 
+// The two amounts together.
 pub fn Money.plus(self, other: Money) -> Money {
     return Money { cents: self.cents + other.cents };
 }
 
+// n of this amount.
 pub fn Money.times(self, n: i64) -> Money {
     return Money { cents: self.cents * n };
 }
 
+// Dollars and two digits of cents: $12.05.
 pub fn Money.text(self) -> str {
     return "${self.dollars()}.{self.rest()}";
 }

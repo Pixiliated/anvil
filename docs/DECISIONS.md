@@ -447,3 +447,18 @@ Short records of choices that are not obvious from the code. Newest last.
   cannot stand in for files, stdin or the clock.
 - It found `pow` looping `exp` times (`pow(1, i64::MAX)` never finished; it squares now, in at
   most 63 rounds) and the projectile example accepting a negative mass and a zero time step.
+
+## M24 (v0.25)
+
+- **A doc is the comment above the item, with no new syntax**: the comments people already
+  wrote become docs, and the formatter keeps them where they are. Blank lines end a doc, so a
+  file's header comment is not its first item's.
+- **Docs travel with the facts.** The checker records each declaration's doc, so hover,
+  completion and type-at show it from any file that imports the item, and an agent reads
+  `outline` or `std` instead of the source.
+- **Examples are tests, not text**: `// example: EXPR` is parsed from the comment's own span and
+  added to the file's tests (never to the syntax tree the formatter prints), so a stale example
+  fails verify like any test, at its place in the comment.
+- **`undocumented` is a lint on pub items only**: they are what other files and agents use
+  without reading the source. Its first run asked for 32 docs (18 in the standard library); the
+  standard library's functions now carry examples that run as tests.

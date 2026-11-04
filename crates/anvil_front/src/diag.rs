@@ -445,6 +445,15 @@ pub const LINTS: &[(&str, &str)] = &[
          its contract is reported as stale.",
     ),
     (
+        "undocumented",
+        "A pub item (function, method, struct, enum, interface or unit) with no doc comment: the \
+         `//` lines right above it (above its `allow` lines), with no blank line between. outline, \
+         std, completion, hover and the docs site show the doc with the signature, so whoever \
+         uses the item reads it instead of the source. A doc line `// example: EXPR` is also a \
+         test of the file: EXPR must be true. Write the doc; for a function that truly needs none, \
+         `allow undocumented \"why\"` before its `fn` (stale once it has one).",
+    ),
+    (
         "mutants",
         "Applied by `anvil mutate`, not verify: a mutant of a function (one operator, literal or call \
          changed) that no test or golden notices. Add a test that tells them apart, or, when the \

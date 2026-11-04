@@ -53,6 +53,16 @@ pub fn parse(toks: Vec<Token>) -> (File, Vec<Diagnostic>) {
     (File { items }, errors)
 }
 
+/// One expression and nothing after it: a doc comment's example.
+pub(crate) fn parse_expr(toks: Vec<Token>) -> PResult<Expr> {
+    let mut p = Parser { toks, pos: 0 };
+    let e = p.expr()?;
+    if p.peek() != &Tok::Eof {
+        return Err(Diagnostic::new("E0100", p.span(), "an example is one expression, and this comes after it"));
+    }
+    Ok(e)
+}
+
 impl Parser {
     fn peek(&self) -> &Tok {
         &self.toks[self.pos].tok

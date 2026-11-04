@@ -1,4 +1,4 @@
 exit: 101
-panic: index 5 out of bounds for length 2 at tests/programs/lib/geometry.anv:52:12
+panic: index 5 out of bounds for length 2 at tests/programs/lib/geometry.anv:57:12
 ---
 3.0 m

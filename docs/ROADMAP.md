@@ -162,3 +162,11 @@ green and the interpreter and native backend agreeing on every program in `tests
   are listed as unchecked in `verify --json`
 - [x] What it found is fixed: `pow` by squaring (it looped `exp` times), the projectile
   example's missing requires (negative mass, zero `dt`)
+
+## M24: Documented interfaces (v0.25)
+- [x] Doc comments: the `//` lines above an item, field or variant, shown with the signature by
+  outline, std, type-at, completion, hover and the docs site
+- [x] `// example: EXPR` doc lines are tests of the file, checked and run like any test (both
+  backends, coverage, mutation testing), with errors reported in the comment
+- [x] The `undocumented` lint for pub items; the standard library and the corpus modules are
+  documented, the standard library's functions with examples

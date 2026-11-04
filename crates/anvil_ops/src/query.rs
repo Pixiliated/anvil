@@ -117,7 +117,10 @@ fn place(src: &SourceFile, span: Span) -> Value {
 
 fn def_json(sources: &[SourceFile], d: &Def) -> Value {
     let src = &sources[d.file];
-    json!({ "name": d.name, "kind": d.kind, "detail": d.detail, "file": src.name, "defined_at": place(src, d.span) })
+    json!({
+        "name": d.name, "kind": d.kind, "detail": d.detail, "doc": d.doc, "file": src.name,
+        "defined_at": place(src, d.span),
+    })
 }
 
 fn find_def(a: &Analysis, loc: Loc) -> Option<&Def> {
@@ -159,6 +162,9 @@ pub fn type_at_in(files: Files, file: &str, line: usize, col: usize) -> Report {
     if let Some(d) = def {
         v["declaration"] = def_json(&sources, d);
         human.push_str(&format!("{} {} declared at {}: {}\n", d.kind, d.name, sources[d.file].site(d.span), d.detail));
+        for l in d.doc.iter().flat_map(|t| t.lines()) {
+            human.push_str(&format!("  // {l}\n"));
+        }
     }
     human.push_str(&note);
     Report::ok(v, human)
@@ -256,6 +262,8 @@ struct Item {
     label: String,
     kind: &'static str,
     detail: String,
+    /// The declaration's doc comment, when it has one.
+    doc: Option<String>,
 }
 
 const GROUPS: &[&str] =
@@ -332,6 +340,7 @@ pub fn complete_in(files: Files, file: &str, line: usize, col: usize) -> Report 
                             label: m.to_string(),
                             kind: "method",
                             detail: d.detail.clone(),
+                            doc: d.doc.clone(),
                         })
                     })
                     .collect();
@@ -356,7 +365,7 @@ pub fn complete_in(files: Files, file: &str, line: usize, col: usize) -> Report 
     }
     v["items"] = json!(items
         .iter()
-        .map(|i| json!({ "label": i.label, "kind": i.kind, "detail": i.detail }))
+        .map(|i| json!({ "label": i.label, "kind": i.kind, "detail": i.detail, "doc": i.doc }))
         .collect::<Vec<_>>());
     Report::ok(v, human)
 }
@@ -377,7 +386,7 @@ fn members(a: &Analysis, base: &str, kind: &'static str) -> Vec<Item> {
         .iter()
         .filter(|d| d.kind == kind)
         .filter_map(|d| d.name.strip_prefix(&dotted).filter(|m| !m.contains('.')).map(|m| (m, d)))
-        .map(|(m, d)| Item { label: m.to_string(), kind, detail: d.detail.clone() })
+        .map(|(m, d)| Item { label: m.to_string(), kind, detail: d.detail.clone(), doc: d.doc.clone() })
         .collect()
 }
 
@@ -407,7 +416,7 @@ fn methods_of(kind: &str, subst: &[(&str, String)]) -> Vec<Item> {
     METHODS
         .iter()
         .filter(|(on, _, _)| *on == kind)
-        .map(|(_, name, sig)| Item { label: name.to_string(), kind: "method", detail: fill(sig, subst) })
+        .map(|(_, name, sig)| Item { label: name.to_string(), kind: "method", detail: fill(sig, subst), doc: None })
         .collect()
 }
 
@@ -460,18 +469,18 @@ fn in_scope(a: &Analysis, at: usize) -> Vec<Item> {
             _ => false,
         };
         if visible {
-            items.push(Item { label: d.name.clone(), kind: d.kind, detail: d.detail.clone() });
+            items.push(Item { label: d.name.clone(), kind: d.kind, detail: d.detail.clone(), doc: d.doc.clone() });
         }
     }
     for (name, sig) in BUILTIN_SIGNATURES {
         debug_assert!(BUILTINS.contains(name) || CONSTRUCTORS.contains(name));
-        items.push(Item { label: name.to_string(), kind: "builtin", detail: sig.to_string() });
+        items.push(Item { label: name.to_string(), kind: "builtin", detail: sig.to_string(), doc: None });
     }
     for t in TYPE_NAMES {
-        items.push(Item { label: t.to_string(), kind: "type", detail: "built-in type".into() });
+        items.push(Item { label: t.to_string(), kind: "type", detail: "built-in type".into(), doc: None });
     }
     for k in KEYWORDS {
-        items.push(Item { label: k.to_string(), kind: "keyword", detail: String::new() });
+        items.push(Item { label: k.to_string(), kind: "keyword", detail: String::new(), doc: None });
     }
     items
 }

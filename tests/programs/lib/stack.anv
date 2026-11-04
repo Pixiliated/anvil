@@ -3,12 +3,14 @@ pub struct Stack[T] {
     items: [T],
 }
 
+// The stack with x on top.
 pub fn push[T](s: Stack[T], x: T) -> Stack[T] {
     var items: [T] = s.items;
     items.push(x);
     return Stack { items: items };
 }
 
+// The top item, or None when the stack is empty.
 pub fn top[T](s: Stack[T]) -> Option[T] {
     return last_of(s.items);
 }

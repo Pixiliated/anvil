@@ -1,6 +1,7 @@
 // Shapes in metres. `Point` and `twice` are private here; the root file has its own of each.
 import units.{m};
 
+// A flat shape.
 pub enum Shape {
     Circle(radius: f64[m]),
     Rect(width: f64[m], height: f64[m]),
@@ -11,6 +12,7 @@ struct Point {
     y: f64[m],
 }
 
+// The shape's area (a circle's with pi taken as 3).
 pub fn area(s: Shape) -> f64[m^2] {
     var out: f64[m^2] = 0.0[m^2];
     match s {
@@ -20,6 +22,7 @@ pub fn area(s: Shape) -> f64[m^2] {
     return out;
 }
 
+// The length around the shape (pi taken as 3).
 pub fn perimeter(s: Shape) -> f64[m] {
     var out: f64[m] = 0.0[m];
     match s {
@@ -29,6 +32,7 @@ pub fn perimeter(s: Shape) -> f64[m] {
     return out;
 }
 
+// A rectangle's width plus height; 0 for a circle.
 pub fn far_corner(s: Shape) -> f64[m] {
     var corner: Option[Point] = None;
     match s {
@@ -43,6 +47,7 @@ pub fn far_corner(s: Shape) -> f64[m] {
     return out;
 }
 
+// Side i: a circle has one, its radius; a rectangle two, width and height.
 pub fn side(s: Shape, i: i64) -> f64[m] {
     var sides: [f64[m]] = [];
     match s {

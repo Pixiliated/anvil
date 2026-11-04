@@ -1065,6 +1065,71 @@ fn grow(n: i64) -> i64
 }
 
 #[test]
+fn doc_comments_are_shown_checked_and_required() {
+    let p = hello_project("docs");
+    p.write(
+        "src/maths.anv",
+        r#"// Twice n.
+// example: twice(4) == 8
+pub fn twice(n: i64) -> i64 {
+    return n * 2;
+}
+
+pub struct Pair {
+    a: i64,
+    b: i64,
+}
+
+// Half of n, rounded toward zero.
+// example: half(7) == 4
+allow undocumented "kept to see it reported stale"
+pub fn half(n: i64) -> i64 {
+    return n / 2;
+}
+
+test "twice" {
+    assert(twice(2) == 4);
+}
+"#,
+    );
+    // outline, type-at and complete show the doc with the signature.
+    let outline = p.json(&["outline", "src/maths.anv"]);
+    assert_eq!(outline["items"][0]["doc"], "Twice n.\nexample: twice(4) == 8", "{outline}");
+    assert_eq!(outline["items"][1]["doc"], serde_json::Value::Null, "{outline}");
+    let at = p.json(&["type-at", "src/maths.anv", "20", "12"]);
+    assert_eq!(at["declaration"]["doc"], "Twice n.\nexample: twice(4) == 8", "{at}");
+    let std = json_of(&anvil(&["std", "math", "--json"]));
+    let pow = std["modules"][0]["items"].as_array().unwrap().iter().find(|i| i["name"] == "pow").unwrap().clone();
+    assert!(pow["doc"].as_str().unwrap().starts_with("base to the power exp"), "{pow}");
+
+    // The examples are tests: twice's holds, half's does not (7 / 2 is 3).
+    let t = p.json(&["test", "src/maths.anv"]);
+    let names: Vec<&str> = t["tests"].as_array().unwrap().iter().map(|r| r["name"].as_str().unwrap()).collect();
+    assert_eq!(names, ["twice", "example of twice on line 2", "example of half on line 13"], "{t}");
+    let failing: Vec<&str> =
+        t["tests"].as_array().unwrap().iter().filter(|r| r["ok"] == false).map(|r| r["name"].as_str().unwrap()).collect();
+    assert_eq!(failing, ["example of half on line 13"], "{t}");
+
+    // verify: the failing example, Pair without a doc, half's stale allow.
+    let v = json_of(&p.anvil(&["verify", "--json"]));
+    let found: Vec<(&str, &str)> = v["open"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|f| f["file"] == "src/maths.anv")
+        .map(|f| (f["check"].as_str().unwrap(), f["at"].as_str().unwrap()))
+        .collect();
+    assert_eq!(found, [("test", ""), ("undocumented", "7:12"), ("allow", "15:8")], "{v}");
+    assert!(String::from_utf8(anvil(&["explain", "undocumented"]).stdout).unwrap().starts_with("undocumented: "));
+
+    // A broken example is a syntax error where it is written.
+    p.write("src/maths.anv", "// Twice n.\n// example: twice(4) +\npub fn twice(n: i64) -> i64 {\n    return n * 2;\n}\n");
+    let c = p.json(&["check", "src/maths.anv"]);
+    assert_eq!(c["diagnostics"][0]["code"], "E0100", "{c}");
+    assert_eq!(c["diagnostics"][0]["range"]["start"]["line"], 2, "{c}");
+}
+
+#[test]
 fn a_differing_golden_leaves_the_actual_output_and_a_diff() {
     let p = hello_project("golden_diff");
     let program = |second: &str| {
@@ -1184,7 +1249,7 @@ fn modules_import_by_name_and_share_coverage() {
     p.write("anvil.toml", "[project]\nname = \"m\"\nfiles = [\"src/*.anv\", \"src/text/*.anv\"]\n");
     p.write(
         "src/text/words.anv",
-        "pub fn shout(s: str) -> str {\n    return s + \"!\";\n}\n\npub fn whisper(s: str) -> str {\n    return s;\n}\n\n\
+        "// s, shouted.\npub fn shout(s: str) -> str {\n    return s + \"!\";\n}\n\n// s, quietly.\npub fn whisper(s: str) -> str {\n    return s;\n}\n\n\
          test \"shout\" {\n    assert(shout(\"a\") == \"a!\");\n}\n",
     );
     p.write("src/main.anv", "import text.words.{shout};\n\nfn main() uses io {\n    print(shout(\"hey\"));\n}\n");

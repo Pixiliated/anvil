@@ -625,10 +625,24 @@ pub fn outline_in(files: Files, file: &str) -> Report {
     };
     let text = |s: Span| src.slice(s).to_string();
     let line = |s: Span| src.line_col(s.start).0;
+    let doc = |name: Span| anvil_front::doc::doc_above(&src.text, name.start);
     let mut items = Vec::new();
     let mut human = String::new();
     for item in &ast.items {
-        let v = match item {
+        let named = match item {
+            Item::Fn(f) => Some(f.name.span),
+            Item::Struct(s) => Some(s.name.span),
+            Item::Enum(e) => Some(e.name.span),
+            Item::Interface(i) => Some(i.name.span),
+            Item::Unit(u) => Some(u.name.span),
+            Item::Import(_) | Item::Test(_) => None,
+        };
+        // The doc's first line, in the text; all of it in the JSON.
+        let doc = named.and_then(doc);
+        if let Some(d) = &doc {
+            human.push_str(&format!("      // {}\n", d.lines().next().unwrap_or("")));
+        }
+        let mut v = match item {
             Item::Import(i) => {
                 human.push_str(&format!("{:>4}  {}\n", line(i.span), one_line(&text(i.span))));
                 let names: Vec<&str> = i.names.iter().map(|n| n.name.as_str()).collect();
@@ -693,6 +707,9 @@ pub fn outline_in(files: Files, file: &str) -> Report {
                 json!({ "kind": "test", "name": t.name, "line": line(t.span) })
             }
         };
+        if named.is_some() {
+            v["doc"] = json!(doc);
+        }
         items.push(v);
     }
     Report::ok(json!({ "ok": true, "file": src.name, "items": items }), human)
@@ -755,6 +772,9 @@ pub fn std_modules(module: Option<&str>) -> Report {
                 "    {shown}
 "
             ));
+            for l in i["doc"].as_str().into_iter().flat_map(str::lines) {
+                text.push_str(&format!("        // {l}\n"));
+            }
         }
         let mut v = json!({ "module": format!("std.{m}"), "file": file, "items": items });
         if module.is_some() {

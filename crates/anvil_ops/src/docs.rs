@@ -159,8 +159,12 @@ pub fn pages() -> Vec<(&'static str, String)> {
                 Some(sig) => sig.to_string(),
                 None => format!("pub {} {}", i["kind"].as_str().unwrap_or(""), i["name"].as_str().unwrap_or("")),
             };
+            // Each item with its doc comment above it, as in the source.
+            for l in i["doc"].as_str().into_iter().flat_map(str::lines) {
+                library.push_str(&escape(&format!("// {l}\n")));
+            }
             library.push_str(&escape(&line));
-            library.push('\n');
+            library.push_str("\n\n");
         }
         library.push_str("</code></pre>\n");
     }
