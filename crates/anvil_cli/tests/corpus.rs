@@ -1269,6 +1269,89 @@ test "they work" {
 }
 
 #[test]
+fn cost_measures_growth_and_suggests_bounds_that_hold() {
+    let p = hello_project("cost");
+    p.write(
+        "src/maths.anv",
+        r#"// The total of xs.
+fn total(xs: [i64]) -> i64 {
+    var t: i64 = 0;
+    for x in xs {
+        t = t + x;
+    }
+    return t;
+}
+
+// How many pairs of xs are equal, comparing every pair.
+fn equal_pairs(xs: [i64]) -> i64
+    steps 40 * xs.len() + 3
+{
+    var n: i64 = 0;
+    for i in 0..xs.len() {
+        for j in 0..i {
+            if xs[i] == xs[j] {
+                n = n + 1;
+            }
+        }
+    }
+    return n;
+}
+
+// The larger of a and b.
+fn bigger(a: i64, b: i64) -> i64 {
+    if a > b {
+        return a;
+    }
+    return b;
+}
+
+// Prints xs.
+fn show(xs: [i64]) uses io {
+    print("{xs.len()}");
+}
+
+test "they work" {
+    assert(total([1, 2]) == 3 && equal_pairs([1, 1]) == 1 && bigger(a: 1, b: 2) == 2);
+}
+"#,
+    );
+    let v = p.json(&["cost", "src/maths.anv"]);
+    let f = |name: &str| v["functions"].as_array().unwrap().iter().find(|f| f["function"] == name).unwrap().clone();
+    assert_eq!((f("total")["growth"].as_str(), f("total")["size"].as_str()), (Some("linear"), Some("xs.len()")), "{v}");
+    assert_eq!(f("total")["suggested"], "steps 2 * xs.len() + 3", "{v}");
+    assert_eq!(f("bigger")["growth"], "constant", "{v}");
+    assert_eq!(f("equal_pairs")["growth"], "quadratic", "{v}");
+    assert_eq!(f("equal_pairs")["outgrows_bound"], true, "its linear bound holds up to 40 items: {v}");
+    assert_eq!(f("show")["skipped"], "it has effects", "{v}");
+
+    // verify reports the bound that grows slower than the work.
+    let out = json_of(&p.anvil(&["verify", "--json"]));
+    let contract: Vec<&str> = out["open"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|f| f["check"] == "contract")
+        .map(|f| f["message"].as_str().unwrap())
+        .collect();
+    assert_eq!(contract.len(), 1, "{out}");
+    assert!(contract[0].contains("its steps are quadratic in xs.len() and its bound only linear in xs.len()"), "{out}");
+
+    // The suggested clauses, written into the functions, are bounds verify accepts.
+    let suggested = |name: &str| f(name)["suggested"].as_str().unwrap().to_string();
+    let text = std::fs::read_to_string(p.0.join("src/maths.anv"))
+        .unwrap()
+        .replace("fn total(xs: [i64]) -> i64 {", &format!("fn total(xs: [i64]) -> i64\n    {}\n{{", suggested("total")))
+        .replace("    steps 40 * xs.len() + 3\n", &format!("    {}\n", suggested("equal_pairs")));
+    p.write("src/maths.anv", &text);
+    assert!(p.anvil(&["fmt", "src/maths.anv", "--check"]).status.success(), "{text}");
+    let out = json_of(&p.anvil(&["verify", "--json"]));
+    assert!(out["open"].as_array().unwrap().iter().all(|f| f["check"] != "contract"), "{out}");
+    let v = p.json(&["cost", "src/maths.anv", "--only", "total"]);
+    assert_eq!(v["functions"].as_array().unwrap().len(), 1, "{v}");
+    assert_eq!(p.anvil(&["cost", "src/maths.anv", "--only", "nope"]).status.code(), Some(2));
+}
+
+#[test]
 fn a_differing_golden_leaves_the_actual_output_and_a_diff() {
     let p = hello_project("golden_diff");
     let program = |second: &str| {

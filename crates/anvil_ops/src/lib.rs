@@ -4,6 +4,7 @@
 //! that the MCP server has a tool for each, with the same parameters.
 
 mod api;
+mod cost;
 mod docs;
 mod fuzz;
 pub mod golden;
@@ -16,6 +17,7 @@ mod query;
 mod testing;
 
 pub use api::{api, api_approve};
+pub use cost::cost;
 pub use docs::docs;
 pub use fuzz::{fuzz, program_for};
 pub use inspect::{profile, trace, TRACE_LIMIT};
@@ -163,6 +165,12 @@ pub const COMMANDS: &[Command] = &[
             ("count", "N", "programs to try (default 10)"),
         ],
         summary: "random well-typed programs on both backends; any difference is a backend bug",
+    },
+    Command {
+        name: "cost",
+        positionals: &["file"],
+        options: &[("only", "NAMES", "measure these functions only (comma-separated)")],
+        summary: "how each pure function's steps grow with its arguments, and the steps bound that fits",
     },
     Command {
         name: "profile",

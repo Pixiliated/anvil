@@ -132,6 +132,15 @@ pub struct VerifyArgs {
 
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
+pub struct CostArgs {
+    /// Path of the .anv file, relative to the server's root or absolute.
+    pub file: String,
+    /// Measure these functions only, comma-separated.
+    pub only: Option<String>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct ApiArgs {
     /// A project file, relative to the server's root; without it, every project file with a
     /// public API.
@@ -416,6 +425,15 @@ impl AnvilServer {
             anvil_ops::profile(root, &a.file, a.test.as_deref(), Some(steps(a.max_steps)), &input)
         })
         .await
+    }
+
+    #[tool(description = "How each pure function's work grows: it is called on 200 generated argument lists \
+        of growing size (arrays and text up to 40 long), its steps counted exactly, and the counts are \
+        fitted as constant, linear or quadratic in one parameter's size. Returns the growth, the steps \
+        at each size, and the tightest `steps` clause that holds for every call; for a function with a \
+        bound, how much of it the costliest call used.")]
+    async fn cost(&self, Parameters(a): Parameters<CostArgs>) -> Result<CallToolResult, ErrorData> {
+        self.op(move |root| anvil_ops::cost(root, &a.file, a.only.as_deref())).await
     }
 
     #[tool(description = "Explain an error code or a lint, or list every code and lint with its explanation.")]

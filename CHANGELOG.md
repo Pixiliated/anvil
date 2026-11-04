@@ -3,6 +3,12 @@
 Each version is one roadmap milestone (docs/ROADMAP.md); docs/DECISIONS.md says why things are
 the way they are.
 
+## 0.28.0
+- `anvil cost FILE`: how each pure function's steps grow with its arguments, the steps at each
+  size, and the tightest `steps` clause that holds.
+- Bounded functions are checked on arguments up to 40 long, and a bound that grows slower than
+  the function's steps is a contract finding.
+
 ## 0.27.0
 - Step bounds: `steps EXPR`, a contract clause bounding a call's steps, checked by verify's
   contract lint on generated arguments (shrunk counterexamples); arguments bounded beyond what a

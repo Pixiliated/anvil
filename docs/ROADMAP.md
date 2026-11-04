@@ -186,3 +186,11 @@ green and the interpreter and native backend agreeing on every program in `tests
   check may run are not run
 - [x] Bounds on the standard library's `sum`, `concat`, `unique`, `pow`, `gcd`, `repeat` and
   `words`, approved as part of their APIs
+
+## M27: Cost curves (v0.28)
+- [x] `anvil cost FILE [--only NAMES]`: each pure function on 200 generated argument lists of
+  growing size, its steps fitted as constant, linear or quadratic in one parameter's size; the
+  steps at each size and the tightest `steps` clause that holds, ready to paste; CLI and MCP
+- [x] Bounded functions are checked on wider arguments (up to 40 long, not 8), and a bound that
+  grows slower than the steps it bounds is a contract finding, though it holds for every size
+  checked

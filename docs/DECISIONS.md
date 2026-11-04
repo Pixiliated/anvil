@@ -491,3 +491,16 @@ Short records of choices that are not obvious from the code. Newest last.
   that name a variable `steps` keep working.
 - The bound is part of the signature, so the API goldens caught that the standard library's
   promises changed; they were approved with the bounds.
+
+## M27 (v0.28)
+
+- **A bound is measured, then checked**: `anvil cost` fits exact step counts and prints a clause
+  that holds for every call it made, so an agent pastes a bound instead of guessing one, and
+  verify then holds the function to it.
+- **Few forms, one size at a time**: constant, linear and quadratic in one parameter's size,
+  with integer coefficients, choosing the simplest that fits about as tightly as the best. They
+  are what a reader and a `steps` clause can say; anything else is reported as a loose fit.
+- **Eight items were too few to tell growth apart**: property tests keep arrays to 8 items, so
+  a quadratic function hid under a linear bound with a large constant. Bounded functions are
+  now checked on arrays up to 40 long, and a bound whose growth class is below the measured
+  steps' is a finding even while it holds: it is the same bug, met later.

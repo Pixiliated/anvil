@@ -154,6 +154,7 @@ fn dispatch(p: &Parsed) -> Result<Report, String> {
         "std" => anvil_ops::std_modules(pos(0)),
         "trace" => anvil_ops::trace(root, file, text("test"), text("only"), count("limit")?, steps, &input(false)),
         "profile" => anvil_ops::profile(root, file, text("test"), steps, &input(false)),
+        "cost" => anvil_ops::cost(root, file, text("only")),
         "fuzz" => anvil_ops::fuzz(root, count("seed")?, count("count")?),
         "list" => anvil_ops::list(root),
         "verify" => anvil_ops::verify(root, native, steps),

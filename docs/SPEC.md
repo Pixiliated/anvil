@@ -1,4 +1,4 @@
-# Anvil language specification (v0.27)
+# Anvil language specification (v0.28)
 
 Anvil is a small, compiled, general-purpose language designed to be written mostly by AI agents
 and read by humans. Its rules aim at three things: one obvious way to write each thing, code
@@ -304,7 +304,17 @@ pub fn sum(xs: [i64]) -> i64
 ```
 
 A contract is also checked without any test: `verify` calls each pure function that has one on
-generated arguments (the `contract` lint, under Projects). Its `requires` say which inputs the
+generated arguments (the `contract` lint, under Projects).
+
+**`anvil cost FILE`** measures a bound instead of guessing it. Each pure function of the file
+is called on 200 generated argument lists of growing size (arrays, maps and text up to 40
+long, integers up to 400 and the edges of i64), and every call's steps are counted. The counts
+are fitted as constant, or linear or quadratic in one parameter's size (`xs.len()`, or an
+integer parameter `n`, or `abs(n)` when it may be negative): the simplest form that fits about
+as tightly as the best. It prints the growth, the most steps at each size, and the tightest
+`steps` clause that holds for every call measured, ready to paste; a loose fit says the steps
+depend on more than one size or grow faster than quadratic. For a function with a bound, it
+says how much of the bound the costliest call used, and whether the steps outgrow it. Its `requires` say which inputs the
 function takes, so a requires is the fix when the function is right but its inputs are not
 all good ones.
 
@@ -785,6 +795,8 @@ anvil trace   file.anv [--test NAME] [--only F,G] [--limit N] [--input FILE] [--
                                        a run as a timeline: calls, returns, prints
 anvil profile file.anv [--test NAME] [--input FILE] [-- ARGS...]
                                        calls and steps per function
+anvil cost file.anv [--only NAMES]     how each pure function's steps grow, and the
+                                       steps bound that fits
 anvil outline file.anv                 items and signatures, without reading the whole file
 anvil type-at file.anv LINE COL        type and declaration at a position
 anvil refs    file.anv NAME            declaration and uses of NAME (fn, type, unit,
@@ -917,7 +929,10 @@ covered by the files that import it):
   bound is computed from the arguments first and the call may take that many steps, no more:
   one more is a finding ("takes more than N steps"), shrunk like the others; arguments whose
   bound is more than a check may run are not run, since the function says they may take that
-  long (`beyond` in `verify --json`). A function with effects,
+  long (`beyond` in `verify --json`). A function with a bound is checked on wider arguments
+  (arrays, maps and text up to 40 long) and also measured as `anvil cost` measures it: when
+  its steps grow faster than its bound does (quadratic against linear, say), the bound holds
+  for the sizes checked but will break for larger ones, and that is a finding too. A function with effects,
   or a function parameter, is not checked (`verify --json` says so in `contracts`).
 - **`undocumented`**: a `pub` function, method, struct, enum, interface or unit with no doc
   comment.

@@ -387,6 +387,16 @@ fn contract_findings(
                 }
                 json!({ "function": name, "status": "broken", "inputs": inputs, "message": message, "shrinks": shrinks })
             }
+            Checked::Outgrows { steps, bound } => {
+                if !allowed {
+                    add(
+                        "contract",
+                        format!("`{name}` keeps its steps bound for every size checked, but its steps are {steps} and its bound only {bound}: larger inputs will break it (`anvil cost` measures it); {fix}"),
+                        at.clone(),
+                    );
+                }
+                json!({ "function": name, "status": "outgrows", "steps": steps, "bound": bound })
+            }
             Checked::Stopped { inputs } => {
                 let limit = crate::testing::CONTRACT_STEPS;
                 if !allowed {

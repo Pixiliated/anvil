@@ -111,6 +111,8 @@ pub(crate) enum Checked {
     Held { checked: u64, excluded: u64, overflowed: u64, beyond: u64 },
     Broken { inputs: String, message: String, shrinks: u64 },
     Stopped { inputs: String },
+    /// It kept its steps bound on every call, but its steps grow faster than the bound does.
+    Outgrows { steps: String, bound: String },
 }
 
 /// Checks the contract of every function of the root module that has one, on generated
@@ -148,7 +150,14 @@ pub(crate) fn check_contracts(
         let mut err = Vec::new();
         let host = crate::checked_host(ffi, root, &[], None, &mut err, &[]);
         let checked = match anvil_interp::check_contract(program, id, PROPERTY_CASES, 0, Some(steps), host) {
+            // A bound that holds for every size checked may still grow slower than the work.
             Contract::Held { checked, excluded, overflowed, beyond } => {
+                let outgrown =
+                    f.steps.as_ref().and_then(|_| crate::cost::outgrows(&crate::cost::measure_one(program, id, ffi, root)));
+                if let Some((steps, bound)) = outgrown {
+                    out.push((id, Checked::Outgrows { steps, bound }));
+                    continue;
+                }
                 Checked::Held { checked, excluded, overflowed, beyond }
             }
             Contract::Broken { inputs, message, shrinks } => Checked::Broken { inputs: shown(&inputs), message, shrinks },

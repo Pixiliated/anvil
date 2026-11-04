@@ -83,7 +83,7 @@ in full (`anvil spec` prints it).
 
 ## Status
 
-v0.27: programs of one or more files (modules with explicit imports and `pub`), generic
+v0.28: programs of one or more files (modules with explicit imports and `pub`), generic
 functions, structs and enums with built-in constraints, i64, f64 with units, bool, strings with interpolation,
 search and split, growable arrays and slices, maps in key order, structs, enums with
 exhaustive `match`, structural `==`, `Option` and `Result` with `?`, function values and
@@ -149,6 +149,7 @@ target/release/anvil build examples/orders.anv -o orders.exe
 | `anvil lsp` | a language server on stdio, for editors |
 | `anvil trace f.anv [--test NAME] [--only F,G]` | a run as a timeline: calls with their arguments, returns, prints |
 | `anvil profile f.anv [--test NAME]` | calls and steps per function |
+| `anvil cost f.anv` | how each pure function's steps grow, and the `steps` bound that fits |
 | `anvil explain [CODE]` | explain an error code or a lint |
 | `anvil spec` | print the language specification |
 | `anvil std [MODULE]` | the standard library: modules and their pub items, or one module's source |

@@ -46,8 +46,16 @@ const EDGE_INTS: &[i64] = &[0, 1, -1, 2, i64::MAX, i64::MIN];
 const CHARS: &[char] = &['a', 'b', 'c', 'x', 'y', 'z', 'A', 'Z', '0', '9', ' ', ',', '.', '-', 'é', '漢'];
 
 /// A value of `ty`. `size` bounds lengths and magnitudes; nested values get half, so recursive
-/// types (which nest through arrays) end.
+/// types (which nest through arrays) end. Arrays have at most 8 items and maps 6, which keeps
+/// property tests quick.
 pub fn generate(ty: &Ty, program: &Program, rng: &mut Rng, size: u64) -> Value {
+    generate_with(ty, program, rng, size, false)
+}
+
+/// `generate`, or with `wide`, arrays and maps as long as `size` allows: what measuring how a
+/// function's work grows needs.
+pub fn generate_with(ty: &Ty, program: &Program, rng: &mut Rng, size: u64, wide: bool) -> Value {
+    let generate = |ty: &Ty, rng: &mut Rng, size: u64| generate_with(ty, program, rng, size, wide);
     match ty {
         Ty::I64 => {
             if rng.chance(8) {
@@ -81,15 +89,15 @@ pub fn generate(ty: &Ty, program: &Program, rng: &mut Rng, size: u64) -> Value {
             Value::Bytes(b.into())
         }
         Ty::Array(elem) => {
-            let n = rng.below(size.min(8) + 1);
-            Value::Array(Rc::new((0..n).map(|_| generate(elem, program, rng, size / 2)).collect()))
+            let n = rng.below(if wide { size } else { size.min(8) } + 1);
+            Value::Array(Rc::new((0..n).map(|_| generate(elem, rng, size / 2)).collect()))
         }
         Ty::Map(k, v) => {
-            let n = rng.below(size.min(6) + 1);
+            let n = rng.below(if wide { size } else { size.min(6) } + 1);
             let mut entries: Vec<(Value, Value)> = Vec::new();
             for _ in 0..n {
-                let key = generate(k, program, rng, size);
-                let value = generate(v, program, rng, size / 2);
+                let key = generate(k, rng, size);
+                let value = generate(v, rng, size / 2);
                 match crate::find_key(&entries, &key) {
                     Ok(at) => entries[at].1 = value,
                     Err(at) => entries.insert(at, (key, value)),
@@ -98,12 +106,12 @@ pub fn generate(ty: &Ty, program: &Program, rng: &mut Rng, size: u64) -> Value {
             Value::Map(Rc::new(entries))
         }
         Ty::Struct(id) => Value::Struct(
-            program.structs[*id].fields.iter().map(|(_, t)| generate(t, program, rng, size / 2)).collect(),
+            program.structs[*id].fields.iter().map(|(_, t)| generate(t, rng, size / 2)).collect(),
         ),
         Ty::Enum(id) => {
             let variants = &program.enums[*id].variants;
             let tag = rng.below(variants.len() as u64) as usize;
-            Value::Enum(tag, variants[tag].fields.iter().map(|(_, t)| generate(t, program, rng, size / 2)).collect())
+            Value::Enum(tag, variants[tag].fields.iter().map(|(_, t)| generate(t, rng, size / 2)).collect())
         }
         // The checker refuses property tests over functions (E0414).
         Ty::Void | Ty::Fn(_) | Ty::Param(_) | Ty::Error => unreachable!("no generated values of {ty:?}"),

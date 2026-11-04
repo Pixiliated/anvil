@@ -503,7 +503,9 @@ fn shrink_failure(
 /// How one call of a function went, when checking its contract on generated arguments.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Called {
-    Returned,
+    /// It returned after `steps` steps, with its ensures holding; `bound` is its steps bound for
+    /// these arguments, when it has one.
+    Returned { steps: u64, bound: Option<u64> },
     /// Its requires do not hold for the arguments, so the call says nothing about it.
     Excluded,
     /// Integer arithmetic overflowed: the arguments are beyond what i64 holds for this work,
@@ -530,7 +532,7 @@ pub fn call_checked(program: &Program, fid: FuncId, args: &[Value], max_steps: O
         frame[*p] = a.clone();
     }
     let outcome = |r: R<Value>| match r {
-        Ok(_) => Called::Returned,
+        Ok(_) => unreachable!("a return is measured where the call is made"),
         Err(Unwind::Panic(m)) if is_overflow(&m) => Called::Overflowed,
         Err(Unwind::Panic(m)) => Called::Panicked(m),
         Err(Unwind::OutOfSteps) => Called::Stopped,
@@ -558,12 +560,43 @@ pub fn call_checked(program: &Program, fid: FuncId, args: &[Value], max_steps: O
         it.steps_left = Some(it.steps_left.map_or(cap, |left| left.min(cap)));
     }
     let before = it.taken;
-    match (it.call(fid, args.to_vec()), bound) {
+    let r = it.call(fid, args.to_vec());
+    let steps = it.taken - before;
+    match (r, bound) {
+        (Ok(_), _) => Called::Returned { steps, bound: bound.map(|(b, _)| b) },
         // Stopped by the bound, not by the check's own limit: one step past it.
-        (Err(Unwind::OutOfSteps), Some((b, c))) if it.taken - before > b => {
+        (Err(Unwind::OutOfSteps), Some((b, c))) if steps > b => {
             Called::Panicked(format!("takes more than {b} steps, past {}", c.message))
         }
         (r, _) => outcome(r),
+    }
+}
+
+/// The largest size measured: arrays, maps and text up to 40 long, integers up to 400.
+pub const COST_SIZE: u64 = 40;
+
+/// Calls pure function `fid` on `cases` generated arguments of growing size (seeded by its name,
+/// arrays and text as long as the size allows) and hands each call that returned to `sample`,
+/// with its steps and its steps bound if it has one. Calls its requires exclude, or that
+/// overflow, panic or run out of steps, are left out.
+pub fn measure(
+    program: &Program,
+    fid: FuncId,
+    cases: u64,
+    max_steps: Option<u64>,
+    mut host: Host,
+    mut sample: impl FnMut(&[Value], u64, Option<u64>),
+) {
+    let f = &program.funcs[fid];
+    let types: Vec<Ty> = f.params.iter().map(|p| f.locals[*p].ty.clone()).collect();
+    let mut rng = gen::Rng::new(gen::test_seed(&f.name, 1));
+    for case in 0..cases {
+        let size = case * COST_SIZE / cases.max(1);
+        let inputs: Vec<Value> =
+            types.iter().map(|t| gen::generate_with(t, program, &mut rng, size, true)).collect();
+        if let Called::Returned { steps, bound } = call_checked(program, fid, &inputs, max_steps, host.reborrow()) {
+            sample(&inputs, steps, bound);
+        }
     }
 }
 
@@ -595,12 +628,16 @@ pub fn check_contract(
     let f = &program.funcs[fid];
     let types: Vec<Ty> = f.params.iter().map(|p| f.locals[*p].ty.clone()).collect();
     let mut rng = gen::Rng::new(gen::test_seed(&f.name, seed));
+    // A steps bound is a claim about growth, which short arrays cannot show: up to 40 items.
+    let wide = f.steps.is_some();
+    let largest = if wide { COST_SIZE } else { 30 };
     let (mut checked, mut excluded, mut overflowed, mut beyond) = (0, 0, 0, 0);
     for case in 0..cases {
-        let size = 1 + case * 30 / cases.max(1);
-        let inputs: Vec<Value> = types.iter().map(|t| gen::generate(t, program, &mut rng, size)).collect();
+        let size = 1 + case * largest / cases.max(1);
+        let inputs: Vec<Value> =
+            types.iter().map(|t| gen::generate_with(t, program, &mut rng, size, wide)).collect();
         match call_checked(program, fid, &inputs, max_steps, host.reborrow()) {
-            Called::Returned => checked += 1,
+            Called::Returned { .. } => checked += 1,
             Called::Excluded => excluded += 1,
             Called::Overflowed => overflowed += 1,
             Called::Beyond => beyond += 1,
