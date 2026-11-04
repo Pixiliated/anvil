@@ -1,4 +1,4 @@
-# Anvil language specification (v0.28)
+# Anvil language specification (v0.29)
 
 Anvil is a small, compiled, general-purpose language designed to be written mostly by AI agents
 and read by humans. Its rules aim at three things: one obvious way to write each thing, code
@@ -303,15 +303,36 @@ pub fn sum(xs: [i64]) -> i64
 {
 ```
 
+A clause `allocs EXPR` bounds the **memory** a call allocates, in bytes, the same way (after
+`requires` and `ensures`, with `steps` in either order; `allocs` is a name everywhere else).
+Bytes are counted by a fixed model, exact and the same on every machine, which tracks what the
+native runtime copies:
+
+| What | Bytes |
+|---|---|
+| a new str or bytes (concatenation, interpolation, a slice, `replace`, `join`, ...) | its length |
+| a new array (a literal, a slice, `sorted`, `keys`, ...) | 8 per element |
+| a new map | 16 per entry |
+| `push`; `set` of a new key | 8; 16 |
+| writing into an array or map shared with another value (value semantics copy it first) | 8 or 16 per element copied |
+| a function literal that captures values | 8 per value |
+| `split`, `chars`, `args`, `list_dir` | the array and each new str in it |
+
+Literal text is static and costs nothing; Options, Results and structs are held inline, so only
+what they hold counts. `s = s + x` in a loop copies all of `s` each round, so its bytes grow with
+the square of the length: `cost` shows it, and `allocs` makes the fix stick.
+
 A contract is also checked without any test: `verify` calls each pure function that has one on
 generated arguments (the `contract` lint, under Projects).
 
-**`anvil cost FILE`** measures a bound instead of guessing it. Each pure function of the file
+**`anvil cost FILE`** measures bounds instead of guessing them, for steps and for bytes alike. Each pure function of the file
 is called on 200 generated argument lists of growing size (arrays, maps and text up to 40
 long, integers up to 400 and the edges of i64), and every call's steps are counted. The counts
 are fitted as constant, or linear or quadratic in one parameter's size (`xs.len()`, or an
-integer parameter `n`, or `abs(n)` when it may be negative): the simplest form that fits about
-as tightly as the best. It prints the growth, the most steps at each size, and the tightest
+integer parameter `n`, or `abs(n)` when it may be negative), quadratic including `n * (n + 1) /
+2`, the sum of copying everything so far once a round: the simplest form that fits about as
+tightly as the best. Bounds are reported, not held to, while measuring, so a bound that does
+not hold is shown with how far it is exceeded. It prints the growth, the most steps at each size, and the tightest
 `steps` clause that holds for every call measured, ready to paste; a loose fit says the steps
 depend on more than one size or grow faster than quadratic. For a function with a bound, it
 says how much of the bound the costliest call used, and whether the steps outgrow it. Its `requires` say which inputs the
@@ -794,9 +815,9 @@ anvil fuzz    [--seed N] [--count N]   random programs on both backends (see bel
 anvil trace   file.anv [--test NAME] [--only F,G] [--limit N] [--input FILE] [-- ARGS...]
                                        a run as a timeline: calls, returns, prints
 anvil profile file.anv [--test NAME] [--input FILE] [-- ARGS...]
-                                       calls and steps per function
-anvil cost file.anv [--only NAMES]     how each pure function's steps grow, and the
-                                       steps bound that fits
+                                       calls, steps and bytes allocated per function
+anvil cost file.anv [--only NAMES]     how each pure function's steps and bytes grow, and
+                                       the steps and allocs bounds that fit
 anvil outline file.anv                 items and signatures, without reading the whole file
 anvil type-at file.anv LINE COL        type and declaration at a position
 anvil refs    file.anv NAME            declaration and uses of NAME (fn, type, unit,
@@ -918,7 +939,7 @@ covered by the files that import it):
   literal's branches belong to the function it is written in, and a generic's are counted over
   all its instances. `&&`, `||` and `?` are not branches.
 - **`contract`**: a function with a contract that breaks it. Each pure function of the file
-  that has a `requires`, an `ensures` or a `steps` bound (a generic's instances too) is called on 100 generated
+  that has a `requires`, an `ensures`, or a `steps` or `allocs` bound (a generic's instances too) is called on 100 generated
   arguments, as a property test's inputs are generated (small first, with edge values such as
   `i64::MAX`). For those its requires accept, it must return with its ensures holding; a
   panic (an ensures, a callee's requires, an index out of bounds, ...) is a finding, shrunk to
@@ -929,9 +950,10 @@ covered by the files that import it):
   bound is computed from the arguments first and the call may take that many steps, no more:
   one more is a finding ("takes more than N steps"), shrunk like the others; arguments whose
   bound is more than a check may run are not run, since the function says they may take that
-  long (`beyond` in `verify --json`). A function with a bound is checked on wider arguments
+  long (`beyond` in `verify --json`). An `allocs` bound is computed the same way, and a call
+  that allocates more bytes is a finding. A function with a bound is checked on wider arguments
   (arrays, maps and text up to 40 long) and also measured as `anvil cost` measures it: when
-  its steps grow faster than its bound does (quadratic against linear, say), the bound holds
+  its steps or bytes grow faster than the bound does (quadratic against linear, say), the bound holds
   for the sizes checked but will break for larger ones, and that is a finding too. A function with effects,
   or a function parameter, is not checked (`verify --json` says so in `contracts`).
 - **`undocumented`**: a `pub` function, method, struct, enum, interface or unit with no doc

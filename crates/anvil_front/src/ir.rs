@@ -200,6 +200,9 @@ pub struct Func {
     /// `steps EXPR`: how many steps a call may take (an i64 of the parameters), with the text
     /// the contract lint reports; checked by verify on generated arguments, never at run time.
     pub steps: Option<Check>,
+    /// `allocs EXPR`: how many bytes a call may allocate (by the model `profile` and `cost` count
+    /// with), checked the same way as `steps`.
+    pub allocs: Option<Check>,
     /// Bound to the return value while ensures clauses run.
     pub result_local: Option<LocalId>,
     pub locals: Vec<Local>,

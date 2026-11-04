@@ -158,19 +158,23 @@ pub struct Interp<'p, 'h> {
     steps_left: Option<u64>,
     /// Steps taken so far.
     taken: u64,
+    /// Bytes allocated so far, by the model of `alloc_bytes`.
+    allocated: u64,
     rec: Option<&'p mut Recorder>,
 }
 
 /// What a run did, for `profile`, `trace` and coverage. Counts are always kept; the timeline only
 /// when `trace` is set. Everything here is deterministic: steps, not time.
 pub struct Recorder {
-    /// Steps the whole run took.
+    /// Steps the whole run took, and the bytes it allocated (by the model of `made_bytes`).
     pub steps: u64,
+    pub bytes: u64,
     /// Indexed by FuncId.
     pub funcs: Vec<FuncStats>,
     pub trace: Option<Trace>,
-    /// Active calls: function, steps taken when it began, steps its finished callees took.
-    stack: Vec<(FuncId, u64, u64)>,
+    /// Active calls: function, steps taken when it began, steps its finished callees took,
+    /// bytes allocated when it began, and bytes its finished callees allocated.
+    stack: Vec<(FuncId, u64, u64, u64, u64)>,
     /// Frames of each function on the stack, so recursion counts inclusive steps once.
     active: Vec<u32>,
     /// Runs of each branch, by BranchId.
@@ -185,6 +189,10 @@ pub struct FuncStats {
     pub steps: u64,
     /// Steps in the function's own body, callees excluded.
     pub self_steps: u64,
+    /// Bytes allocated from entering to leaving, callees included (see `alloc_bytes`), and by
+    /// its own body.
+    pub bytes: u64,
+    pub self_bytes: u64,
 }
 
 /// A bounded timeline of calls, returns and prints.
@@ -226,6 +234,7 @@ impl Recorder {
         let n = program.funcs.len();
         Recorder {
             steps: 0,
+            bytes: 0,
             funcs: vec![FuncStats::default(); n],
             trace: None,
             stack: Vec::new(),
@@ -256,23 +265,27 @@ impl Recorder {
         }
     }
 
-    fn enter(&mut self, func: FuncId, args: &[Value], taken: u64, depth: usize) {
+    fn enter(&mut self, func: FuncId, args: &[Value], taken: u64, allocated: u64, depth: usize) {
         self.funcs[func].calls += 1;
-        self.stack.push((func, taken, 0));
+        self.stack.push((func, taken, 0, allocated, 0));
         self.active[func] += 1;
         self.event(Some(func), || Event::Call { step: taken, depth, func, args: args.to_vec() });
     }
 
-    fn leave(&mut self, result: Option<&Value>, taken: u64, depth: usize) {
-        let (func, start, callees) = self.stack.pop().expect("leave without enter");
+    fn leave(&mut self, result: Option<&Value>, taken: u64, allocated: u64, depth: usize) {
+        let (func, start, callees, alloc_start, callee_bytes) = self.stack.pop().expect("leave without enter");
         let inclusive = taken - start;
+        let bytes = allocated - alloc_start;
         self.funcs[func].self_steps += inclusive - callees;
+        self.funcs[func].self_bytes += bytes - callee_bytes;
         self.active[func] -= 1;
         if self.active[func] == 0 {
             self.funcs[func].steps += inclusive;
+            self.funcs[func].bytes += bytes;
         }
         if let Some(parent) = self.stack.last_mut() {
             parent.2 += inclusive;
+            parent.4 += bytes;
         }
         if let Some(v) = result {
             self.event(Some(func), || Event::Return { step: taken, depth, func, value: v.clone() });
@@ -319,6 +332,7 @@ impl<'p, 'h> Interp<'p, 'h> {
             depth: 0,
             steps_left: max_steps,
             taken: 0,
+            allocated: 0,
             rec,
         }
     }
@@ -503,9 +517,8 @@ fn shrink_failure(
 /// How one call of a function went, when checking its contract on generated arguments.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Called {
-    /// It returned after `steps` steps, with its ensures holding; `bound` is its steps bound for
-    /// these arguments, when it has one.
-    Returned { steps: u64, bound: Option<u64> },
+    /// It returned, with its ensures holding: what it used.
+    Returned(Usage),
     /// Its requires do not hold for the arguments, so the call says nothing about it.
     Excluded,
     /// Integer arithmetic overflowed: the arguments are beyond what i64 holds for this work,
@@ -519,11 +532,34 @@ pub enum Called {
     Stopped,
 }
 
+/// What one call used, and its bounds for its arguments when it has them.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Usage {
+    pub steps: u64,
+    pub steps_bound: Option<u64>,
+    /// Bytes allocated, by the model of `made_bytes`, callees included.
+    pub bytes: u64,
+    pub bytes_bound: Option<u64>,
+}
+
 /// Calls function `fid` with `args`: its requires first on their own (so a call they exclude is
 /// told apart from one that breaks the contract), then the call itself, which checks its ensures.
 /// A steps bound is evaluated from the arguments before the call, which may then take that many
 /// steps and no more.
 pub fn call_checked(program: &Program, fid: FuncId, args: &[Value], max_steps: Option<u64>, host: Host) -> Called {
+    call_bounded(program, fid, args, max_steps, host, true)
+}
+
+/// `call_checked`, or with `enforce` false, the bounds computed and reported but not held to:
+/// what the function uses, bound or not, for `measure`.
+fn call_bounded(
+    program: &Program,
+    fid: FuncId,
+    args: &[Value],
+    max_steps: Option<u64>,
+    host: Host,
+    enforce: bool,
+) -> Called {
     let mut out = Vec::new();
     let mut it = Interp::new(program, &mut out, max_steps, None, host);
     let f = &program.funcs[fid];
@@ -552,18 +588,38 @@ pub fn call_checked(program: &Program, fid: FuncId, args: &[Value], max_steps: O
             Err(e) => return outcome(Err(e)),
         }
     }
-    if let Some((b, _)) = bound {
+    let mut alloc_bound = None;
+    if let Some(c) = &f.allocs {
+        match it.eval(&c.expr, &mut frame) {
+            Ok(v) => alloc_bound = Some((v.as_i64().max(0) as u64, c)),
+            Err(e) => return outcome(Err(e)),
+        }
+    }
+    if let Some((b, _)) = bound.filter(|_| enforce) {
         if it.steps_left.is_some_and(|left| b >= left) {
             return Called::Beyond;
         }
         let cap = b.saturating_add(1);
         it.steps_left = Some(it.steps_left.map_or(cap, |left| left.min(cap)));
     }
-    let before = it.taken;
+    let (before, allocated_before) = (it.taken, it.allocated);
     let r = it.call(fid, args.to_vec());
     let steps = it.taken - before;
-    match (r, bound) {
-        (Ok(_), _) => Called::Returned { steps, bound: bound.map(|(b, _)| b) },
+    let bytes = it.allocated - allocated_before;
+    let (bound_enforced, alloc_enforced) = if enforce { (bound, alloc_bound) } else { (None, None) };
+    match (r, bound_enforced) {
+        // The cap lets a call take one step past its bound, to tell the two apart: one that
+        // returns on that step broke it too.
+        (Ok(_), Some((b, c))) if steps > b => Called::Panicked(format!("takes more than {b} steps, past {}", c.message)),
+        (Ok(_), _) => match alloc_enforced {
+            Some((b, c)) if bytes > b => Called::Panicked(format!("allocates {bytes} bytes, more than {b}, past {}", c.message)),
+            _ => Called::Returned(Usage {
+                steps,
+                steps_bound: bound.map(|(b, _)| b),
+                bytes,
+                bytes_bound: alloc_bound.map(|(b, _)| b),
+            }),
+        },
         // Stopped by the bound, not by the check's own limit: one step past it.
         (Err(Unwind::OutOfSteps), Some((b, c))) if steps > b => {
             Called::Panicked(format!("takes more than {b} steps, past {}", c.message))
@@ -577,15 +633,16 @@ pub const COST_SIZE: u64 = 40;
 
 /// Calls pure function `fid` on `cases` generated arguments of growing size (seeded by its name,
 /// arrays and text as long as the size allows) and hands each call that returned to `sample`,
-/// with its steps and its steps bound if it has one. Calls its requires exclude, or that
-/// overflow, panic or run out of steps, are left out.
+/// with what it used and its bounds, which are not held to here: a call over its bound is
+/// measured too. Calls its requires exclude, or that overflow, panic or run out of steps, are
+/// left out.
 pub fn measure(
     program: &Program,
     fid: FuncId,
     cases: u64,
     max_steps: Option<u64>,
     mut host: Host,
-    mut sample: impl FnMut(&[Value], u64, Option<u64>),
+    mut sample: impl FnMut(&[Value], Usage),
 ) {
     let f = &program.funcs[fid];
     let types: Vec<Ty> = f.params.iter().map(|p| f.locals[*p].ty.clone()).collect();
@@ -594,8 +651,8 @@ pub fn measure(
         let size = case * COST_SIZE / cases.max(1);
         let inputs: Vec<Value> =
             types.iter().map(|t| gen::generate_with(t, program, &mut rng, size, true)).collect();
-        if let Called::Returned { steps, bound } = call_checked(program, fid, &inputs, max_steps, host.reborrow()) {
-            sample(&inputs, steps, bound);
+        if let Called::Returned(usage) = call_bounded(program, fid, &inputs, max_steps, host.reborrow(), false) {
+            sample(&inputs, usage);
         }
     }
 }
@@ -628,8 +685,8 @@ pub fn check_contract(
     let f = &program.funcs[fid];
     let types: Vec<Ty> = f.params.iter().map(|p| f.locals[*p].ty.clone()).collect();
     let mut rng = gen::Rng::new(gen::test_seed(&f.name, seed));
-    // A steps bound is a claim about growth, which short arrays cannot show: up to 40 items.
-    let wide = f.steps.is_some();
+    // A steps or allocs bound is a claim about growth, which short arrays cannot show: up to 40 items.
+    let wide = f.steps.is_some() || f.allocs.is_some();
     let largest = if wide { COST_SIZE } else { 30 };
     let (mut checked, mut excluded, mut overflowed, mut beyond) = (0, 0, 0, 0);
     for case in 0..cases {
@@ -637,7 +694,7 @@ pub fn check_contract(
         let inputs: Vec<Value> =
             types.iter().map(|t| gen::generate_with(t, program, &mut rng, size, wide)).collect();
         match call_checked(program, fid, &inputs, max_steps, host.reborrow()) {
-            Called::Returned { .. } => checked += 1,
+            Called::Returned(_) => checked += 1,
             Called::Excluded => excluded += 1,
             Called::Overflowed => overflowed += 1,
             Called::Beyond => beyond += 1,
@@ -716,9 +773,71 @@ pub fn print_text(v: &Value, ty: &Ty) -> String {
     }
 }
 
+/// What writing to `items` in place copies first: all of it, `per` bytes an element, when the
+/// storage is shared (value semantics), else nothing.
+fn copy_bytes<T>(items: &Rc<Vec<T>>, per: u64) -> u64 {
+    if Rc::strong_count(items) > 1 { per * items.len() as u64 } else { 0 }
+}
+
+/// The bytes a value just made holds, by the model the tools count with: a str or bytes, its
+/// length; an array, 8 an element; a map, 16 an entry; a closure, 8 a captured value. Options,
+/// results and structs are held inline, so only what they hold counts. With `deep`, the
+/// elements of an array count too (each a new value: the parts of `split`, say).
+fn made_bytes(v: &Value, deep: bool) -> u64 {
+    match v {
+        Value::Str(s) => s.len() as u64,
+        Value::Bytes(b) => b.len() as u64,
+        Value::Array(items) => {
+            8 * items.len() as u64 + if deep { items.iter().map(|x| made_bytes(x, false)).sum() } else { 0 }
+        }
+        Value::Map(entries) => 16 * entries.len() as u64,
+        Value::Fn(c) => 8 * c.captures.len() as u64,
+        Value::Struct(fields) | Value::Enum(_, fields) => fields.iter().map(|f| made_bytes(f, deep)).sum(),
+        Value::Void | Value::I64(_) | Value::F64(_) | Value::Bool(_) => 0,
+    }
+}
+
+/// What evaluating `e` (to `v`) allocated itself, by `made_bytes`: only the expressions that
+/// make a new str, bytes, array, map or closure (the ones `noalloc` refuses). Literal text is
+/// static, and what subexpressions and calls allocate is counted where they run.
+fn alloc_bytes(e: &Expr, v: &Value) -> u64 {
+    match &e.kind {
+        ExprKind::ArrayLit(_)
+        | ExprKind::MapLit { .. }
+        | ExprKind::Slice { .. }
+        | ExprKind::Interp(_)
+        | ExprKind::StrConcat(..)
+        | ExprKind::Closure { .. } => made_bytes(v, false),
+        ExprKind::Builtin(b, _) => match b {
+            Builtin::StrSplit { .. } | Builtin::StrChars | Builtin::Args | Builtin::ListDir => made_bytes(v, true),
+            Builtin::MapKeys
+            | Builtin::MapValues
+            | Builtin::ReadLine { .. }
+            | Builtin::ReadFile
+            | Builtin::StrTrim
+            | Builtin::BytesOf { .. }
+            | Builtin::ReadBytes
+            | Builtin::BytesToStr
+            | Builtin::BytesHex
+            | Builtin::BytesToArray
+            | Builtin::StrReplace { .. }
+            | Builtin::StrUpper
+            | Builtin::StrLower
+            | Builtin::ArrJoin
+            | Builtin::FloatFixed { .. }
+            | Builtin::ArrSorted { .. }
+            | Builtin::ArrReversed
+            | Builtin::Env
+            | Builtin::ParallelMap => made_bytes(v, false),
+            _ => 0,
+        },
+        _ => 0,
+    }
+}
+
 /// The value at `path` inside `root`, ready to be changed. Array storage on the way is made
 /// unique first, so other copies of the array never see the change.
-fn place_mut<'v>(mut slot: &'v mut Value, path: &[Step], indices: &[i64]) -> R<&'v mut Value> {
+fn place_mut<'v>(mut slot: &'v mut Value, path: &[Step], indices: &[i64], allocated: &mut u64) -> R<&'v mut Value> {
     let mut next_index = indices.iter();
     for step in path {
         slot = match step {
@@ -730,6 +849,7 @@ fn place_mut<'v>(mut slot: &'v mut Value, path: &[Step], indices: &[i64]) -> R<&
                 let i = *next_index.next().unwrap();
                 match slot {
                     Value::Array(items) => {
+                        *allocated += copy_bytes(items, 8);
                         let items = Rc::make_mut(items);
                         let len = items.len() as i64;
                         if i < 0 || i >= len {
@@ -762,9 +882,10 @@ impl<'p, 'h> Interp<'p, 'h> {
         let _ = self.out.flush();
         if let Some(r) = &mut self.rec {
             while !r.stack.is_empty() {
-                r.leave(None, self.taken, 0);
+                r.leave(None, self.taken, self.allocated, 0);
             }
             r.steps = self.taken;
+            r.bytes = self.allocated;
         }
     }
 
@@ -775,11 +896,11 @@ impl<'p, 'h> Interp<'p, 'h> {
         }
         self.depth += 1;
         if let Some(r) = &mut self.rec {
-            r.enter(fid, &args, self.taken, self.depth);
+            r.enter(fid, &args, self.taken, self.allocated, self.depth);
         }
         let result = self.call_body(fid, args);
         if let (Some(r), Ok(v)) = (&mut self.rec, &result) {
-            r.leave(Some(v), self.taken, self.depth);
+            r.leave(Some(v), self.taken, self.allocated, self.depth);
         }
         self.depth -= 1;
         result
@@ -878,7 +999,7 @@ impl<'p, 'h> Interp<'p, 'h> {
             Stmt::Assign(l, path, e) => {
                 let v = self.eval(e, frame)?;
                 let indices = self.indices(path, frame)?;
-                *place_mut(&mut frame[*l], path, &indices)? = v;
+                *place_mut(&mut frame[*l], path, &indices, &mut self.allocated)? = v;
             }
             Stmt::Expr(e) => {
                 self.eval(e, frame)?;
@@ -941,7 +1062,14 @@ impl<'p, 'h> Interp<'p, 'h> {
         Ok(Flow::Normal)
     }
 
+    /// Evaluates `e`, counting what it allocates.
     fn eval(&mut self, e: &Expr, frame: &mut Vec<Value>) -> R<Value> {
+        let v = self.eval_inner(e, frame)?;
+        self.allocated += alloc_bytes(e, &v);
+        Ok(v)
+    }
+
+    fn eval_inner(&mut self, e: &Expr, frame: &mut Vec<Value>) -> R<Value> {
         Ok(match &e.kind {
             ExprKind::Int(v) => Value::I64(*v),
             ExprKind::Float(v) => Value::F64(*v),
@@ -1008,12 +1136,16 @@ impl<'p, 'h> Interp<'p, 'h> {
                 let k = self.eval(key, frame)?;
                 let v = self.eval(value, frame)?;
                 let indices = self.indices(path, frame)?;
-                match place_mut(&mut frame[*local], path, &indices)? {
+                match place_mut(&mut frame[*local], path, &indices, &mut self.allocated)? {
                     Value::Map(entries) => {
+                        self.allocated += copy_bytes(entries, 16);
                         let entries = Rc::make_mut(entries);
                         match find_key(entries, &k) {
                             Ok(at) => entries[at].1 = v,
-                            Err(at) => entries.insert(at, (k, v)),
+                            Err(at) => {
+                                self.allocated += 16;
+                                entries.insert(at, (k, v));
+                            }
                         }
                     }
                     other => unreachable!("set on {other:?}"),
@@ -1023,9 +1155,10 @@ impl<'p, 'h> Interp<'p, 'h> {
             ExprKind::MapRemove { local, path, key, missing } => {
                 let k = self.eval(key, frame)?;
                 let indices = self.indices(path, frame)?;
-                match place_mut(&mut frame[*local], path, &indices)? {
+                match place_mut(&mut frame[*local], path, &indices, &mut self.allocated)? {
                     Value::Map(entries) => match find_key(entries, &k) {
                         Ok(at) => {
+                            self.allocated += copy_bytes(entries, 16);
                             Rc::make_mut(entries).remove(at);
                         }
                         Err(_) => return panic(missing.clone()),
@@ -1066,16 +1199,22 @@ impl<'p, 'h> Interp<'p, 'h> {
             ExprKind::Push { local, path, value } => {
                 let v = self.eval(value, frame)?;
                 let indices = self.indices(path, frame)?;
-                match place_mut(&mut frame[*local], path, &indices)? {
-                    Value::Array(items) => Rc::make_mut(items).push(v),
+                match place_mut(&mut frame[*local], path, &indices, &mut self.allocated)? {
+                    Value::Array(items) => {
+                        self.allocated += copy_bytes(items, 8) + 8;
+                        Rc::make_mut(items).push(v);
+                    }
                     other => unreachable!("push to {other:?}"),
                 }
                 Value::Void
             }
             ExprKind::Pop { local, path, message } => {
                 let indices = self.indices(path, frame)?;
-                match place_mut(&mut frame[*local], path, &indices)? {
-                    Value::Array(items) => match Rc::make_mut(items).pop() {
+                match place_mut(&mut frame[*local], path, &indices, &mut self.allocated)? {
+                    Value::Array(items) => match {
+                        self.allocated += copy_bytes(items, 8);
+                        Rc::make_mut(items).pop()
+                    } {
                         Some(v) => v,
                         None => return panic(message.clone()),
                     },

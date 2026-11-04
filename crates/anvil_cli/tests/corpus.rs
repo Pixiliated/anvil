@@ -1317,11 +1317,13 @@ test "they work" {
     );
     let v = p.json(&["cost", "src/maths.anv"]);
     let f = |name: &str| v["functions"].as_array().unwrap().iter().find(|f| f["function"] == name).unwrap().clone();
-    assert_eq!((f("total")["growth"].as_str(), f("total")["size"].as_str()), (Some("linear"), Some("xs.len()")), "{v}");
-    assert_eq!(f("total")["suggested"], "steps 2 * xs.len() + 3", "{v}");
-    assert_eq!(f("bigger")["growth"], "constant", "{v}");
-    assert_eq!(f("equal_pairs")["growth"], "quadratic", "{v}");
-    assert_eq!(f("equal_pairs")["outgrows_bound"], true, "its linear bound holds up to 40 items: {v}");
+    let steps = |name: &str| f(name)["steps"].clone();
+    assert_eq!((steps("total")["growth"].as_str(), steps("total")["size"].as_str()), (Some("linear"), Some("xs.len()")), "{v}");
+    assert_eq!(steps("total")["suggested"], "steps 2 * xs.len() + 3", "{v}");
+    assert_eq!(f("total")["bytes"]["suggested"], "allocs 0", "{v}");
+    assert_eq!(steps("bigger")["growth"], "constant", "{v}");
+    assert_eq!(steps("equal_pairs")["growth"], "quadratic", "{v}");
+    assert_eq!(steps("equal_pairs")["outgrows_bound"], true, "its linear bound holds up to 40 items: {v}");
     assert_eq!(f("show")["skipped"], "it has effects", "{v}");
 
     // verify reports the bound that grows slower than the work.
@@ -1334,10 +1336,10 @@ test "they work" {
         .map(|f| f["message"].as_str().unwrap())
         .collect();
     assert_eq!(contract.len(), 1, "{out}");
-    assert!(contract[0].contains("its steps are quadratic in xs.len() and its bound only linear in xs.len()"), "{out}");
+    assert!(contract[0].contains("keeps its steps bound for every size checked, but its steps are quadratic in xs.len() and its bound only linear in xs.len()"), "{out}");
 
     // The suggested clauses, written into the functions, are bounds verify accepts.
-    let suggested = |name: &str| f(name)["suggested"].as_str().unwrap().to_string();
+    let suggested = |name: &str| f(name)["steps"]["suggested"].as_str().unwrap().to_string();
     let text = std::fs::read_to_string(p.0.join("src/maths.anv"))
         .unwrap()
         .replace("fn total(xs: [i64]) -> i64 {", &format!("fn total(xs: [i64]) -> i64\n    {}\n{{", suggested("total")))
@@ -1349,6 +1351,91 @@ test "they work" {
     let v = p.json(&["cost", "src/maths.anv", "--only", "total"]);
     assert_eq!(v["functions"].as_array().unwrap().len(), 1, "{v}");
     assert_eq!(p.anvil(&["cost", "src/maths.anv", "--only", "nope"]).status.code(), Some(2));
+}
+
+#[test]
+fn memory_is_counted_bounded_and_measured() {
+    let p = hello_project("memory");
+    p.write(
+        "src/maths.anv",
+        r#"// xs with 1 after it: xs is shared with the caller, so the push copies it first.
+fn grow(xs: [i64]) -> [i64]
+    allocs 8 * xs.len() + 8
+{
+    var ys: [i64] = xs;
+    ys.push(1);
+    return ys;
+}
+
+// "a" n times, one concatenation at a time: each copies all that came before.
+fn dashes(n: i64) -> str
+    requires n >= 0
+    allocs 2 * n
+{
+    var out: str = "";
+    for _i in 0..n {
+        out = out + "a";
+    }
+    return out;
+}
+
+// n, in one step more than its bound says.
+fn same(n: i64) -> i64
+    steps 0
+{
+    return n;
+}
+
+test "they work" {
+    assert(grow([2]) == [2, 1] && dashes(3) == "aaa" && same(4) == 4);
+}
+"#,
+    );
+    // cost: a shared array is copied before the push; concatenating one at a time is triangular.
+    let v = p.json(&["cost", "src/maths.anv"]);
+    let f = |name: &str| v["functions"].as_array().unwrap().iter().find(|f| f["function"] == name).unwrap().clone();
+    assert_eq!(f("grow")["bytes"]["suggested"], "allocs 8 * xs.len() + 8", "{v}");
+    assert_eq!(f("grow")["bytes"]["bound_holds"], true, "{v}");
+    assert_eq!(f("dashes")["bytes"]["growth"], "quadratic", "{v}");
+    assert_eq!(f("dashes")["bytes"]["suggested"], "allocs n * (n + 1) / 2", "{v}");
+    assert_eq!(f("dashes")["bytes"]["bound_holds"], false, "{v}");
+    assert_eq!(f("same")["steps"]["bound_holds"], false, "one step past `steps 0`: {v}");
+
+    // verify: the allocs bound and the steps bound one step short, each shrunk.
+    let out = json_of(&p.anvil(&["verify", "--json"]));
+    let found: Vec<(&str, &str)> = out["open"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|f| f["check"] == "contract")
+        .map(|f| (f["at"].as_str().unwrap(), f["message"].as_str().unwrap()))
+        .collect();
+    assert_eq!(found.len(), 2, "{out}");
+    assert!(found[0].1.starts_with("`dashes` breaks its contract for n: 4: allocates 10 bytes, more than 8"), "{out}");
+    assert!(found[1].1.starts_with("`same` breaks its contract for n: 0: takes more than 0 steps"), "{out}");
+
+    // profile shows the bytes each function allocated.
+    p.write(
+        "src/hello.anv",
+        "// xs with 1 after it.\nfn grow(xs: [i64]) -> [i64] {\n    var ys: [i64] = xs;\n    ys.push(1);\n    return ys;\n}\n\n\
+         fn main() uses io {\n    let ys: [i64] = grow([1, 2, 3]);\n    print(\"{ys.len()}\");\n}\n",
+    );
+    let prof = p.json(&["profile", "src/hello.anv"]);
+    let row = |name: &str| prof["functions"].as_array().unwrap().iter().find(|f| f["name"] == name).unwrap().clone();
+    // grow copies the shared array (24) and pushes (8); main makes the literal (24) and the
+    // interpolated "4" (1); the format text itself is static.
+    assert_eq!((row("grow")["bytes"].as_u64(), row("grow")["self_bytes"].as_u64()), (Some(32), Some(32)), "{prof}");
+    assert_eq!((row("main")["bytes"].as_u64(), row("main")["self_bytes"].as_u64()), (Some(57), Some(25)), "{prof}");
+    assert_eq!(prof["bytes"], 57, "{prof}");
+
+    // The clauses are ordered after requires and ensures, one of each.
+    let code = |text: &str| {
+        p.write("src/bad.anv", text);
+        p.json(&["check", "src/bad.anv"])["diagnostics"][0]["code"].as_str().unwrap().to_string()
+    };
+    assert_eq!(code("fn f(n: i64) -> i64\n    allocs 0\n    allocs 1\n{\n    return n;\n}\n"), "E0100");
+    assert_eq!(code("fn f(n: i64) -> i64\n    allocs 0\n    requires n > 0\n{\n    return n;\n}\n"), "E0100");
+    assert_eq!(code("fn f(n: i64) -> i64\n    allocs true\n{\n    return n;\n}\n"), "E0300");
 }
 
 #[test]

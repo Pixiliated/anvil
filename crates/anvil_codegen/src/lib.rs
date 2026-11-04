@@ -64,6 +64,7 @@ pub fn build_test_exe(program: &Program, out: &Path, work_dir: &Path) -> Result<
             requires: Vec::new(),
             ensures: Vec::new(),
             steps: None,
+            allocs: None,
             result_local: None,
             locals: t.locals.clone(),
             body: t.body.clone(),

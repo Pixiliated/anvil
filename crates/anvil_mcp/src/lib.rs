@@ -417,8 +417,9 @@ impl AnvilServer {
     }
 
     #[tool(description = "Run main (or one test) in the interpreter and count, per function, its calls, \
-        its steps with callees and its own steps; also the functions that never ran. Steps are \
-        statements and loop iterations, so the numbers are deterministic.")]
+        its steps and the bytes it allocated, with callees and its own; also the functions that \
+        never ran. Steps are statements and loop iterations and bytes follow a fixed model (see the \
+        spec), so the numbers are deterministic.")]
     async fn profile(&self, Parameters(a): Parameters<ProfileArgs>) -> Result<CallToolResult, ErrorData> {
         self.op(move |root| {
             let input = program_input(a.args, a.input);
@@ -427,11 +428,12 @@ impl AnvilServer {
         .await
     }
 
-    #[tool(description = "How each pure function's work grows: it is called on 200 generated argument lists \
-        of growing size (arrays and text up to 40 long), its steps counted exactly, and the counts are \
-        fitted as constant, linear or quadratic in one parameter's size. Returns the growth, the steps \
-        at each size, and the tightest `steps` clause that holds for every call; for a function with a \
-        bound, how much of it the costliest call used.")]
+    #[tool(description = "How each pure function's work and memory grow: it is called on 200 generated \
+        argument lists of growing size (arrays and text up to 40 long), its steps and the bytes it \
+        allocates counted exactly, and each is fitted as constant, linear or quadratic in one \
+        parameter's size. Returns, under `steps` and `bytes`, the growth, the most at each size, and \
+        the tightest `steps` and `allocs` clauses that hold for every call; for a function with a \
+        bound, whether it holds and how much of it the costliest call used.")]
     async fn cost(&self, Parameters(a): Parameters<CostArgs>) -> Result<CallToolResult, ErrorData> {
         self.op(move |root| anvil_ops::cost(root, &a.file, a.only.as_deref())).await
     }

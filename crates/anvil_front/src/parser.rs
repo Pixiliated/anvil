@@ -411,6 +411,7 @@ impl Parser {
                 requires: Vec::new(),
                 ensures: Vec::new(),
                 steps: None,
+                allocs: None,
                 body: Block { stmts: Vec::new(), span: semi },
                 span: fstart.to(semi),
                 allows: Vec::new(),
@@ -596,6 +597,7 @@ impl Parser {
                 requires: Vec::new(),
                 ensures: Vec::new(),
                 steps: None,
+                allocs: None,
                 body: Block { stmts: Vec::new(), span: semi },
                 span: start.to(semi),
                 allows,
@@ -605,18 +607,26 @@ impl Parser {
         let mut requires = Vec::new();
         let mut ensures = Vec::new();
         let mut steps = None;
+        let mut allocs = None;
         loop {
             match self.peek() {
-                // `steps` is a name everywhere else: only here, among the clauses, does it start one.
-                Tok::Requires | Tok::Ensures if steps.is_some() => {
-                    return Err(Diagnostic::new("E0100", self.span(), "the steps clause comes after every other clause"));
+                // `steps` and `allocs` are names everywhere else: only here, among the clauses, do
+                // they start one.
+                Tok::Requires | Tok::Ensures if steps.is_some() || allocs.is_some() => {
+                    return Err(Diagnostic::new(
+                        "E0100",
+                        self.span(),
+                        "the steps and allocs clauses come after every other clause",
+                    ));
                 }
-                Tok::Ident(n) if n == "steps" => {
-                    if steps.is_some() {
-                        return Err(Diagnostic::new("E0100", self.span(), "a function has at most one steps clause"));
+                Tok::Ident(n) if n == "steps" || n == "allocs" => {
+                    let which = if n == "steps" { &mut steps } else { &mut allocs };
+                    if which.is_some() {
+                        let m = format!("a function has at most one {n} clause");
+                        return Err(Diagnostic::new("E0100", self.span(), m));
                     }
                     self.bump();
-                    steps = Some(self.expr_no_struct()?);
+                    *which = Some(self.expr_no_struct()?);
                 }
                 Tok::Requires => {
                     if !ensures.is_empty() {
@@ -652,6 +662,7 @@ impl Parser {
             requires,
             ensures,
             steps,
+            allocs,
             body,
             span,
             allows,
@@ -1060,6 +1071,7 @@ impl Parser {
             requires: Vec::new(),
             ensures: Vec::new(),
             steps: None,
+            allocs: None,
             span: start.to(body.span),
             body,
             allows: Vec::new(),

@@ -1,5 +1,5 @@
 //! Watching a program run in the interpreter: `trace` (a timeline of calls, returns and prints)
-//! and `profile` (calls and steps per function). Both count steps, not time, so a program gives
+//! and `profile` (calls, steps and bytes allocated per function). Both count steps, not time, so a program gives
 //! the same answer on every machine. They run main, or one test named with `test`. A panic or the
 //! step limit ends the run but is not a failure of the command: it is part of what was observed.
 
@@ -228,34 +228,41 @@ pub fn profile(root: &Path, file: &str, test: Option<&str>, max_steps: Option<u6
     let given = try_report!(given(root, which, input));
     let run = run_name(&program, which);
     let observed = observe(program, which, max_steps, root, given, Recorder::new, |p, rec, ended| {
-        let mut ran: Vec<(String, u64, u64, u64)> = Vec::new();
+        let mut ran: Vec<(String, u64, u64, u64, u64, u64)> = Vec::new();
         let mut not_run = Vec::new();
         for (f, s) in p.funcs.iter().zip(&rec.funcs) {
             if s.calls == 0 {
                 not_run.push(f.name.clone());
             } else {
-                ran.push((f.name.clone(), s.calls, s.steps, s.self_steps));
+                ran.push((f.name.clone(), s.calls, s.steps, s.self_steps, s.bytes, s.self_bytes));
             }
         }
         // Most expensive first; the name breaks ties so the order never depends on anything else.
         ran.sort_by(|a, b| b.3.cmp(&a.3).then(a.0.cmp(&b.0)));
-        (ran, not_run, rec.steps, ended)
+        (ran, not_run, rec.steps, rec.bytes, ended)
     });
-    let (funcs, not_run, steps, ended) = try_report!(observed.map_err(Report::error));
-    let mut text = format!("{:>10} {:>10} {:>8}  function ({run} in {file})\n", "self", "total", "calls");
-    for (name, calls, total, own) in &funcs {
-        text.push_str(&format!("{own:>10} {total:>10} {calls:>8}  {name}\n"));
+    let (funcs, not_run, steps, bytes, ended) = try_report!(observed.map_err(Report::error));
+    let mut text = format!(
+        "{:>10} {:>10} {:>8} {:>11} {:>11}  function ({run} in {file})\n",
+        "self", "total", "calls", "self bytes", "bytes"
+    );
+    for (name, calls, total, own, b, own_b) in &funcs {
+        text.push_str(&format!("{own:>10} {total:>10} {calls:>8} {own_b:>11} {b:>11}  {name}\n"));
     }
-    text.push_str(&format!("{steps} steps; end: {}\n", ended.text()));
+    text.push_str(&format!("{steps} steps, {bytes} bytes allocated; end: {}\n", ended.text()));
     if !not_run.is_empty() {
         text.push_str(&format!("not run: {}\n", not_run.join(", ")));
     }
     let functions: Vec<Value> = funcs
         .iter()
-        .map(|(name, calls, total, own)| json!({ "name": name, "calls": calls, "steps": total, "self_steps": own }))
+        .map(|(name, calls, total, own, b, own_b)| {
+            json!({
+                "name": name, "calls": calls, "steps": total, "self_steps": own, "bytes": b, "self_bytes": own_b,
+            })
+        })
         .collect();
     let json = json!({
-        "ok": true, "file": file, "run": run, "steps": steps, "functions": functions, "not_run": not_run,
+        "ok": true, "file": file, "run": run, "steps": steps, "bytes": bytes, "functions": functions, "not_run": not_run,
         "end": ended.to_json(),
     });
     Report::ok(json, text)

@@ -152,6 +152,8 @@ pub struct FnDecl {
     pub ensures: Vec<Expr>,
     /// `steps EXPR`: at most this many steps per call, checked by verify, not at run time.
     pub steps: Option<Expr>,
+    /// `allocs EXPR`: at most this many bytes allocated per call, checked the same way.
+    pub allocs: Option<Expr>,
     pub body: Block,
     pub span: Span,
     /// `allow LINT "reason"` lines written before `fn`.

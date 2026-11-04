@@ -440,10 +440,11 @@ pub const LINTS: &[(&str, &str)] = &[
          one its requires excluded: the language refuses it). A failure is shrunk to small \
          arguments and reported with the panic. A requires that accepts none of them, or a call \
          that runs past a million steps, is a finding too: the contract went unchecked. A \
-         `steps` bound is computed from the arguments first, and a call that takes more steps is \
-         a finding; arguments whose bound is more than a check may run are not run. A bounded \
+         `steps` or `allocs` bound is computed from the arguments first, and a call that takes \
+         more steps or allocates more bytes is a finding; arguments whose steps bound is more than \
+         a check may run are not run. A bounded \
          function is checked on arguments up to 40 long and measured as `anvil cost` does; steps \
-         that grow faster than the bound (quadratic against linear) are a finding too. Fix the \
+         or bytes that grow faster than the bound (quadratic against linear) are a finding too. Fix the \
          function or its contract (a requires is how a function says which inputs it takes), \
          or write `allow contract \"why\"` before its `fn`; an allow on a function that keeps \
          its contract is reported as stale.",

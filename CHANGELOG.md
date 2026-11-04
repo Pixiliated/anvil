@@ -3,6 +3,14 @@
 Each version is one roadmap milestone (docs/ROADMAP.md); docs/DECISIONS.md says why things are
 the way they are.
 
+## 0.29.0
+- Memory: the interpreter counts bytes allocated by a fixed model; `profile` shows each
+  function's bytes, `cost` fits them and suggests `allocs` clauses, and `allocs EXPR` bounds a
+  call's memory, checked by the contract lint.
+- `std.text`: `repeat`, `pad_left`, `pad_right` and `words` allocate linearly (they were
+  quadratic, or made a str per character), with `allocs` bounds.
+- Fixed: a call that took exactly one step more than its `steps` bound was not reported.
+
 ## 0.28.0
 - `anvil cost FILE`: how each pure function's steps grow with its arguments, the steps at each
   size, and the tightest `steps` clause that holds.

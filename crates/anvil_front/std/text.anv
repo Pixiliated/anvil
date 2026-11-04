@@ -1,42 +1,59 @@
 // The standard library's text functions: `import std.text.{lines, pad_left};`. Widths count
 // characters, not bytes.
 
-// s with `fill` before it until it is `width` characters wide (s itself when it already is).
-pub fn pad_left(s: str, width: i64, fill: str) -> str
-    requires fill.chars().len() == 1
-{
-    var out: str = s;
-    var n: i64 = s.chars().len();
-    while n < width {
-        out = fill + out;
-        n = n + 1;
+// How many characters s has: its bytes that do not continue a character (counted without
+// making a str of each, as `chars` would).
+fn char_count(s: str) -> i64 {
+    let b: bytes = s.to_bytes();
+    var n: i64 = 0;
+    for i in 0..b.len() {
+        if (b[i] & 192) != 128 {
+            n = n + 1;
+        }
     }
-    return out;
+    return n;
+}
+
+// s with `fill` before it until it is `width` characters wide (s itself when it already is).
+allow mutants "at exactly width, n > width and n >= width both give s: fill repeated 0 times adds nothing"
+pub fn pad_left(s: str, width: i64, fill: str) -> str
+    requires char_count(fill) == 1
+    steps 2 * abs(width) + 3 * s.len() + 30
+    allocs 16 * abs(width) + s.len()
+{
+    let n: i64 = char_count(s);
+    if n >= width {
+        return s;
+    }
+    return repeat(s: fill, n: width - n) + s;
 }
 
 // s with `fill` after it until it is `width` characters wide.
+allow mutants "at exactly width, n > width and n >= width both give s: fill repeated 0 times adds nothing"
 pub fn pad_right(s: str, width: i64, fill: str) -> str
-    requires fill.chars().len() == 1
+    requires char_count(fill) == 1
+    steps 2 * abs(width) + 3 * s.len() + 30
+    allocs 16 * abs(width) + s.len()
 {
-    var out: str = s;
-    var n: i64 = s.chars().len();
-    while n < width {
-        out = out + fill;
-        n = n + 1;
+    let n: i64 = char_count(s);
+    if n >= width {
+        return s;
     }
-    return out;
+    return s + repeat(s: fill, n: width - n);
 }
 
-// s, n times.
+// s, n times: one array of n references to s, joined once, so the bytes made grow with the
+// result rather than with its square.
 pub fn repeat(s: str, n: i64) -> str
     requires n >= 0
-    steps 2 * n + 3
+    steps 2 * n + 4
+    allocs 8 * n + n * s.len()
 {
-    var out: str = "";
+    var parts: [str] = [];
     for _i in 0..n {
-        out = out + s;
+        parts.push(s);
     }
-    return out;
+    return parts.join("");
 }
 
 // The lines of s, without their "\n" or "\r\n"; a last line without one counts, an empty end
@@ -61,24 +78,26 @@ pub fn lines(s: str) -> [str] {
     return out;
 }
 
-// The words of s: the pieces between spaces, tabs and line breaks, none empty.
+// The words of s: the pieces between spaces, tabs and line breaks, none empty. One slice of s
+// per word: the separators are ASCII, so their byte offsets are character boundaries.
 pub fn words(s: str) -> [str]
-    steps 5 * s.len() + 5
+    steps 4 * s.len() + 8
+    allocs 5 * s.len() + 8
 {
+    let b: bytes = s.to_bytes();
     var out: [str] = [];
-    var word: str = "";
-    for c in s.chars() {
-        if c == " " || c == "\t" || c == "\n" || c == "\r" {
-            if word.len() > 0 {
-                out.push(word);
-                word = "";
+    var start: i64 = 0;
+    for i in 0..b.len() {
+        let c: i64 = b[i];
+        if c == 32 || c == 9 || c == 10 || c == 13 {
+            if i > start {
+                out.push(s[start..i]);
             }
-        } else {
-            word = word + c;
+            start = i + 1;
         }
     }
-    if word.len() > 0 {
-        out.push(word);
+    if b.len() > start {
+        out.push(s[start..b.len()]);
     }
     return out;
 }
@@ -87,6 +106,7 @@ test "padding counts characters" {
     assert(pad_left(s: "7", width: 3, fill: "0") == "007");
     assert(pad_right(s: "é", width: 3, fill: ".") == "é..");
     assert(pad_left(s: "long", width: 2, fill: " ") == "long");
+    assert(pad_right(s: "long", width: 2, fill: " ") == "long");
 }
 
 test "repeat" {
@@ -100,6 +120,7 @@ test "lines and words" {
     assert(words("  two  words\tand\nmore ") == ["two", "words", "and", "more"]);
     assert(words("one two") == ["one", "two"]);
     assert(words("I saw a b") == ["I", "saw", "a", "b"]);
+    assert(words("a\rb\r\nc") == ["a", "b", "c"]);
 }
 
 test "joining lines gives the text back" for all xs: [str] {

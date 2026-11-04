@@ -83,7 +83,7 @@ in full (`anvil spec` prints it).
 
 ## Status
 
-v0.28: programs of one or more files (modules with explicit imports and `pub`), generic
+v0.29: programs of one or more files (modules with explicit imports and `pub`), generic
 functions, structs and enums with built-in constraints, i64, f64 with units, bool, strings with interpolation,
 search and split, growable arrays and slices, maps in key order, structs, enums with
 exhaustive `match`, structural `==`, `Option` and `Result` with `?`, function values and
@@ -91,7 +91,8 @@ closures, methods and interfaces, bytes and bit operations, deterministic parall
 (`parallel_map`), built-ins for text,
 sorting, stderr, exit codes, the environment and directories, a standard library written in
 Anvil (`std.list`, `std.set`, `std.text`, `std.math`),
-contracts (including `steps` bounds on a call's work, checked by verify), effects (io with
+contracts (including `steps` and `allocs` bounds on a call's work and memory, checked by
+verify), effects (io with
 arguments and stdin, files, a clock, seeded random numbers),
 `noalloc`, C functions (`extern`) and tests. There are two backends:
 
@@ -148,8 +149,8 @@ target/release/anvil build examples/orders.anv -o orders.exe
 | `anvil complete f.anv LINE COL` | what can be written at a position: fields and methods after `.`, names in scope elsewhere |
 | `anvil lsp` | a language server on stdio, for editors |
 | `anvil trace f.anv [--test NAME] [--only F,G]` | a run as a timeline: calls with their arguments, returns, prints |
-| `anvil profile f.anv [--test NAME]` | calls and steps per function |
-| `anvil cost f.anv` | how each pure function's steps grow, and the `steps` bound that fits |
+| `anvil profile f.anv [--test NAME]` | calls, steps and bytes allocated per function |
+| `anvil cost f.anv` | how each pure function's steps and bytes grow, and the `steps` and `allocs` bounds that fit |
 | `anvil explain [CODE]` | explain an error code or a lint |
 | `anvil spec` | print the language specification |
 | `anvil std [MODULE]` | the standard library: modules and their pub items, or one module's source |

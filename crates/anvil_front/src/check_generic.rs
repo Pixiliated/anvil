@@ -917,6 +917,7 @@ impl<'a> Checker<'a> {
             requires: Vec::new(),
             ensures: Vec::new(),
             steps: None,
+            allocs: None,
             result_local: None,
             locals: Vec::new(),
             body: Vec::new(),

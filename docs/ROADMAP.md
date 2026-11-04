@@ -194,3 +194,14 @@ green and the interpreter and native backend agreeing on every program in `tests
 - [x] Bounded functions are checked on wider arguments (up to 40 long, not 8), and a bound that
   grows slower than the steps it bounds is a contract finding, though it holds for every size
   checked
+
+## M28: Memory (v0.29)
+- [x] Bytes allocated, counted by the interpreter by a fixed model (lengths of new text, 8 per
+  array element, 16 per map entry, copies of shared values), per call and per function
+- [x] `profile` shows each function's bytes; `cost` fits bytes like steps (with the triangular
+  `n * (n + 1) / 2` of repeated copying) and suggests `allocs` clauses, measuring past bounds
+- [x] `allocs EXPR`, a contract clause checked by the contract lint like `steps`, outgrown bounds
+  included; a call one step over its `steps` bound is now caught (it returned unreported)
+- [x] The standard library's text functions made linear in memory: `repeat` (2,259,840 bytes at
+  its costliest call, now 16,640), `pad_left` and `pad_right` (quadratic in width), `words`
+  (a str per character); their bounds approved as part of their APIs

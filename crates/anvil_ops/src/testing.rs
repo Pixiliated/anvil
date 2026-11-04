@@ -112,7 +112,9 @@ pub(crate) enum Checked {
     Broken { inputs: String, message: String, shrinks: u64 },
     Stopped { inputs: String },
     /// It kept its steps bound on every call, but its steps grow faster than the bound does.
-    Outgrows { steps: String, bound: String },
+    /// It kept its bounds on every call, but what one bounds (`clause`, in `unit`) grows faster
+    /// than the bound does.
+    Outgrows { clause: &'static str, unit: &'static str, used: String, bound: String },
 }
 
 /// Checks the contract of every function of the root module that has one, on generated
@@ -126,7 +128,8 @@ pub(crate) fn check_contracts(
     let steps = max_steps.map_or(CONTRACT_STEPS, |m| m.min(CONTRACT_STEPS));
     let mut out = Vec::new();
     for (id, f) in program.funcs.iter().enumerate() {
-        let has_contract = !f.requires.is_empty() || !f.ensures.is_empty() || f.steps.is_some();
+        let has_contract =
+            !f.requires.is_empty() || !f.ensures.is_empty() || f.steps.is_some() || f.allocs.is_some();
         if f.module != 0 || f.captures.is_some() || f.external.is_some() || !has_contract {
             continue;
         }
@@ -153,9 +156,13 @@ pub(crate) fn check_contracts(
             // A bound that holds for every size checked may still grow slower than the work.
             Contract::Held { checked, excluded, overflowed, beyond } => {
                 let outgrown =
-                    f.steps.as_ref().and_then(|_| crate::cost::outgrows(&crate::cost::measure_one(program, id, ffi, root)));
-                if let Some((steps, bound)) = outgrown {
-                    out.push((id, Checked::Outgrows { steps, bound }));
+                    if f.steps.is_some() || f.allocs.is_some() {
+                        crate::cost::outgrows(&crate::cost::measure_one(program, id, ffi, root)).into_iter().next()
+                    } else {
+                        None
+                    };
+                if let Some((clause, unit, used, bound)) = outgrown {
+                    out.push((id, Checked::Outgrows { clause, unit, used, bound }));
                     continue;
                 }
                 Checked::Held { checked, excluded, overflowed, beyond }

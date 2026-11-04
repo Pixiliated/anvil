@@ -323,7 +323,7 @@ impl Printer<'_> {
             self.line(&format!("{head};"));
             return;
         }
-        if f.requires.is_empty() && f.ensures.is_empty() && f.steps.is_none() {
+        if f.requires.is_empty() && f.ensures.is_empty() && f.steps.is_none() && f.allocs.is_none() {
             self.block(&head, &f.body, "");
             return;
         }
@@ -339,6 +339,10 @@ impl Printer<'_> {
         }
         if let Some(e) = &f.steps {
             let t = format!("steps {}", self.expr(e));
+            self.line(&t);
+        }
+        if let Some(e) = &f.allocs {
+            let t = format!("allocs {}", self.expr(e));
             self.line(&t);
         }
         self.depth -= 1;

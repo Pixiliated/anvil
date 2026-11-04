@@ -504,3 +504,21 @@ Short records of choices that are not obvious from the code. Newest last.
   a quadratic function hid under a linear bound with a large constant. Bounded functions are
   now checked on arrays up to 40 long, and a bound whose growth class is below the measured
   steps' is a finding even while it holds: it is the same bug, met later.
+
+## M28 (v0.29)
+
+- **Memory is a model, like steps**: the interpreter counts bytes by fixed rules (text by
+  length, 8 per array element, 16 per map entry, a shared array or map copied before a write),
+  so the numbers are exact on every machine and track what the native runtime copies, without
+  allocator noise or timing. They are not the native heap's byte count, and the spec says so.
+- **One hook, not sixty**: an expression's result is counted where it is evaluated, for the
+  kinds the checker already treats as allocating (`noalloc` refuses the same ones), plus the
+  copy-on-write sites; values passed through (`get`, `to_bytes`) count nothing.
+- **Measuring does not stop at a bound**: `cost` reports bounds without holding calls to them,
+  so a broken bound shows how far it is exceeded instead of cutting the curve short.
+- **Repeated copying gets its own form**, `n * (n + 1) / 2`: it is the shape of `s = s + x`, and
+  whole multiples of `n * n` overshoot it twice over, which read as a loose linear fit.
+- **The standard library was the first user**: measured, `repeat` copied its whole result every
+  round; it and the padding functions now join once and `words` slices once per word, with
+  `allocs` bounds and API goldens so they stay linear. Measuring also found that a call one
+  step over its `steps` bound was let through; it is now a finding.
