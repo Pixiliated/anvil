@@ -432,6 +432,14 @@ pub const LINTS: &[(&str, &str)] = &[
          to `untested`, and main to its golden. An allow on a function whose branches all run is \
          reported as stale.",
     ),
+    (
+        "mutants",
+        "Applied by `anvil mutate`, not verify: a mutant of a function (one operator, literal or call \
+         changed) that no test or golden notices. Add a test that tells them apart, or, when the \
+         change makes no difference a program could see (`a < b` for `a <= b` where both give the \
+         same answer), write `allow mutants \"why\"` before the function's `fn`. An allow on a \
+         function none of whose mutants survive is reported as stale.",
+    ),
 ];
 
 pub fn lint(name: &str) -> Option<&'static str> {

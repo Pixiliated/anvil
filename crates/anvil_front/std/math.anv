@@ -1,5 +1,6 @@
 // The standard library's number functions: `import std.math.{max, floor};`.
 
+allow mutants "when a == b, < and <= pick the same value"
 pub fn min[T: ordered](a: T, b: T) -> T {
     if b < a {
         return b;
@@ -7,6 +8,7 @@ pub fn min[T: ordered](a: T, b: T) -> T {
     return a;
 }
 
+allow mutants "when a == b, < and <= pick the same value"
 pub fn max[T: ordered](a: T, b: T) -> T {
     if a < b {
         return b;
@@ -56,6 +58,7 @@ pub fn sign(x: i64) -> i64 {
 }
 
 // Floats from 2^52 up have no fraction; nan and the infinities stay as they are.
+allow mutants "at exactly 2^52 either answer gives the same floor, ceil and round"
 fn whole(x: f64) -> bool {
     return x != x || abs(x) >= 4503599627370496.0;
 }
@@ -112,7 +115,7 @@ test "min, max and clamp" {
 test "pow, gcd and sign" {
     assert(pow(base: 2, exp: 10) == 1024 && pow(base: -3, exp: 3) == -27 && pow(base: 7, exp: 0) == 1);
     assert(gcd(a: 84, b: -36) == 12 && gcd(a: 0, b: 0) == 0 && gcd(a: 0, b: 5) == 5);
-    assert(sign(-4) == -1 && sign(0) == 0 && sign(9) == 1);
+    assert(sign(-4) == -1 && sign(0) == 0 && sign(9) == 1 && sign(1) == 1 && sign(-1) == -1);
 }
 
 test "floor, ceil and round" {

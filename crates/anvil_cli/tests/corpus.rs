@@ -916,6 +916,74 @@ test "some branches" {
 }
 
 #[test]
+fn mutate_reports_what_no_test_notices() {
+    let p = hello_project("mutate");
+    p.write(
+        "src/maths.anv",
+        r#"pub fn is_adult(age: i64) -> bool {
+    return age >= 18;
+}
+
+allow mutants "nothing survives here"
+fn double(n: i64) -> i64 {
+    return n * 2;
+}
+
+test "ages and doubles" {
+    assert(is_adult(30));
+    assert(!is_adult(5));
+    assert(double(3) == 6);
+}
+"#,
+    );
+    let survivors = |v: &serde_json::Value| -> Vec<(String, String, String)> {
+        v["mutants"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|m| m["status"] == "survived")
+            .map(|m| (m["at"].as_str().unwrap().into(), m["from"].as_str().unwrap().into(), m["to"].as_str().unwrap().into()))
+            .collect()
+    };
+    // No test asks about 18 itself, so neither >= to > nor 18 to 19 is noticed; `double`'s allow
+    // excuses nothing.
+    let out = p.anvil(&["mutate", "src/maths.anv", "--json"]);
+    assert_eq!(out.status.code(), Some(1));
+    let v = json_of(&out);
+    let want = |a: &str, f: &str, t: &str| (a.to_string(), f.to_string(), t.to_string());
+    assert_eq!(survivors(&v), [want("2:16", ">=", ">"), want("2:19", "18", "19")], "{v}");
+    assert_eq!(v["stale_allows"][0]["function"], "double", "{v}");
+    assert_eq!((v["killed"].as_u64(), v["score"].as_u64()), (Some(2), Some(50)), "{v}");
+
+    // A file that imports it and prints is_adult(18) under a golden notices both.
+    p.write("src/app.anv", "import maths.{is_adult};\n\nfn main() uses io {\n    print(\"{is_adult(18)}\");\n}\n");
+    assert!(p.anvil(&["golden", "approve", "src/app.anv"]).status.success());
+    let v = json_of(&p.anvil(&["mutate", "src/maths.anv", "--json"]));
+    assert!(survivors(&v).is_empty(), "{v}");
+    assert_eq!(v["against"], serde_json::json!(["src/maths.anv", "src/app.anv"]), "{v}");
+    assert_eq!(v["mutants"][0]["by"], "the golden of src/app.anv", "{v}");
+    assert_eq!(v["mutants"][2]["by"], "test \"ages and doubles\" in src/maths.anv", "{v}");
+    assert_eq!(v["ok"], false, "the stale allow still fails it: {v}");
+    let fixed = std::fs::read_to_string(p.0.join("src/maths.anv")).unwrap().replace("allow mutants \"nothing survives here\"\n", "");
+    p.write("src/maths.anv", &fixed);
+    assert!(p.anvil(&["mutate", "src/maths.anv"]).status.success());
+
+    // An equivalent mutant is excused by an allow with its reason.
+    p.write("src/app.anv", "fn main() uses io {\n    print(\"ok\");\n}\n");
+    assert!(p.anvil(&["golden", "approve", "src/app.anv"]).status.success());
+    p.write("src/maths.anv", &format!("allow mutants \"18 is never asked about\"\n{fixed}"));
+    let v = json_of(&p.anvil(&["mutate", "src/maths.anv", "--only", "is_adult", "--json"]));
+    assert_eq!((v["ok"].as_bool(), v["allowed"].as_u64(), v["mutants"].as_array().unwrap().len()), (Some(true), Some(2), 2), "{v}");
+
+    // Loud, never silent: an unknown function, or tests that fail before any change.
+    assert_eq!(p.anvil(&["mutate", "src/maths.anv", "--only", "nope"]).status.code(), Some(2));
+    p.write("src/maths.anv", "fn one() -> i64 {\n    return 1;\n}\n\ntest \"one\" {\n    assert(one() == 2);\n}\n");
+    let out = p.anvil(&["mutate", "src/maths.anv"]);
+    assert_eq!(out.status.code(), Some(2));
+    assert!(String::from_utf8_lossy(&out.stderr).contains("fails before any change"));
+}
+
+#[test]
 fn a_differing_golden_leaves_the_actual_output_and_a_diff() {
     let p = hello_project("golden_diff");
     let program = |second: &str| {

@@ -96,6 +96,7 @@ test "lines and words" {
     assert(lines("") == []);
     assert(words("  two  words\tand\nmore ") == ["two", "words", "and", "more"]);
     assert(words("one two") == ["one", "two"]);
+    assert(words("I saw a b") == ["I", "saw", "a", "b"]);
 }
 
 test "joining lines gives the text back" for all xs: [str] {

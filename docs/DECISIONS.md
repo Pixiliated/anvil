@@ -411,3 +411,21 @@ Short records of choices that are not obvious from the code. Newest last.
 - On its first run the lint found real gaps: four standard-library branches no test took
   (`max_by_key` replacing its best, `ceil`/`round` of huge values, `round` of a fraction over a
   half, `words` ending without a space), all now tested.
+
+## M22 (v0.23)
+
+- **Mutants are made in the source, not the IR**: a change is one span of text, so it is
+  reported where it is written, goes through the same checker as real code (one that no longer
+  type-checks is invalid, not a crash), and is formatted first so a left-out line is no layout
+  error.
+- **A mutant is run against everything that could notice it**: the file's tests and golden, and
+  every project file whose program includes the file, as verify's coverage counts importers.
+- **Step budgets come from the unchanged run** (ten times its steps), so a mutant that loops is
+  killed in a fixed, deterministic number of steps, not by a timer.
+- **Equivalent mutants are excused per function with a reason**, like the lints, because no tool
+  can always tell them apart; the allow goes stale when nothing survives.
+- **Not part of verify**: it runs the tests once per mutant (the repository's 70 files make about
+  1,900 mutants, about two minutes). The corpus programs check the backends, not their own
+  tests, so they are not held to it; the standard library is.
+- Its first run on the standard library found tests that could not tell `sign(1)` from 0, the
+  first of equal keys in `min_by_key`/`max_by_key`, or one-letter words; they have tests now.

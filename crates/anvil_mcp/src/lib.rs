@@ -132,6 +132,18 @@ pub struct VerifyArgs {
 
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
+pub struct MutateArgs {
+    /// Path of the .anv file, relative to the server's root.
+    pub file: String,
+    /// Mutate these functions only, comma-separated.
+    pub only: Option<String>,
+    /// Stop each run of a mutant after this many statements and loop iterations (default: ten
+    /// times what the unchanged tests and golden take, so a mutant that loops is caught quickly).
+    pub max_steps: Option<u64>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct FuzzArgs {
     /// Seed of the first program (default 1); a seed always makes the same program.
     pub seed: Option<u64>,
@@ -439,6 +451,15 @@ impl AnvilServer {
         Returns the Markdown.")]
     async fn review(&self, Parameters(a): Parameters<VerifyArgs>) -> Result<CallToolResult, ErrorData> {
         self.op(move |root| anvil_ops::review(root, a.native.unwrap_or(false), Some(steps(a.max_steps)))).await
+    }
+
+    #[tool(description = "Mutation testing: change one thing at a time in the file's functions (an \
+        operator such as < to <=, an integer or bool literal, a `!` or `-` left off, a call statement \
+        left out), and rerun the tests and goldens of the file and of every project file importing it. \
+        Each mutant is killed (something noticed, named in `by`), survived, or invalid (did not \
+        compile). Any survivor is a tool error: a test is missing or asserts too little.")]
+    async fn mutate(&self, Parameters(a): Parameters<MutateArgs>) -> Result<CallToolResult, ErrorData> {
+        self.op(move |root| anvil_ops::mutate(root, &a.file, a.only.as_deref(), a.max_steps)).await
     }
 
     #[tool(description = "Compare each program's output, exit code and panic with its approved golden \

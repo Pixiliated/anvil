@@ -3,6 +3,13 @@
 Each version is one roadmap milestone (docs/ROADMAP.md); docs/DECISIONS.md says why things are
 the way they are.
 
+## 0.23.0
+- `anvil mutate FILE`: mutation testing. One operator, literal, `!`/`-`/`~` or call statement
+  changed at a time, run against the tests and goldens of the file and its importers; survivors
+  fail it, `allow mutants "why"` excuses equivalent ones.
+- New standard-library tests for what it found (`sign`, ties in `min_by_key`/`max_by_key`,
+  one-letter `words`).
+
 ## 0.22.0
 - The `unreached` lint: `verify` reports each `if`/`else` block, match arm and loop body of a
   tested function that no test or golden-checked main takes; `allow unreached "why"` switches it

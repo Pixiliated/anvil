@@ -83,7 +83,7 @@ in full (`anvil spec` prints it).
 
 ## Status
 
-v0.22: programs of one or more files (modules with explicit imports and `pub`), generic
+v0.23: programs of one or more files (modules with explicit imports and `pub`), generic
 functions, structs and enums with built-in constraints, i64, f64 with units, bool, strings with interpolation,
 search and split, growable arrays and slices, maps in key order, structs, enums with
 exhaustive `match`, structural `==`, `Option` and `Result` with `?`, function values and
@@ -168,6 +168,7 @@ decisions and findings with their history, and a review sheet for sign-off:
 | `anvil golden approve f.anv` | approve a program's current output |
 | `anvil verify [--native]` | check, test and golden-check everything; findings go into the record |
 | `anvil review` | verify, then write `out/review.md` for a person to sign off |
+| `anvil mutate FILE` | mutation testing: change one operator, literal or call at a time; report each change no test or golden notices |
 | `anvil watch` | verify, and again after every change |
 | `anvil record query [KIND]` | milestones, decisions, findings or runs |
 
@@ -175,7 +176,8 @@ decisions and findings with their history, and a review sheet for sign-off:
 golden-checked `main` (`untested`), and so must every branch of it: each `if` and `else` block,
 match arm and loop body (`unreached`). Where that cannot be, `allow untested "why"` or
 `allow unreached "why"` before the `fn` says so, and an allow that is no longer needed is
-reported too. A program that no longer matches its golden
+reported too. `anvil mutate FILE` goes further: it changes the code one operator, literal or
+call at a time and reports each change that no test or golden notices. A program that no longer matches its golden
 leaves its actual output and a diff in `out/golden/`.
 
 This repository is itself an Anvil project: `anvil golden check --native` runs its whole parity

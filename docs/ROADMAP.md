@@ -144,3 +144,11 @@ green and the interpreter and native backend agreeing on every program in `tests
   function around them, empty blocks are not branches
 - [x] Per-file branch counts in `verify --json` and the review sheet; the gaps it found in the
   standard library and the corpus are covered by new tests
+
+## M22: Mutation testing (v0.23)
+- [x] `anvil mutate FILE [--only NAMES]`: operator, literal, `!`/`-`/`~` and call-statement
+  mutants, each run against the tests and goldens of the file and of every project file that
+  imports it, with step budgets from the unchanged run; CLI and MCP
+- [x] Killed, survived and invalid mutants with what killed each; `allow mutants "why"` for
+  equivalent ones, stale when nothing survives; an `anvil explain mutants` entry
+- [x] The standard library is mutation-clean: the survivors it found have tests or reasoned allows

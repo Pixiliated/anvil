@@ -193,6 +193,7 @@ pub fn unique[T](xs: [T]) -> [T] {
 }
 
 // Pieces of `size` elements, the last one shorter when they do not divide evenly.
+allow mutants "when end is the length, > and >= both leave it the length"
 pub fn chunks[T](xs: [T], size: i64) -> [[T]]
     requires size > 0
 {
@@ -264,6 +265,8 @@ test "min and max by key" {
         return w.len();
     };
     assert(min_by_key(xs: ["ccc", "a", "b"], key: len) == Some("a"));
+    assert(min_by_key(xs: ["b", "a", "cc"], key: len) == Some("b"));
+    assert(max_by_key(xs: ["aa", "bb", "c"], key: len) == Some("aa"));
     assert(max_by_key(xs: ["ccc", "a", "ddd"], key: len) == Some("ccc"));
     assert(max_by_key(xs: ["a", "ccc", "bb"], key: len) == Some("ccc"));
     assert(min_by_key(xs: ["a"][0..0], key: len) == None);

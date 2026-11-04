@@ -5,6 +5,7 @@ pub struct Set[T: key] {
     members: Map[T, bool],
 }
 
+allow mutants "a member's value is never read: the map holds keys only"
 pub fn set_of[T: key](xs: [T]) -> Set[T] {
     var m: Map[T, bool] = [:];
     for x in xs {
@@ -17,6 +18,7 @@ pub fn Set[T: key].has(self, x: T) -> bool {
     return self.members.has(x);
 }
 
+allow mutants "a member's value is never read: the map holds keys only"
 pub fn Set[T: key].add(self, x: T) -> Set[T] {
     var m: Map[T, bool] = self.members;
     m.set(key: x, value: true);
@@ -42,6 +44,7 @@ pub fn Set[T: key].items(self) -> [T] {
     return self.members.keys();
 }
 
+allow mutants "a member's value is never read: the map holds keys only"
 pub fn Set[T: key].union(self, other: Set[T]) -> Set[T] {
     var m: Map[T, bool] = self.members;
     for x in other.members.keys() {
@@ -50,6 +53,7 @@ pub fn Set[T: key].union(self, other: Set[T]) -> Set[T] {
     return Set { members: m };
 }
 
+allow mutants "a member's value is never read: the map holds keys only"
 pub fn Set[T: key].intersection(self, other: Set[T]) -> Set[T] {
     var m: Map[T, bool] = [:];
     for x in self.members.keys() {
@@ -61,6 +65,7 @@ pub fn Set[T: key].intersection(self, other: Set[T]) -> Set[T] {
 }
 
 // The members of self that are not in other.
+allow mutants "a member's value is never read: the map holds keys only"
 pub fn Set[T: key].difference(self, other: Set[T]) -> Set[T] {
     var m: Map[T, bool] = [:];
     for x in self.members.keys() {

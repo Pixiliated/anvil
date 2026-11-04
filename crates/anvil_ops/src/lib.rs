@@ -8,6 +8,7 @@ mod fuzz;
 pub mod golden;
 mod inspect;
 mod lsp;
+mod mutate;
 mod proj;
 pub mod project;
 mod query;
@@ -17,6 +18,7 @@ pub use docs::docs;
 pub use fuzz::{fuzz, program_for};
 pub use inspect::{profile, trace, TRACE_LIMIT};
 pub use lsp::lsp;
+pub use mutate::mutate;
 pub use proj::{
     fmt, golden_approve, golden_check, list, record_decide, record_export, record_import_roadmap, record_query,
     record_status, review, verify, watch,
@@ -184,6 +186,15 @@ pub const COMMANDS: &[Command] = &[
         positionals: &[],
         options: &[STEPS, NATIVE],
         summary: "verify, then write out/review.md, the sheet a person signs off",
+    },
+    Command {
+        name: "mutate",
+        positionals: &["file"],
+        options: &[
+            ("only", "NAMES", "mutate these functions only (comma-separated)"),
+            ("max-steps", "N", "stop each run of a mutant after N steps (default: ten times the unchanged run)"),
+        ],
+        summary: "change one operator, literal or call at a time; report each change no test or golden notices",
     },
     Command {
         name: "golden check",

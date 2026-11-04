@@ -1,4 +1,4 @@
-# Anvil language specification (v0.22)
+# Anvil language specification (v0.23)
 
 Anvil is a small, compiled, general-purpose language designed to be written mostly by AI agents
 and read by humans. Its rules aim at three things: one obvious way to write each thing, code
@@ -822,6 +822,8 @@ anvil golden approve FILE                   approve a program's current output
 anvil verify [--native]                     check, test and golden-check every file;
                                             store the findings in the record
 anvil review [--native]                     verify, then write out/review.md for sign-off
+anvil mutate FILE [--only NAMES]            change one thing at a time; report what no test
+                                            or golden notices
 anvil record query [KIND] [--open]          milestones, decisions, findings, runs
 anvil record decide TITLE [BODY]            record a decision
 anvil record status MILESTONE STATUS        open, active, done or dropped
@@ -860,6 +862,31 @@ Fix a finding with a test; where no test can reach it, write `allow untested "re
 lint or a repeated allow is an error, and an allow that switches nothing off is reported as
 stale. `verify --json` gives each file's `untested` functions, `unreached` branches and
 `branches` (`total` and `taken`); the review sheet sums them.
+
+**Mutation testing.** Coverage says what the tests run; `anvil mutate FILE` asks whether they
+would notice it being wrong. Each **mutant** changes one thing in one function of FILE (a
+function literal's belong to the function around it), in source order:
+
+| Mutant | Change |
+|---|---|
+| operators | `+` and `-`, `*` to `/`, `/` to `*`, `%` to `/`, `==` and `!=`, `<` and `<=`, `>` and `>=`, `&&` and `\|\|`, `&` and `\|`, `<<` and `>>` |
+| literals | an integer `n` to `n + 1`, `true` and `false` |
+| `!`, `-`, `~` | left off |
+| a call statement | left out |
+
+Each mutant is put in canonical layout, then the tests and golden of FILE and of every project
+file whose program includes it are run in the interpreter; each run may take ten times the
+steps the unchanged one took (or `--max-steps`), so a mutant that loops is noticed too. The
+unchanged files must pass first. A mutant is **killed** when a test fails, a golden differs,
+a run runs out of steps or an importer no longer compiles (the JSON's `by` says which),
+**invalid** when FILE no longer compiles, and otherwise it **survives**: a test is missing or
+asserts too little. Any survivor fails the command.
+
+Some survivors change nothing a program can see, like `<` for `<=` in a `min`, where both pick
+the same value when the two are equal. `allow mutants "reason"` before the function excuses
+its survivors (reported as `allowed`), and is stale, which also fails, when none of its
+mutants survive. Mutation testing is not part of `verify`: it runs every test once per mutant.
+The standard library's modules, which ship in the binary, are measured by their own tests.
 
 `anvil-mcp` serves the same commands, except `watch` and `lsp`, as MCP tools over stdio (`type-at` is
 `type_at`, `golden check` is `golden_check`), with the same arguments and the same JSON; a
