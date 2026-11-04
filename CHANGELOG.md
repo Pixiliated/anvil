@@ -3,6 +3,11 @@
 Each version is one roadmap milestone (docs/ROADMAP.md); docs/DECISIONS.md says why things are
 the way they are.
 
+## 0.26.0
+- API goldens: `anvil api [FILE]` and `anvil api approve FILE`; each file's public API is
+  approved in `golden/FILE.api`, and verify reports added, removed and changed items, naming the
+  files a removal or change breaks.
+
 ## 0.25.0
 - Doc comments: the `//` lines above an item are its doc, shown by outline, std, type-at,
   completion, hover and the docs site.

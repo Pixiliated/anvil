@@ -1,0 +1,7 @@
+fn Money.plus(self, other: Money) -> Money
+fn Money.text(self) -> str
+fn Money.times(self, n: i64) -> Money
+fn money(cents: i64) -> Money
+fn total[T: Priced](items: [T]) -> Money
+interface Priced { fn price(self) -> Money; fn label(self) -> str }
+struct Money { cents: i64 }

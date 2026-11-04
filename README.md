@@ -83,7 +83,7 @@ in full (`anvil spec` prints it).
 
 ## Status
 
-v0.25: programs of one or more files (modules with explicit imports and `pub`), generic
+v0.26: programs of one or more files (modules with explicit imports and `pub`), generic
 functions, structs and enums with built-in constraints, i64, f64 with units, bool, strings with interpolation,
 search and split, growable arrays and slices, maps in key order, structs, enums with
 exhaustive `match`, structural `==`, `Option` and `Result` with `?`, function values and
@@ -166,6 +166,8 @@ decisions and findings with their history, and a review sheet for sign-off:
 | `anvil list` | the project's files |
 | `anvil golden check [--native]` | compare every program's output with its approved golden |
 | `anvil golden approve f.anv` | approve a program's current output |
+| `anvil api [f.anv]` | public APIs against their approved ones (`golden/f.anv.api`) |
+| `anvil api approve f.anv` | approve a file's current public API |
 | `anvil verify [--native]` | check, test and golden-check everything; findings go into the record |
 | `anvil review` | verify, then write `out/review.md` for a person to sign off |
 | `anvil mutate FILE` | mutation testing: change one operator, literal or call at a time; report each change no test or golden notices |
@@ -176,7 +178,9 @@ decisions and findings with their history, and a review sheet for sign-off:
 golden-checked `main` (`untested`), and so must every branch of it: each `if` and `else` block,
 match arm and loop body (`unreached`). Where that cannot be, `allow untested "why"` or
 `allow unreached "why"` before the `fn` says so, and an allow that is no longer needed is
-reported too. Every `pub` item needs a doc comment (`undocumented`): the `//` lines above it,
+reported too. A module's public API is approved like a program's output: verify reports any
+change to a `pub` signature, field, variant or method, and names the files a removal or change
+breaks. Every `pub` item needs a doc comment (`undocumented`): the `//` lines above it,
 which outline, completion, hover, `anvil std` and the docs site show with its signature; a doc
 line `// example: EXPR` is also a test. A function's contract is checked without tests: verify calls every pure function
 that has a `requires` or `ensures` on 100 generated arguments and reports, shrunk, any its

@@ -462,3 +462,16 @@ Short records of choices that are not obvious from the code. Newest last.
 - **`undocumented` is a lint on pub items only**: they are what other files and agents use
   without reading the source. Its first run asked for 32 docs (18 in the standard library); the
   standard library's functions now carry examples that run as tests.
+
+## M25 (v0.26)
+
+- **A public API is a golden**: an agent changing a module can break its users without any test
+  failing in the module itself, so the interface is approved like output, and every change,
+  even an addition, is seen once before it is approved.
+- **The API is what users must write**: signatures with parameter names (calls name their
+  arguments, so a rename breaks callers), contracts, fields, variants, interface methods, units;
+  not docs, bodies or private items. Lines are sorted, so moving items is no change.
+- **A change says whom it breaks**: verify names the project files whose programs include the
+  module, from the files each one read, so a user that no longer compiles is still named.
+- The standard library's API is approved with the rest of the project, so a change to it is a
+  decision, recorded in `golden/`.

@@ -1,0 +1,5 @@
+enum Shape { Circle(radius: f64[m]), Rect(width: f64[m], height: f64[m]) }
+fn area(s: Shape) -> f64[m^2]
+fn far_corner(s: Shape) -> f64[m]
+fn perimeter(s: Shape) -> f64[m]
+fn side(s: Shape, i: i64) -> f64[m]

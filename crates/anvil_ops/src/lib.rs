@@ -3,17 +3,19 @@
 //! is the one list of commands and their arguments: the CLI parses with it and a test checks
 //! that the MCP server has a tool for each, with the same parameters.
 
+mod api;
 mod docs;
 mod fuzz;
 pub mod golden;
 mod inspect;
 mod lsp;
 mod mutate;
-mod proj;
+pub(crate) mod proj;
 pub mod project;
 mod query;
 mod testing;
 
+pub use api::{api, api_approve};
 pub use docs::docs;
 pub use fuzz::{fuzz, program_for};
 pub use inspect::{profile, trace, TRACE_LIMIT};
@@ -195,6 +197,18 @@ pub const COMMANDS: &[Command] = &[
             ("max-steps", "N", "stop each run of a mutant after N steps (default: ten times the unchanged run)"),
         ],
         summary: "change one operator, literal or call at a time; report each change no test or golden notices",
+    },
+    Command {
+        name: "api",
+        positionals: &["file?"],
+        options: &[],
+        summary: "a file's public API (or every project file's) against the approved one; any difference fails",
+    },
+    Command {
+        name: "api approve",
+        positionals: &["file"],
+        options: &[],
+        summary: "store a file's current public API as approved (look at the changes first)",
     },
     Command {
         name: "golden check",
@@ -608,7 +622,7 @@ pub fn fix(root: &Path, file: &str) -> Report {
 }
 
 /// Collapses runs of whitespace, so a multi-line signature reads as one line.
-fn one_line(s: &str) -> String {
+pub(crate) fn one_line(s: &str) -> String {
     s.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 

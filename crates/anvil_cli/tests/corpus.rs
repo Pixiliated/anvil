@@ -1111,6 +1111,7 @@ test "twice" {
     assert_eq!(failing, ["example of half on line 13"], "{t}");
 
     // verify: the failing example, Pair without a doc, half's stale allow.
+    assert!(p.anvil(&["api", "approve", "src/maths.anv"]).status.success());
     let v = json_of(&p.anvil(&["verify", "--json"]));
     let found: Vec<(&str, &str)> = v["open"]
         .as_array()
@@ -1127,6 +1128,64 @@ test "twice" {
     let c = p.json(&["check", "src/maths.anv"]);
     assert_eq!(c["diagnostics"][0]["code"], "E0100", "{c}");
     assert_eq!(c["diagnostics"][0]["range"]["start"]["line"], 2, "{c}");
+}
+
+#[test]
+fn public_apis_are_approved_like_goldens() {
+    let p = hello_project("api");
+    let shapes = "// The area of a w by h rectangle.\npub fn area(w: i64, h: i64) -> i64 {\n    return w * h;\n}\n\n\
+                  test \"area\" {\n    assert(area(w: 2, h: 3) == 6);\n}\n";
+    p.write("src/shapes.anv", shapes);
+    p.write("src/app.anv", "import shapes.{area};\n\nfn main() uses io {\n    print(\"{area(w: 2, h: 5)}\");\n}\n");
+    assert!(p.anvil(&["golden", "approve", "src/app.anv"]).status.success());
+    assert!(p.anvil(&["golden", "approve", "src/hello.anv"]).status.success());
+    let api_findings = |v: &serde_json::Value| -> Vec<String> {
+        v["open"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|f| f["check"] == "api")
+            .map(|f| f["message"].as_str().unwrap().to_string())
+            .collect()
+    };
+
+    // A public API never approved is a finding; `api` lists it.
+    let v = json_of(&p.anvil(&["verify", "--json"]));
+    let found = api_findings(&v);
+    assert_eq!(found.len(), 1, "{v}");
+    assert!(found[0].starts_with("src/shapes.anv has pub items but no approved API"), "{v}");
+    let out = p.anvil(&["api", "--json"]);
+    assert_eq!(out.status.code(), Some(1));
+    let a = json_of(&out);
+    assert_eq!(a["files"][0]["api"], serde_json::json!(["fn area(w: i64, h: i64) -> i64"]), "{a}");
+    let approved = p.json(&["api", "approve", "src/shapes.anv"]);
+    assert_eq!(approved["approved"], "new", "{approved}");
+    assert_eq!(std::fs::read_to_string(p.0.join("golden/src/shapes.anv.api")).unwrap(), "fn area(w: i64, h: i64) -> i64\n");
+    assert!(api_findings(&json_of(&p.anvil(&["verify", "--json"]))).is_empty());
+
+    // A doc is not API; an added function is a change that breaks no one.
+    p.write("src/shapes.anv", &format!("// Twice x.\npub fn double(x: i64) -> i64 {{\n    return x * 2;\n}}\n\n{}", shapes.replace("The area", "The whole area")));
+    let found = api_findings(&json_of(&p.anvil(&["verify", "--json"])));
+    assert_eq!(found, ["the public API added `fn double(x: i64) -> i64`; if that is meant, `anvil api approve src/shapes.anv`"]);
+
+    // Renaming a parameter changes the API (calls name their arguments) and breaks app.anv.
+    p.write("src/shapes.anv", &shapes.replace("w: i64", "width: i64").replace("w * h", "width * h").replace("area(w: 2", "area(width: 2"));
+    let found = api_findings(&json_of(&p.anvil(&["verify", "--json"])));
+    assert_eq!(
+        found,
+        ["the public API changed `fn area(w: i64, h: i64) -> i64` to `fn area(width: i64, h: i64) -> i64`; \
+          it breaks the files that use it: src/app.anv; if that is meant, `anvil api approve src/shapes.anv`"]
+    );
+    let approved = p.json(&["api", "approve", "src/shapes.anv"]);
+    assert_eq!(approved["approved"], "changed", "{approved}");
+    assert_eq!(approved["changes"][0]["kind"], "changed", "{approved}");
+
+    // With no pub items left, approving removes the approved API.
+    p.write("src/shapes.anv", &shapes.replace("pub fn", "fn"));
+    let approved = p.json(&["api", "approve", "src/shapes.anv"]);
+    assert_eq!(approved["changes"][0]["kind"], "removed", "{approved}");
+    assert!(!p.0.join("golden/src/shapes.anv.api").exists());
+    assert_eq!(p.anvil(&["api", "approve", "src/shapes.anv"]).status.code(), Some(2));
 }
 
 #[test]
@@ -1264,6 +1323,7 @@ fn modules_import_by_name_and_share_coverage() {
 
     // Coverage counts every project file's runs: shout runs under main's golden, whisper nowhere.
     assert!(p.anvil(&["golden", "approve", "src/main.anv"]).status.success());
+    assert!(p.anvil(&["api", "approve", "src/text/words.anv"]).status.success());
     let v = p.json(&["verify"]);
     let open: Vec<(&str, &str)> = v["open"]
         .as_array()

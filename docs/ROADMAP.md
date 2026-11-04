@@ -170,3 +170,10 @@ green and the interpreter and native backend agreeing on every program in `tests
   backends, coverage, mutation testing), with errors reported in the comment
 - [x] The `undocumented` lint for pub items; the standard library and the corpus modules are
   documented, the standard library's functions with examples
+
+## M25: API goldens (v0.26)
+- [x] `anvil api [FILE]`: each file's public API, one sorted line per pub item, docs left out,
+  against the approved `golden/FILE.api`; added, removed and changed items
+- [x] `anvil api approve FILE` (removes the approved API when no pub items are left); CLI and MCP
+- [x] verify reports every difference and unapproved APIs, naming the project files a removal or
+  change breaks; the standard library's and the corpus modules' APIs are approved

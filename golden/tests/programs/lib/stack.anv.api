@@ -1,0 +1,3 @@
+fn push[T](s: Stack[T], x: T) -> Stack[T]
+fn top[T](s: Stack[T]) -> Option[T]
+struct Stack[T] { items: [T] }

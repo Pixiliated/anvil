@@ -1,0 +1,3 @@
+fn speed(d: f64[m], t: f64[s]) -> f64[m/s]
+unit m
+unit s

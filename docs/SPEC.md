@@ -1,4 +1,4 @@
-# Anvil language specification (v0.25)
+# Anvil language specification (v0.26)
 
 Anvil is a small, compiled, general-purpose language designed to be written mostly by AI agents
 and read by humans. Its rules aim at three things: one obvious way to write each thing, code
@@ -842,6 +842,8 @@ find `anvil.toml` in the current directory or above:
 anvil list                                  files: functions, tests, main, golden
 anvil golden check [FILE] [--native]        compare output with approved goldens
 anvil golden approve FILE                   approve a program's current output
+anvil api [FILE]                            public APIs against their approved ones
+anvil api approve FILE                      approve a file's current public API
 anvil verify [--native]                     check, test and golden-check every file;
                                             store the findings in the record
 anvil review [--native]                     verify, then write out/review.md for sign-off
@@ -867,6 +869,17 @@ was resolved; a problem that comes back opens a new entry, so regressions keep t
 When a program no longer matches its golden, `golden check` writes what it printed to
 `out/golden/<file>.out` and a line diff to `out/golden/<file>.diff` (`.native.out` and
 `.native.diff` for the executable).
+
+A file's **public API** is approved the same way, in `golden/<file>.api`: one line per `pub`
+item, sorted, with what other files must write to use it (a function's signature with its
+parameter names, since calls name their arguments, and its contract; a struct's fields; an
+enum's variants; an interface's methods; a unit). Docs are not part of it. `anvil api` prints
+each file's API and how it differs from the approved one: an item **added**, **removed** or
+**changed**; removed and changed items break the files that use them. `verify` reports every
+difference, naming the project files whose programs include the file when the change breaks
+them (they need not compile any more), and a file with pub items but no approved API. `anvil
+api approve FILE` stores the current API after its changes have been read, and removes the
+approved file when no pub items are left.
 
 **Lints** are checks `verify` makes beyond type errors. Each counts what the project's tests
 and golden-checked `main`s run, in the interpreter, across every project file (a module is

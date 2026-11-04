@@ -80,7 +80,7 @@ pub fn list(root: &Path) -> Report {
 }
 
 /// The project-relative names of `file` (when given) or of every project file.
-fn select(project: &Project, cwd: &Path, file: Option<&str>) -> Result<Vec<String>, String> {
+pub(crate) fn select(project: &Project, cwd: &Path, file: Option<&str>) -> Result<Vec<String>, String> {
     match file {
         None => Ok(project.files.clone()),
         Some(f) => {
@@ -189,6 +189,8 @@ struct Coverage {
     branches: Vec<Site>,
     /// The key of every branch that ran, imported ones too.
     reached: HashSet<Key>,
+    /// The files of its program: itself, then each module it imports.
+    modules: Vec<String>,
 }
 
 struct Own {
@@ -237,7 +239,16 @@ fn verify_file(
                 let place = if d.file == 0 { format!("{l}:{c}") } else { format!("{}:{l}:{c}", at.name) };
                 add(d.code, d.message.clone(), place);
             }
-            return (json!({ "file": file, "errors": diags.len() }), None);
+            // Nothing ran, but which files it includes still says whom an API change breaks.
+            let none = Coverage {
+                file: file.to_string(),
+                own: Vec::new(),
+                ran: HashSet::new(),
+                branches: Vec::new(),
+                reached: HashSet::new(),
+                modules: sources.iter().map(|s| s.name.clone()).collect(),
+            };
+            return (json!({ "file": file, "errors": diags.len() }), Some(none));
         }
     };
     let tests = program.tests.clone();
@@ -333,7 +344,7 @@ fn verify_file(
         "file": file, "errors": 0, "tests": tests.len(), "tests_failed": test_failures, "golden": g.status,
         "steps": steps, "untested": [], "unreached": [], "contracts": contracts,
     });
-    (json, Some(Coverage { file: file.to_string(), own, ran, branches: own_branches, reached }))
+    (json, Some(Coverage { file: file.to_string(), own, ran, branches: own_branches, reached, modules: modules.clone() }))
 }
 
 /// The `contract` lint: a function whose requires hold for generated arguments must return, its
@@ -506,6 +517,43 @@ fn unreached(coverage: &[Coverage], files: &mut [Value], seen: &mut Vec<Seen>) {
     }
 }
 
+/// Every project file's public API against its approved one. A change that breaks its users
+/// names the project files whose programs include the file.
+fn api_findings(project: &Project, coverage: &[Coverage], files: &mut [Value], seen: &mut Vec<Seen>) {
+    for f in &project.files {
+        let c = match crate::api::check(project, f) {
+            Ok(c) => c,
+            // A file that does not parse is already a finding of its own.
+            Err(_) => continue,
+        };
+        let mut add = |message: String| seen.push(Seen { file: f.clone(), check: "api".into(), message, at: String::new() });
+        match c.status {
+            "missing" => add(format!(
+                "{f} has pub items but no approved API; check it with `anvil api {f}`, then `anvil api approve {f}`"
+            )),
+            "differs" => {
+                let users: Vec<&str> = coverage
+                    .iter()
+                    .filter(|u| u.file != *f && u.modules.iter().any(|m| m == f))
+                    .map(|u| u.file.as_str())
+                    .collect();
+                for ch in &c.changes {
+                    let effect = match (ch.breaking(), users.is_empty()) {
+                        (false, _) => String::new(),
+                        (true, true) => "; it breaks the files that use it (none in this project)".into(),
+                        (true, false) => format!("; it breaks the files that use it: {}", users.join(", ")),
+                    };
+                    add(format!("the public API {}{effect}; if that is meant, `anvil api approve {f}`", ch.text));
+                }
+            }
+            _ => {}
+        }
+        if let Some(v) = files.iter_mut().find(|v| v["file"] == f.as_str()) {
+            v["api"] = json!(c.status);
+        }
+    }
+}
+
 fn mark_ran(ran: &mut [bool], reached: &mut [bool], counts: &Counts) {
     for (r, f) in ran.iter_mut().zip(&counts.funcs) {
         *r |= f.calls > 0;
@@ -535,6 +583,7 @@ fn run_verify(root: &Path, native: bool, max_steps: Option<u64>) -> Result<Verif
     }
     untested(&coverage, &mut files, &mut seen);
     unreached(&coverage, &mut files, &mut seen);
+    api_findings(&project, &coverage, &mut files, &mut seen);
     let mut record = Record::open(&project.root)?;
     let now = anvil_record::now_utc();
     let sync = record.sync(&seen, &now)?;

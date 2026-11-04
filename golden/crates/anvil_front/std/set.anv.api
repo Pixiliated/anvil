@@ -1,0 +1,10 @@
+fn Set[T: key].add(self, x: T) -> Set[T]
+fn Set[T: key].difference(self, other: Set[T]) -> Set[T]
+fn Set[T: key].has(self, x: T) -> bool
+fn Set[T: key].intersection(self, other: Set[T]) -> Set[T]
+fn Set[T: key].items(self) -> [T]
+fn Set[T: key].len(self) -> i64
+fn Set[T: key].remove(self, x: T) -> Set[T]
+fn Set[T: key].union(self, other: Set[T]) -> Set[T]
+fn set_of[T: key](xs: [T]) -> Set[T]
+struct Set[T: key] { members: Map[T, bool] }

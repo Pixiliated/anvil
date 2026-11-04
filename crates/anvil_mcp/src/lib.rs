@@ -132,6 +132,14 @@ pub struct VerifyArgs {
 
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
+pub struct ApiArgs {
+    /// A project file, relative to the server's root; without it, every project file with a
+    /// public API.
+    pub file: Option<String>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct MutateArgs {
     /// Path of the .anv file, relative to the server's root.
     pub file: String,
@@ -451,6 +459,21 @@ impl AnvilServer {
         Returns the Markdown.")]
     async fn review(&self, Parameters(a): Parameters<VerifyArgs>) -> Result<CallToolResult, ErrorData> {
         self.op(move |root| anvil_ops::review(root, a.native.unwrap_or(false), Some(steps(a.max_steps)))).await
+    }
+
+    #[tool(description = "A file's public API (or every project file's): one line per pub item with its \
+        signature, fields, variants or methods, compared with the approved one (golden/FILE.api). \
+        Each difference is listed as added, removed or changed; removed and changed ones break the \
+        files that use the item. Any difference, or a public API never approved, is a tool error.")]
+    async fn api(&self, Parameters(a): Parameters<ApiArgs>) -> Result<CallToolResult, ErrorData> {
+        self.op(move |root| anvil_ops::api(root, a.file.as_deref())).await
+    }
+
+    #[tool(description = "Store a file's current public API as approved (golden/FILE.api), returning \
+        the differences from the one approved before. Look at them first: removed and changed items \
+        break the files that use them.")]
+    async fn api_approve(&self, Parameters(a): Parameters<FileArgs>) -> Result<CallToolResult, ErrorData> {
+        self.op(move |root| anvil_ops::api_approve(root, &a.file)).await
     }
 
     #[tool(description = "Mutation testing: change one thing at a time in the file's functions (an \
