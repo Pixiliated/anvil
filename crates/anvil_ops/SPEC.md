@@ -1,4 +1,4 @@
-# Anvil language specification (v0.32)
+# Anvil language specification (v0.33)
 
 Anvil is a small, compiled, general-purpose language designed to be written mostly by AI agents
 and read by humans. Its rules aim at three things: one obvious way to write each thing, code
@@ -868,7 +868,8 @@ anvil fuzz    [--seed N] [--count N]   random programs on both backends (see bel
 anvil trace   file.anv [--test NAME] [--only F,G] [--limit N] [--input FILE] [-- ARGS...]
                                        a run as a timeline: calls, returns, prints
 anvil profile file.anv [--test NAME] [--input FILE] [-- ARGS...]
-                                       calls, steps, bytes allocated and copied per function
+                                       calls, steps and bytes per function; where values
+                                       were copied, and why they were shared
 anvil cost file.anv [--only NAMES]     how each pure function's steps and bytes grow, and
                                        the steps and allocs bounds that fit
 anvil outline file.anv                 items and signatures, without reading the whole file
@@ -920,7 +921,11 @@ the calls of the named functions (prints are always kept); `--limit` (default 10
 events left out. A profile gives, per function, its calls, its steps including callees and its
 own steps, the bytes it allocated (by the model of `allocs`) and, of its own, those that copied
 a value still shared when it changed (`copied`, `self_copied` in `--json`): the copies a move
-would avoid (see Moves). Both count steps, never time, so they give the same answer everywhere; a panic or
+would avoid (see Moves). It then lists where those copies were made, costliest first: each
+site's line, function, bytes and times, and the calls that handed the shared values in, with
+each argument read there from a variable or a place and why it was not moved (the statement
+names it again, it is read again later, ...) or that it was (then something else holds the
+value). `--json` has them all under `copies`. Both count steps, never time, so they give the same answer everywhere; a panic or
 the step limit ends the run and is reported, not treated as a failure of the command.
 
 ### Projects

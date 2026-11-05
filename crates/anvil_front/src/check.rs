@@ -484,6 +484,7 @@ pub fn analyze_modules<'a>(modules: &[Module<'a>], order: &[usize]) -> Analysis 
         generic_fns,
         c_files: c.c_files.clone(),
         branches: c.branches.clone(),
+        handed: Default::default(),
     };
     if c.diags.is_empty() {
         crate::moves::mark(&mut program);
@@ -2101,7 +2102,7 @@ impl<'a> Checker<'a> {
         }
         let ty = f.ret.clone();
         let callee = Expr { kind: ExprKind::Local(l), ty: Ty::Fn(Box::new(f)) };
-        Expr { kind: ExprKind::CallValue(Box::new(callee), vals), ty }
+        Expr { kind: ExprKind::CallValue(Box::new(callee), vals, self.site(e.span)), ty }
     }
 
     /// Whether a value of `t` holds a function somewhere (functions cannot be compared or
@@ -2211,7 +2212,7 @@ impl<'a> Checker<'a> {
                     self.note_alloc(b, target.span, "assigning to an array element");
                 }
                 let v = self.value(b, value, &ty);
-                Stmt::Assign(local, path, v)
+                Stmt::Assign(local, path, v, self.site(s.span))
             }
             StmtKind::Expr(e) => {
                 let (AK::Call { .. } | AK::Method { .. }) = &e.kind else {
@@ -3726,7 +3727,7 @@ impl<'a> Checker<'a> {
         if !ok {
             return Self::err_expr();
         }
-        Expr { kind: ExprKind::Call(fid, vals), ty: ret }
+        Expr { kind: ExprKind::Call(fid, vals, self.site(e.span)), ty: ret }
     }
 
     /// Argument count and naming rules shared by functions and enum variants. None when the
@@ -4585,14 +4586,14 @@ impl<'a> Checker<'a> {
             ("push", Ty::Array(elem)) => {
                 self.note_alloc(b, e.span, "`push`");
                 let v = self.expect(b, &args[0].value, &elem);
-                Expr { kind: ExprKind::Push { local, path, value: Box::new(v) }, ty: Ty::Void }
+                Expr { kind: ExprKind::Push { local, path, value: Box::new(v), at: self.site(e.span) }, ty: Ty::Void }
             }
             ("pop", Ty::Array(elem)) => {
                 // pop reads the array; push and assignment only write it.
                 b.meta[local].used = true;
                 self.note_alloc(b, e.span, "`pop`");
                 let message = pop_message(&self.site(e.span));
-                Expr { kind: ExprKind::Pop { local, path, message }, ty: *elem }
+                Expr { kind: ExprKind::Pop { local, path, message, at: self.site(e.span) }, ty: *elem }
             }
             ("set", Ty::Map(k, v)) => {
                 self.note_alloc(b, e.span, "`set`");
@@ -4606,7 +4607,7 @@ impl<'a> Checker<'a> {
                 let key = self.expect(b, &args[0].value, &params[0].1);
                 let value = self.expect(b, &args[1].value, &params[1].1);
                 Expr {
-                    kind: ExprKind::MapSet { local, path, key: Box::new(key), value: Box::new(value) },
+                    kind: ExprKind::MapSet { local, path, key: Box::new(key), value: Box::new(value), at: self.site(e.span) },
                     ty: Ty::Void,
                 }
             }
@@ -4616,7 +4617,8 @@ impl<'a> Checker<'a> {
                 self.note_alloc(b, e.span, "`remove`");
                 let key = self.expect(b, &args[0].value, &k);
                 let missing = missing_key_message(&self.site(e.span));
-                Expr { kind: ExprKind::MapRemove { local, path, key: Box::new(key), missing }, ty: Ty::Void }
+                let at = self.site(e.span);
+                Expr { kind: ExprKind::MapRemove { local, path, key: Box::new(key), missing, at }, ty: Ty::Void }
             }
             (_, Ty::Error) => {
                 for a in args {

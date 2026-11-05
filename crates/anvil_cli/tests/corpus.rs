@@ -1508,6 +1508,20 @@ test "they work" {
     assert_eq!(prof["copied"], 24, "{prof}");
     let text = String::from_utf8_lossy(&p.anvil(&["profile", "src/hello.anv"]).stdout).to_string();
     assert!(text.contains("24 of those bytes copied values still shared"), "{text}");
+    // ... and where: the push in grow, handed the shared xs by the call in main.
+    let copies = prof["copies"].as_array().unwrap();
+    assert_eq!(copies.len(), 1, "{prof}");
+    let c = &copies[0];
+    assert!(c["at"].as_str().unwrap().ends_with("hello.anv:4:5"), "{prof}");
+    assert_eq!((c["function"].as_str(), c["line"].as_str()), (Some("grow"), Some("ys.push(1);")), "{prof}");
+    assert_eq!((c["bytes"].as_u64(), c["times"].as_u64()), (Some(24), Some(1)), "{prof}");
+    let from = &c["from"][0];
+    assert!(from["at"].as_str().unwrap().ends_with("hello.anv:10:21"), "{prof}");
+    assert_eq!(from["line"], "let ys: [i64] = grow(xs);", "{prof}");
+    // ... and why: xs is not moved into the call, as main reads it again.
+    assert_eq!(from["args"], serde_json::json!([{ "value": "xs", "moved": false, "kept": "it is read again later" }]), "{prof}");
+    assert!(text.contains("`xs` is not moved there: it is read again later"), "{text}");
+    assert!(text.contains("in grow: ys.push(1);") && text.contains(":10:21: let ys: [i64] = grow(xs);"), "{text}");
 
     // The clauses are ordered after requires and ensures, one of each.
     let code = |text: &str| {

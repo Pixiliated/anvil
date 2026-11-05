@@ -238,6 +238,18 @@ pub struct Program {
     pub branches: Vec<Branch>,
     /// The C files extern functions are defined in.
     pub c_files: Vec<CFile>,
+    /// By call site (`file:line:col`): the arguments read there whose copies cost anything,
+    /// and whether each moves; `profile` names them where a copy came from that call.
+    pub handed: std::collections::BTreeMap<String, Vec<Handed>>,
+}
+
+/// An argument read from a variable or a place in one (see `moves`).
+#[derive(Clone, Debug, PartialEq)]
+pub struct Handed {
+    /// The value as written: a variable, or a place in one (`bag.items`, `rows[i]`).
+    pub what: String,
+    /// Why the read does not move the value; None when it moves.
+    pub kept: Option<&'static str>,
 }
 
 /// A block of a function that runs only sometimes: an `if` or `else` block, a match arm or a
@@ -306,8 +318,9 @@ pub struct Arm {
 #[derive(Clone, Debug)]
 pub enum Stmt {
     Let(LocalId, Expr),
-    /// Assign to a local or a place inside it.
-    Assign(LocalId, Vec<Step>, Expr),
+    /// Assign to a local or a place inside it; the site is the statement's (`file:line:col`),
+    /// named by `profile` for a copy the assignment makes.
+    Assign(LocalId, Vec<Step>, Expr, String),
     Expr(Expr),
     If(Expr, Vec<Stmt>, Vec<Stmt>),
     While(Expr, Vec<Stmt>),
@@ -517,7 +530,9 @@ pub enum ExprKind {
         path: Vec<Step>,
     },
     Field(Box<Expr>, usize),
-    Call(FuncId, Vec<Expr>),
+    /// A call with its arguments in parameter order, and its site (`file:line:col`), named by
+    /// `profile` as where a copy in the callee came from.
+    Call(FuncId, Vec<Expr>, String),
     /// A declared function as a value.
     FnRef(FuncId),
     /// A function literal as a value: `func` with the captured values, in the order of its
@@ -526,8 +541,9 @@ pub enum ExprKind {
         func: FuncId,
         captures: Vec<Expr>,
     },
-    /// Calls a function value with arguments in parameter order (the value is evaluated first).
-    CallValue(Box<Expr>, Vec<Expr>),
+    /// Calls a function value with arguments in parameter order (the value is evaluated first);
+    /// the site as for `Call`.
+    CallValue(Box<Expr>, Vec<Expr>, String),
     StructLit(StructId, Vec<Expr>),
     ArrayLit(Vec<Expr>),
     /// Construct `variant` of an enum; `fields` are that variant's fields in order.
@@ -553,12 +569,14 @@ pub enum ExprKind {
         entries: Vec<(Expr, Expr)>,
         duplicate: String,
     },
-    /// `m.set(key: k, value: v)` on the map at a place: replaces or inserts.
+    /// `m.set(key: k, value: v)` on the map at a place: replaces or inserts. `at` is its site,
+    /// named by `profile` for a copy it makes (as for push, pop and remove).
     MapSet {
         local: LocalId,
         path: Vec<Step>,
         key: Box<Expr>,
         value: Box<Expr>,
+        at: String,
     },
     /// `m.remove(k)` on the map at a place; panics with `missing` if the key is absent.
     MapRemove {
@@ -566,6 +584,7 @@ pub enum ExprKind {
         path: Vec<Step>,
         key: Box<Expr>,
         missing: String,
+        at: String,
     },
     /// Concatenation of the text of each part (str, i64, f64 with its unit, bool).
     Interp(Vec<Expr>),
@@ -575,12 +594,14 @@ pub enum ExprKind {
         local: LocalId,
         path: Vec<Step>,
         value: Box<Expr>,
+        at: String,
     },
     /// `xs.pop()`: removes and returns the last element; panics with `message` when empty.
     Pop {
         local: LocalId,
         path: Vec<Step>,
         message: String,
+        at: String,
     },
     /// `e?` on Option/Result: the success payload, or return the failure from the function.
     /// The value is first stored in the hidden local `held`; `ret_enum` is the function's return type.
@@ -691,7 +712,7 @@ macro_rules! children_fn {
                         out.push(v);
                     }
                 }
-                ExprKind::CallValue(callee, es) => {
+                ExprKind::CallValue(callee, es, _) => {
                     out.push(& $($m)? **callee);
                     for x in es {
                         out.push(x);
@@ -715,7 +736,7 @@ macro_rules! children_fn {
                 | ExprKind::INeg { e: x, .. }
                 | ExprKind::Try { inner: x, .. } => out.push(& $($m)? **x),
                 ExprKind::Closure { captures: es, .. }
-                | ExprKind::Call(_, es)
+                | ExprKind::Call(_, es, _)
                 | ExprKind::StructLit(_, es)
                 | ExprKind::ArrayLit(es)
                 | ExprKind::Interp(es)

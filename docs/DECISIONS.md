@@ -566,3 +566,15 @@ Short records of choices that are not obvious from the code. Newest last.
   unique), so it costs nothing the write would not, and an element is only taken when the
   statement writes it back; past the written place only fields are followed, since an index
   there could copy a shared array the write then throws away.
+
+## M32 (v0.33)
+
+- **A number is not a fix**: knowing a function copied 900 MB still left an agent reading code
+  to find which line and which caller. `profile` now says the line that copied, the call that
+  handed the value in, and why that argument was not moved, so the fix is the next edit.
+- **The copy is in the callee, the cause in the caller**: a push copies because the caller
+  still holds the array, so copies are grouped by the call the function was running for, and
+  the reasons come from the caller's statement.
+- **Reasons come from the same pass**: the move pass records why it kept each argument while it
+  decides, so the explanation can never disagree with what the backends do. When every
+  argument moved, it says the sharing is elsewhere rather than guess where.

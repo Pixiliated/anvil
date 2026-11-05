@@ -334,7 +334,7 @@ impl<'a> Checker<'a> {
         if !ok || vals.iter().any(|v| v.ty == Ty::Error) {
             return Self::err_expr();
         }
-        Expr { kind: ExprKind::Call(fid, vals), ty: ret }
+        Expr { kind: ExprKind::Call(fid, vals, self.site(e.span)), ty: ret }
     }
 
     /// `x.m(args)` on a value of type parameter `n` in a generic body: a method of one of its
@@ -408,7 +408,7 @@ impl<'a> Checker<'a> {
         if !ok || vals.iter().any(|v| v.ty == Ty::Error) {
             return Self::err_expr();
         }
-        Expr { kind: ExprKind::Call(0, vals), ty: ret }
+        Expr { kind: ExprKind::Call(0, vals, String::new()), ty: ret }
     }
 
     // ---- interfaces as constraints ----

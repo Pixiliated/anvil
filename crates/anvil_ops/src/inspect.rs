@@ -222,12 +222,40 @@ fn event(p: &Program, e: &Event) -> (Value, usize, String) {
     }
 }
 
+/// Copies made at one site: (site, function, bytes, times, by the call they came from).
+type Copied = (String, String, u64, u64, Vec<From>);
+
+/// The copies that came from one call: (site, bytes, times, its arguments and why each is not
+/// moved, None when it is).
+type From = (String, u64, u64, Vec<(String, Option<&'static str>)>);
+
+/// The copy sites shown in the text, and the calls shown for each.
+const COPY_SITES: usize = 10;
+const COPY_CALLS: usize = 3;
+
+/// The source line a site (`file:line:col`) is on, trimmed; empty when it cannot be read.
+fn site_line(files: &crate::Files, site: &str) -> String {
+    let mut parts = site.rsplitn(3, ':');
+    let (Some(_), Some(line), Some(file)) = (parts.next(), parts.next(), parts.next()) else { return String::new() };
+    let (Ok(line), Ok(text)) = (line.parse::<usize>(), files.read(file)) else { return String::new() };
+    let text = text.lines().nth(line.wrapping_sub(1)).unwrap_or("").trim();
+    match text.char_indices().nth(80) {
+        Some((cut, _)) => format!("{}...", &text[..cut]),
+        None => text.to_string(),
+    }
+}
+
 pub fn profile(root: &Path, file: &str, test: Option<&str>, max_steps: Option<u64>, input: &ProgramInput) -> Report {
     let (_, program) = try_report!(compile(root, file));
     let which = try_report!(target(&program, file, test));
     let given = try_report!(given(root, which, input));
     let run = run_name(&program, which);
-    let observed = observe(program, which, max_steps, root, given, Recorder::new, |p, rec, ended| {
+    let make = |p: &Program| {
+        let mut r = Recorder::new(p);
+        r.sites = true;
+        r
+    };
+    let observed = observe(program, which, max_steps, root, given, make, |p, rec, ended| {
         let mut ran: Vec<(String, u64, u64, u64, u64, u64, u64)> = Vec::new();
         let mut not_run = Vec::new();
         for (f, s) in p.funcs.iter().zip(&rec.funcs) {
@@ -239,9 +267,28 @@ pub fn profile(root: &Path, file: &str, test: Option<&str>, max_steps: Option<u6
         }
         // Most expensive first; the name breaks ties so the order never depends on anything else.
         ran.sort_by(|a, b| b.3.cmp(&a.3).then(a.0.cmp(&b.0)));
-        (ran, not_run, rec.steps, rec.bytes, rec.copied, ended)
+        let mut copies: Vec<Copied> = rec
+            .copies
+            .iter()
+            .map(|(at, c)| {
+                let func = c.func.map_or("a test".to_string(), |f| p.funcs[f].name.clone());
+                let mut from: Vec<From> = c
+                    .from
+                    .iter()
+                    .map(|(s, (b, t))| {
+                        let args = p.handed.get(s).map_or(Vec::new(), |ks| ks.iter().map(|k| (k.what.clone(), k.kept)).collect());
+                        (s.clone(), *b, *t, args)
+                    })
+                    .collect();
+                from.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
+                (at.clone(), func, c.bytes, c.times, from)
+            })
+            .collect();
+        copies.sort_by(|a, b| b.2.cmp(&a.2).then(a.0.cmp(&b.0)));
+        (ran, not_run, rec.steps, rec.bytes, rec.copied, copies, ended)
     });
-    let (funcs, not_run, steps, bytes, copied, ended) = try_report!(observed.map_err(Report::error));
+    let (funcs, not_run, steps, bytes, copied, copies, ended) = try_report!(observed.map_err(Report::error));
+    let files = crate::Files::disk(root);
     let mut text = format!(
         "{:>10} {:>10} {:>8} {:>11} {:>11} {:>11}  function ({run} in {file})\n",
         "self", "total", "calls", "self bytes", "copied", "bytes"
@@ -253,8 +300,30 @@ pub fn profile(root: &Path, file: &str, test: Option<&str>, max_steps: Option<u6
     if copied > 0 {
         text.push_str(&format!(
             "{copied} of those bytes copied values still shared when they changed; a variable, \
-             field or element read for the last time is moved instead of shared\n"
+             field or element read for the last time is moved instead of shared. Where, costliest \
+             first, and the calls that handed the shared values in:\n"
         ));
+        for (at, func, b, times, from) in copies.iter().take(COPY_SITES) {
+            text.push_str(&format!("{b:>12} bytes {times:>8}x  {at} in {func}: {}\n", site_line(&files, at)));
+            // Copies in main's or a test's own body came from no call: nothing to add.
+            let calls: Vec<&From> = from.iter().filter(|(site, ..)| !site.is_empty()).collect();
+            for (site, b, times, args) in calls.iter().take(COPY_CALLS) {
+                text.push_str(&format!("{b:>12} bytes {times:>8}x    from {site}: {}\n", site_line(&files, site)));
+                for (what, kept) in args {
+                    let note = match kept {
+                        Some(why) => format!("`{what}` is not moved there: {why}"),
+                        None => format!("`{what}` is moved there (what shares it is elsewhere: another value, or the callee)"),
+                    };
+                    text.push_str(&format!("{:>34}{note}\n", ""));
+                }
+            }
+            if calls.len() > COPY_CALLS {
+                text.push_str(&format!("{:>32}... {} more call site(s)\n", "", calls.len() - COPY_CALLS));
+            }
+        }
+        if copies.len() > COPY_SITES {
+            text.push_str(&format!("... {} more copy site(s) in --json\n", copies.len() - COPY_SITES));
+        }
     }
     if !not_run.is_empty() {
         text.push_str(&format!("not run: {}\n", not_run.join(", ")));
@@ -268,9 +337,23 @@ pub fn profile(root: &Path, file: &str, test: Option<&str>, max_steps: Option<u6
             })
         })
         .collect();
+    let copies: Vec<Value> = copies
+        .iter()
+        .map(|(at, func, b, times, from)| {
+            let from: Vec<Value> = from
+                .iter()
+                .map(|(site, b, times, args)| {
+                    let args: Vec<Value> =
+                        args.iter().map(|(what, kept)| json!({ "value": what, "moved": kept.is_none(), "kept": kept })).collect();
+                    json!({ "at": site, "line": site_line(&files, site), "bytes": b, "times": times, "args": args })
+                })
+                .collect();
+            json!({ "at": at, "line": site_line(&files, at), "function": func, "bytes": b, "times": times, "from": from })
+        })
+        .collect();
     let json = json!({
         "ok": true, "file": file, "run": run, "steps": steps, "bytes": bytes, "copied": copied, "functions": functions,
-        "not_run": not_run,
+        "copies": copies, "not_run": not_run,
         "end": ended.to_json(),
     });
     Report::ok(json, text)

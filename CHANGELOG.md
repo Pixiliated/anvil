@@ -3,6 +3,11 @@
 Each version is one roadmap milestone (docs/ROADMAP.md); docs/DECISIONS.md says why things are
 the way they are.
 
+## 0.33.0
+- `profile` says where values were copied because they were still shared: each site's line,
+  function, bytes and times, the calls that handed the values in, and for each argument there
+  whether it moved and, if not, why (`copies` in `--json`).
+
 ## 0.32.0
 - The last read of a field or an element moves too: `s.items = add(s.items, x)`,
   `rows[i] = add(rows[i], x)` and `s = State { items: add(s.items, x), n: s.n + 1 }` change the

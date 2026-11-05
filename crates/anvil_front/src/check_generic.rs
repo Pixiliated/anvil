@@ -699,10 +699,10 @@ impl<'a> Checker<'a> {
         }
         if self.abstract_body || targs.iter().any(|t| self.mentions_any_param(t)) {
             // Checked against constraints only; this IR is never run.
-            return Expr { kind: ExprKind::Call(0, vals), ty: ret };
+            return Expr { kind: ExprKind::Call(0, vals, String::new()), ty: ret };
         }
         let id = self.instantiate_fn(g, targs, e.span);
-        Expr { kind: ExprKind::Call(id, vals), ty: ret }
+        Expr { kind: ExprKind::Call(id, vals, self.site(e.span)), ty: ret }
     }
 
     fn mentions_any_param(&self, t: &Ty) -> bool {

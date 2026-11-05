@@ -13,6 +13,7 @@
 //! clauses read are never moved. Both backends follow the marks, so the rule is only here.
 
 use crate::ir::*;
+use std::cell::RefCell;
 use std::collections::BTreeSet;
 
 type Live = BTreeSet<LocalId>;
@@ -23,15 +24,68 @@ struct Loop {
     cont: Live,
 }
 
-/// Marks the moves in every function of `program`. Tests are left as written.
+/// Why a read is not a move, for the reads of call arguments `Program::handed` lists.
+const ENSURED: &str = "an `ensures` clause reads it";
+const NAMED_AGAIN: &str = "the statement names it again";
+const WRITTEN_INTO: &str = "the statement writes into it";
+const MAY_BE_WRITTEN: &str = "the statement writes a place that may be the same";
+const READ_LATER: &str = "it is read again later";
+const ELEMENT: &str = "an element is moved only when the statement writes it back";
+
+/// Marks the moves in every function of `program`, and lists the arguments of calls and whether
+/// each moves (`Program::handed`). Tests are left as written.
 pub fn mark(program: &mut Program) {
-    for f in &mut program.funcs {
+    let Program { funcs, structs, handed, .. } = program;
+    for f in funcs.iter_mut() {
         let mut pinned = Live::new();
         for c in &f.ensures {
             refs(&c.expr, &mut pinned);
         }
-        Walk { pinned }.block(&mut f.body, &Live::new(), None, true);
+        let walk = Walk { pinned, handed: RefCell::new(Vec::new()) };
+        walk.block(&mut f.body, &Live::new(), None, true);
+        for (site, local, path, kept) in walk.handed.into_inner() {
+            let what = describe(&f.locals, structs, local, &path);
+            let list = handed.entry(site).or_default();
+            let k = Handed { what, kept };
+            // A generic's instances share its sites.
+            if !list.contains(&k) {
+                list.push(k);
+            }
+        }
     }
+}
+
+/// A place as written: `bag.items`, `rows[i]` (`rows[...]` for an index that is not a variable
+/// or a literal).
+fn describe(locals: &[Local], structs: &[StructDef], local: LocalId, path: &[Seg]) -> String {
+    let mut out = locals[local].name.clone();
+    let mut ty = locals[local].ty.clone();
+    for seg in path {
+        match (seg, ty.clone()) {
+            (Seg::Field(i), Ty::Struct(sid)) => {
+                let (name, t) = &structs[sid].fields[*i];
+                out.push('.');
+                out.push_str(name);
+                ty = t.clone();
+            }
+            (Seg::Index(i), Ty::Array(elem)) => {
+                match i {
+                    Some(Simple::Local(l)) => out.push_str(&format!("[{}]", locals[*l].name)),
+                    Some(Simple::Int(v)) => out.push_str(&format!("[{v}]")),
+                    None => out.push_str("[...]"),
+                }
+                ty = *elem;
+            }
+            (_, t) => unreachable!("step into {t:?}"),
+        }
+    }
+    out
+}
+
+/// Whether copying `ty` on a write can cost anything (text, bytes, arrays, maps, or a value
+/// holding them): the arguments worth naming when they are not moved.
+fn costly(ty: &Ty) -> bool {
+    matches!(ty, Ty::Str | Ty::Bytes | Ty::Array(_) | Ty::Map(..) | Ty::Struct(_) | Ty::Enum(_))
 }
 
 /// Every local `e` names, anywhere in it.
@@ -59,11 +113,13 @@ enum Simple {
 }
 
 /// A local a statement names, and the place inside it; `read` when the statement only reads
-/// it there (so the read could move), not changing it in place or holding it.
+/// it there (so the read could move), not changing it in place or holding it. `call` is the
+/// site of the call it is an argument of, when it is one whose copies cost anything.
 struct Occ {
     local: LocalId,
     path: Vec<Seg>,
     read: bool,
+    call: Option<String>,
 }
 
 /// What a read becomes.
@@ -138,11 +194,12 @@ fn place_indices_mut(e: &mut Expr) -> Vec<&mut Expr> {
 
 /// The locals `e` names and the places in them, in evaluation-independent walk order (the
 /// order `apply` visits them in).
-fn occs(e: &Expr, out: &mut Vec<Occ>) {
+fn occs(e: &Expr, out: &mut Vec<Occ>, call: Option<&str>) {
     if let Some((local, path)) = place(e) {
-        out.push(Occ { local, path, read: true });
+        let call = call.filter(|_| costly(&e.ty)).map(str::to_string);
+        out.push(Occ { local, path, read: true, call });
         for i in place_indices(e) {
-            occs(i, out);
+            occs(i, out, None);
         }
         return;
     }
@@ -154,10 +211,14 @@ fn occs(e: &Expr, out: &mut Vec<Occ>) {
             | ExprKind::MapRemove { path, .. } => segs(path),
             _ => Vec::new(),
         };
-        out.push(Occ { local, path, read: false });
+        out.push(Occ { local, path, read: false, call: None });
     }
+    let site = match &e.kind {
+        ExprKind::Call(_, _, site) | ExprKind::CallValue(_, _, site) => Some(site.as_str()),
+        _ => None,
+    };
     for c in children(e) {
-        occs(c, out);
+        occs(c, out, site);
     }
 }
 
@@ -251,6 +312,8 @@ fn union(a: &Live, b: &Live) -> Live {
 
 struct Walk {
     pinned: Live,
+    /// Arguments: (call site, local, place, why it is not moved).
+    handed: RefCell<Vec<(String, LocalId, Vec<Seg>, Option<&'static str>)>>,
 }
 
 impl Walk {
@@ -269,9 +332,16 @@ impl Walk {
     fn leaf(&self, exprs: Vec<&mut Expr>, target: Option<(LocalId, Vec<Seg>)>, written: Option<LocalId>, after: &Live) {
         let mut all = Vec::new();
         for e in &exprs {
-            occs(e, &mut all);
+            occs(e, &mut all, None);
         }
-        let acts: Vec<Act> = (0..all.len()).map(|k| self.act(&all, k, target.as_ref(), written, after)).collect();
+        let (acts, whys): (Vec<Act>, Vec<&'static str>) =
+            (0..all.len()).map(|k| self.act(&all, k, target.as_ref(), written, after)).unzip();
+        for (o, (act, why)) in all.iter().zip(acts.iter().zip(&whys)) {
+            if let (Some(site), true) = (&o.call, o.read) {
+                let kept = (*act == Act::Keep).then_some(*why);
+                self.handed.borrow_mut().push((site.clone(), o.local, o.path.clone(), kept));
+            }
+        }
         if acts.iter().any(|a| *a != Act::Keep) {
             let mut k = 0;
             for e in exprs {
@@ -280,7 +350,7 @@ impl Walk {
         }
     }
 
-    /// What read `all[k]` of a statement becomes.
+    /// What read `all[k]` of a statement becomes, and why when it is kept.
     fn act(
         &self,
         all: &[Occ],
@@ -288,10 +358,13 @@ impl Walk {
         target: Option<&(LocalId, Vec<Seg>)>,
         written: Option<LocalId>,
         after: &Live,
-    ) -> Act {
+    ) -> (Act, &'static str) {
         let o = &all[k];
-        if !o.read || self.pinned.contains(&o.local) {
-            return Act::Keep;
+        if !o.read {
+            return (Act::Keep, "");
+        }
+        if self.pinned.contains(&o.local) {
+            return (Act::Keep, ENSURED);
         }
         let l = o.local;
         let dead = !after.contains(&l) || written == Some(l);
@@ -299,23 +372,32 @@ impl Walk {
             all.iter().enumerate().filter(|(j, x)| *j != k && x.local == l).map(|(_, x)| &x.path[..]).collect();
         let target = target.filter(|(t, _)| *t == l).map(|(_, p)| &p[..]);
         let alone = others.is_empty() && target.is_none();
-        if !o.path.is_empty() && others.iter().all(|p| !overlap(p, &o.path)) {
+        let apart = others.iter().all(|p| !overlap(p, &o.path));
+        if !o.path.is_empty() && apart {
             // Written again by the statement: taken along the steps the write takes anyway, and
             // fields from there (an index past them would copy a shared array for nothing).
             if let Some(t) = target {
                 if covers(t, &o.path) && by_fields(&o.path[t.len()..]) {
-                    return Act::Take;
+                    return (Act::Take, "");
                 }
             }
             if dead && by_fields(&o.path) && target.is_none_or(|t| !overlap(t, &o.path)) {
-                return Act::Take;
+                return (Act::Take, "");
             }
         }
         if alone && dead {
-            Act::Move
-        } else {
-            Act::Keep
+            return (Act::Move, "");
         }
+        let why = if !apart {
+            NAMED_AGAIN
+        } else if target.is_some_and(|t| overlap(t, &o.path)) {
+            if o.path.is_empty() { WRITTEN_INTO } else { MAY_BE_WRITTEN }
+        } else if !dead {
+            READ_LATER
+        } else {
+            ELEMENT
+        };
+        (Act::Keep, why)
     }
 
     fn stmt(&self, s: &mut Stmt, after: &Live, lp: Option<&Loop>, mark: bool) -> Live {
@@ -329,7 +411,7 @@ impl Walk {
                 }
                 live
             }
-            Stmt::Assign(l, path, e) => {
+            Stmt::Assign(l, path, e, _) => {
                 let mut live = after.clone();
                 // Appending in place reads the local itself (see `append_parts`): left as is.
                 let append = path.is_empty() && append_parts(*l, e).is_some();
@@ -466,7 +548,7 @@ mod tests {
         fn block(stmts: &[Stmt], f: &Func, out: &mut Vec<String>) {
             for s in stmts {
                 match s {
-                    Stmt::Let(_, e) | Stmt::Assign(_, _, e) | Stmt::Expr(e) | Stmt::Return(Some(e)) => expr(e, f, out),
+                    Stmt::Let(_, e) | Stmt::Assign(_, _, e, _) | Stmt::Expr(e) | Stmt::Return(Some(e)) => expr(e, f, out),
                     Stmt::If(_, a, b) => {
                         block(a, f, out);
                         block(b, f, out);
@@ -560,6 +642,35 @@ mod tests {
         assert_eq!(moved(&src, "other"), ["rows", "j", "r"]);
         assert_eq!(moved(&src, "whole"), ["b", "c.1"]);
         assert_eq!(moved(&src, "first"), ["rows"]);
+    }
+
+    #[test]
+    fn arguments_not_moved_say_why() {
+        let src = format!(
+            "{ADD}\n{BAG}\nfn keeps(b: Bag, rows: [[i64]], i: i64, j: i64) -> i64 {{\n    let a: [i64] = add(xs: b.items, x: b.items.len());\n\
+             \x20   var r: [[i64]] = rows;\n    r[i] = add(xs: r[j], x: 0);\n    let c: [i64] = add(xs: r[0], x: 1);\n\
+             \x20   return a.len() + c.len() + r.len() + b.n;\n}}\n"
+        );
+        let p = crate::compile(&SourceFile::new("t.anv", src)).unwrap_or_else(|d| panic!("{d:?}"));
+        let handed: Vec<(String, String, Option<&str>)> = p
+            .handed
+            .iter()
+            .filter(|(site, _)| site.starts_with("t.anv:1"))
+            .flat_map(|(site, ks)| ks.iter().map(move |k| (site.clone(), k.what.clone(), k.kept)))
+            .collect();
+        assert_eq!(
+            handed,
+            [
+                ("t.anv:13:20".to_string(), "b.items".to_string(), Some(super::NAMED_AGAIN)),
+                ("t.anv:15:12".to_string(), "r[j]".to_string(), Some(super::MAY_BE_WRITTEN)),
+                ("t.anv:16:20".to_string(), "r[0]".to_string(), Some(super::READ_LATER)),
+            ]
+        );
+        // In add, `xs` is handed to nothing; in keeps, a moved argument is listed as moved.
+        let src = format!("{ADD}\nfn twice(xs: [i64]) -> [i64] {{\n    return add(xs: add(xs: xs, x: 1), x: 2);\n}}\n");
+        let p = crate::compile(&SourceFile::new("t.anv", src)).unwrap_or_else(|d| panic!("{d:?}"));
+        let all: Vec<(&str, Option<&str>)> = p.handed.values().flatten().map(|k| (k.what.as_str(), k.kept)).collect();
+        assert_eq!(all, [("xs", None)]);
     }
 
     #[test]

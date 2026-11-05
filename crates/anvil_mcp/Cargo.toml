@@ -16,7 +16,7 @@ name = "anvil-mcp"
 path = "src/main.rs"
 
 [dependencies]
-anvil_ops = { package = "anvil-lang-ops", version = "0.32.0", path = "../anvil_ops" }
+anvil_ops = { package = "anvil-lang-ops", version = "0.33.0", path = "../anvil_ops" }
 rmcp = { version = "3.6.0", features = ["server", "transport-io"] }
 schemars = "1"
 serde = { version = "1.0.229", features = ["derive"] }

@@ -642,7 +642,7 @@ fn mutates(e: &Expr) -> bool {
         | ExprKind::FnRef(_) => false,
         // A move empties a local, and a take a place, that nothing else in its statement names.
         ExprKind::Move(_) | ExprKind::Take { .. } => false,
-        ExprKind::CallValue(callee, es) => mutates(callee) || any(es),
+        ExprKind::CallValue(callee, es, _) => mutates(callee) || any(es),
         ExprKind::Bits { l, r, .. } => mutates(l) || mutates(r),
         ExprKind::BitNot(x) => mutates(x),
         ExprKind::Closure { captures: es, .. } => any(es),
@@ -655,7 +655,7 @@ fn mutates(e: &Expr) -> bool {
         | ExprKind::And(l, r)
         | ExprKind::Or(l, r)
         | ExprKind::StrConcat(l, r) => mutates(l) || mutates(r),
-        ExprKind::Call(_, es)
+        ExprKind::Call(_, es, _)
         | ExprKind::StructLit(_, es)
         | ExprKind::ArrayLit(es)
         | ExprKind::Interp(es)
@@ -920,7 +920,7 @@ impl<'a, 'b> Gen<'a, 'b> {
             }
             // `s = s + a + b`: appended in place (see ir::append_parts); each append consumes the
             // local's reference and gives back the text's new one.
-            Stmt::Assign(l, path, e) if path.is_empty() && append_parts(*l, e).is_some() => {
+            Stmt::Assign(l, path, e, _) if path.is_empty() && append_parts(*l, e).is_some() => {
                 let var = self.vars[*l][0];
                 for part in append_parts(*l, e).unwrap() {
                     let v = self.expr(part)[0];
@@ -929,7 +929,7 @@ impl<'a, 'b> Gen<'a, 'b> {
                     self.b.def_var(var, next);
                 }
             }
-            Stmt::Assign(l, path, e) => {
+            Stmt::Assign(l, path, e, _) => {
                 let vals = self.expr(e);
                 let indices = self.indices(path);
                 let loc = self.locate(*l, path, &indices);
@@ -1261,7 +1261,7 @@ impl<'a, 'b> Gen<'a, 'b> {
                 }
                 vals
             }
-            ExprKind::Call(fid, call_args) => {
+            ExprKind::Call(fid, call_args, _) => {
                 let mut vals = Vec::new();
                 for a in call_args {
                     vals.extend(self.expr(a));
@@ -1297,7 +1297,7 @@ impl<'a, 'b> Gen<'a, 'b> {
                 self.store(env, &vals);
                 vec![obj]
             }
-            ExprKind::CallValue(callee, call_args) => {
+            ExprKind::CallValue(callee, call_args, _) => {
                 let (c, owned) = self.borrow(callee);
                 let mut vals = vec![c[0]];
                 for a in call_args {
@@ -1423,7 +1423,7 @@ impl<'a, 'b> Gen<'a, 'b> {
                 }
                 vec![m]
             }
-            ExprKind::MapSet { local, path, key, value } => {
+            ExprKind::MapSet { local, path, key, value, .. } => {
                 let k = self.expr(key)[0];
                 let vals = self.expr(value);
                 let indices = self.indices(path);
@@ -1460,7 +1460,7 @@ impl<'a, 'b> Gen<'a, 'b> {
                 self.b.seal_block(merge);
                 Vec::new()
             }
-            ExprKind::MapRemove { local, path, key, missing } => {
+            ExprKind::MapRemove { local, path, key, missing, .. } => {
                 let k = self.expr(key)[0];
                 let indices = self.indices(path);
                 let loc = self.locate(*local, path, &indices);
@@ -1502,7 +1502,7 @@ impl<'a, 'b> Gen<'a, 'b> {
                 self.call_rt("anvil_release", &[c]);
                 vec![joined]
             }
-            ExprKind::Push { local, path, value } => {
+            ExprKind::Push { local, path, value, .. } => {
                 let vals = self.expr(value);
                 let indices = self.indices(path);
                 let loc = self.locate(*local, path, &indices);
@@ -1511,7 +1511,7 @@ impl<'a, 'b> Gen<'a, 'b> {
                 self.store(slot, &vals);
                 Vec::new()
             }
-            ExprKind::Pop { local, path, message } => {
+            ExprKind::Pop { local, path, message, .. } => {
                 let indices = self.indices(path);
                 let loc = self.locate(*local, path, &indices);
                 let arr = self.unique_at(&loc);

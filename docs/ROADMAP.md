@@ -241,3 +241,14 @@ green and the interpreter and native backend agreeing on every program in `tests
   check; the fuzzer updates fields, rebuilt structs and elements; `cost` finds field and
   element updates linear; 10,000,000 field and element updates natively take 0.5 s, 100,000
   with a copy kept take 69 s
+
+## M32: Copies located (v0.33)
+- [x] Calls, assignments and in-place changes (`push`, `pop`, `set`, `remove`) carry their
+  site; the interpreter counts each copy of a shared value at the site that made it, and by
+  the call the function was running for
+- [x] The move pass lists each call's arguments read from variables and places, and why each
+  is not moved (`Program::handed`): named again, read again later, a place the statement may
+  write, an element not written back, read by `ensures`
+- [x] `profile` lists the copy sites, costliest first, with their lines, and under each the
+  calls that handed the shared values in and what their arguments did, in text and `--json`
+  (`copies`); a corpus test pins the site, the call and the reason
