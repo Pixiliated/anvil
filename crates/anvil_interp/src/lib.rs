@@ -1164,6 +1164,12 @@ impl<'p, 'h> Interp<'p, 'h> {
             ExprKind::Local(l) => frame[*l].clone(),
             // The last read: the value is taken, so it may be the only reference.
             ExprKind::Move(l) => std::mem::replace(&mut frame[*l], Value::Void),
+            // The last read of a place: taken out of it, reached as a write to it would be.
+            ExprKind::Take { local, path } => {
+                let indices = self.indices(path, frame)?;
+                let slot = place_mut(&mut frame[*local], path, &indices, &mut self.allocated, &mut self.copied)?;
+                std::mem::replace(slot, Value::Void)
+            }
             ExprKind::Field(base, i) => match self.eval(base, frame)? {
                 Value::Struct(mut fields) => fields.swap_remove(*i),
                 v => unreachable!("field of {v:?}"),

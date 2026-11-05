@@ -12,10 +12,10 @@ readme = "README.md"
 name = "anvil_ops"
 
 [dependencies]
-anvil_front = { package = "anvil-lang-front", version = "0.31.0", path = "../anvil_front" }
-anvil_interp = { package = "anvil-lang-interp", version = "0.31.0", path = "../anvil_interp" }
-anvil_codegen = { package = "anvil-lang-codegen", version = "0.31.0", path = "../anvil_codegen" }
-anvil_record = { package = "anvil-lang-record", version = "0.31.0", path = "../anvil_record" }
+anvil_front = { package = "anvil-lang-front", version = "0.32.0", path = "../anvil_front" }
+anvil_interp = { package = "anvil-lang-interp", version = "0.32.0", path = "../anvil_interp" }
+anvil_codegen = { package = "anvil-lang-codegen", version = "0.32.0", path = "../anvil_codegen" }
+anvil_record = { package = "anvil-lang-record", version = "0.32.0", path = "../anvil_record" }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.154"
 toml = "1.1.8"

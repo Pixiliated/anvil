@@ -553,3 +553,16 @@ Short records of choices that are not obvious from the code. Newest last.
 - **Say where the copies are**: `profile` counts the bytes copied because a value was shared,
   per function, so an agent finds a quadratic copy by measuring instead of reasoning about
   references.
+
+## M31 (v0.32)
+
+- **State lives in structs**: programs keep their data in fields and arrays of structs, so
+  `xs = f(xs)` being linear was not enough: `s.items = f(s.items)` still copied the field every
+  call. The corpus program went from 920 MB of copies to 72 bytes.
+- **Places, not values, are compared**: a read is taken when no other read in the statement can
+  reach the same storage. Fields tell places apart; indices only when they are the same
+  variable or literal, so the rule never needs to know a value at run time.
+- **Taken the way a write goes**: a take walks the place as the assignment will (arrays made
+  unique), so it costs nothing the write would not, and an element is only taken when the
+  statement writes it back; past the written place only fields are followed, since an index
+  there could copy a shared array the write then throws away.

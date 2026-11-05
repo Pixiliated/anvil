@@ -1,4 +1,4 @@
-# Anvil language specification (v0.31)
+# Anvil language specification (v0.32)
 
 Anvil is a small, compiled, general-purpose language designed to be written mostly by AI agents
 and read by humans. Its rules aim at three things: one obvious way to write each thing, code
@@ -196,6 +196,20 @@ for i in 0..n {
 }
 ```
 
+The last read of a **place** (a field or an element) moves the same way when nothing else in
+the statement reads that place, a place around it or one inside it, and either the statement
+writes the place again or the variable holding it is not read again and the place is reached
+by fields alone:
+
+```
+bag.items = add(xs: bag.items, x: 1);                  // the field is handed over and back
+rows[i] = add(xs: rows[i], x: 1);                      // the element too (the same `i`)
+b = Bag { items: add(xs: b.items, x: 1), n: b.n + 1 }; // each field of the old `b`
+```
+
+Indices are the same element only when they are the same variable or literal: `rows[i]` read
+while `rows[j]` is written is shared, as is `bag.items` read twice in the statement.
+
 Keep a copy of `xs` (or read it after the call) and each call copies it, as value semantics
 require. Moves change no result, only what is copied: `profile` shows the bytes copied per
 function, and the byte model counts what both backends do.
@@ -341,7 +355,7 @@ native runtime copies:
 | a new array (a literal, a slice, `sorted`, `keys`, ...) | 8 per element |
 | a new map | 16 per entry |
 | `push`; `set` of a new key | 8; 16 |
-| writing into an array or map shared with another value (value semantics copy it first; a value read for the last time is not shared, see Moves) | 8 or 16 per element copied |
+| writing into an array or map shared with another value (value semantics copy it first; a variable, field or element read for the last time is not shared, see Moves) | 8 or 16 per element copied |
 | a function literal that captures values | 8 per value |
 | `split`, `chars`, `args`, `list_dir` | the array and each new str in it |
 | `s = s + x` on a str or bytes local that alone holds its text (see Text) | x's length, and all of the text when its room doubles |

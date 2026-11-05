@@ -1,0 +1,161 @@
+// Moves out of places: the last read of a field or an element hands its value on when the
+// statement writes that place again, or when the value holding it is dead. Every line here
+// must match the interpreter, a place read again after it was taken would be empty, and the
+// native run checks that nothing leaks, early returns with a place still empty included.
+struct Bag {
+    name: str,
+    items: [i64],
+    n: i64,
+}
+
+struct Shelf {
+    bags: [Bag],
+}
+
+struct Stock {
+    counts: Map[str, i64],
+}
+
+struct Packet {
+    data: bytes,
+}
+
+// xs with x after it: in place when the caller hands xs over.
+fn add(xs: [i64], x: i64) -> [i64] {
+    var ys: [i64] = xs;
+    ys.push(x);
+    return ys;
+}
+
+// xs with x after it, or nothing when x is negative.
+fn add_some(xs: [i64], x: i64) -> Option[[i64]] {
+    if x < 0 {
+        return None;
+    }
+    return Some(add(xs: xs, x: x));
+}
+
+fn total(xs: [i64]) -> i64 {
+    var sum: i64 = 0;
+    for x in xs {
+        sum = sum + x;
+    }
+    return sum;
+}
+
+fn bump(counts: Map[str, i64], key: str) -> Map[str, i64] {
+    var m: Map[str, i64] = counts;
+    match m.get(key) {
+        Some(value: v) => { m.set(key: key, value: v + 1); }
+        None => { m.set(key: key, value: 1); }
+    }
+    return m;
+}
+
+// Rebuilt from its own fields: each is taken, as b is dead after.
+fn grown(b: Bag, x: i64) -> Bag {
+    return Bag { name: b.name, items: add(xs: b.items, x: x), n: b.n + 1 };
+}
+
+// Returns early with c.items taken: the empty place is released with c.
+fn fill(b: Bag, x: i64) -> Option[Bag] {
+    var c: Bag = b;
+    c.items = add_some(xs: c.items, x: x)?;
+    c.n = c.n + 1;
+    return Some(c);
+}
+
+fn first_byte(p: Packet) -> i64 {
+    return p.data[0];
+}
+
+fn main() uses io {
+    // A field updated in a loop: linear.
+    var bag: Bag = Bag { name: "box", items: [], n: 0 };
+    for a in 0..10000 {
+        bag.items = add(xs: bag.items, x: a);
+    }
+    print("field: {bag.items.len()} {total(bag.items)}");
+
+    // A whole struct rebuilt in a loop, field by field.
+    var b: Bag = Bag { name: "re", items: [], n: 0 };
+    for c in 0..10000 {
+        b = Bag { name: b.name, items: add(xs: b.items, x: c), n: b.n + 1 };
+    }
+    print("rebuilt: {b.items.len()} {b.n} {b.name}");
+
+    // Through a function that rebuilds it.
+    var g: Bag = Bag { name: "fn", items: [1], n: 1 };
+    for d in 0..1000 {
+        g = grown(b: g, x: d);
+    }
+    print("grown: {g.items.len()} {g.n}");
+
+    // An element updated in a loop.
+    var rows: [[i64]] = [[], [], []];
+    for e in 0..9000 {
+        let r: i64 = e % 3;
+        rows[r] = add(xs: rows[r], x: e);
+    }
+    print("rows: {rows[0].len()} {rows[1].len()} {total(rows[2])}");
+
+    // A field of an element.
+    var shelf: Shelf = Shelf { bags: [Bag { name: "a", items: [], n: 0 }, Bag { name: "b", items: [], n: 0 }] };
+    for f in 0..2000 {
+        let k: i64 = f % 2;
+        shelf.bags[k].items = add(xs: shelf.bags[k].items, x: 1);
+    }
+    print("shelf: {shelf.bags[0].items.len()} {shelf.bags[1].items.len()}");
+
+    // A copy kept first keeps its value, for a struct and for an array.
+    var kept_bag: Bag = Bag { name: "k", items: [1, 2], n: 2 };
+    let snapshot: Bag = kept_bag;
+    kept_bag.items = add(xs: kept_bag.items, x: 3);
+    print("kept bag: {snapshot.items.len()} {kept_bag.items.len()}");
+    var grid: [[i64]] = [[1], [2]];
+    let before: [[i64]] = grid;
+    grid[0] = add(xs: grid[0], x: 5);
+    print("kept grid: {before[0].len()} {grid[0].len()} {before == [[1], [2]]}");
+
+    // Another index that is the same element at run time: read, not taken.
+    var same: [[i64]] = [[1], [2]];
+    let i: i64 = 1;
+    let j: i64 = 1;
+    same[i] = add(xs: same[j], x: 7);
+    print("same: {same[1].len()} {same[0].len()}");
+
+    // The place read twice in the statement: not taken.
+    var twice: Bag = Bag { name: "t", items: [4], n: 0 };
+    twice.items = add(xs: twice.items, x: twice.items.len());
+    print("twice: {twice.items.len()} {twice.items[1]}");
+
+    // The place around the one written read in the statement: not taken.
+    var around: Bag = Bag { name: "o", items: [1], n: 0 };
+    around.items = add(xs: around.items, x: around.n + total(grown(b: around, x: 1).items));
+    print("around: {around.items.len()} {around.items[1]}");
+
+    // An early return leaves the place empty, then the value is released.
+    let full: Option[Bag] = fill(b: Bag { name: "f", items: [1], n: 1 }, x: 2);
+    let none: Option[Bag] = fill(b: Bag { name: "f", items: [1], n: 1 }, x: -1);
+    match full {
+        Some(value: v) => { print("fill: {v.items.len()} {v.n}"); }
+        None => { print("fill: none"); }
+    }
+    match none {
+        Some(value: u) => { print("none: {u.items.len()}"); }
+        None => { print("none: none"); }
+    }
+
+    // A map field, and text and bytes fields.
+    var stock: Stock = Stock { counts: [:] };
+    for w in "a b a c a".split(" ") {
+        stock.counts = bump(counts: stock.counts, key: w);
+    }
+    let a_count: Option[i64] = stock.counts.get("a");
+    print("stock: {a_count == Some(3)} {stock.counts.len()}");
+    var named: Bag = Bag { name: "x", items: [], n: 0 };
+    named.name = named.name + "y";
+    print("text: {named.name}");
+    let packet: Packet = Packet { data: bytes_of([7, 8]) };
+    print("bytes: {first_byte(packet)}");
+}

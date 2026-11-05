@@ -508,6 +508,14 @@ pub enum ExprKind {
     /// local left empty, so whoever receives it may hold the only reference and change it in
     /// place. Nothing reads the local again before it is next written.
     Move(LocalId),
+    /// The last read of a place inside a local (`s.items`, `rows[i]`; marked by `moves::mark`):
+    /// the value is taken and the place left empty, until the statement writes the place again
+    /// or for good when the local is dead. Arrays on the way are made unique first, as for a
+    /// write to the place.
+    Take {
+        local: LocalId,
+        path: Vec<Step>,
+    },
     Field(Box<Expr>, usize),
     Call(FuncId, Vec<Expr>),
     /// A declared function as a value.
@@ -618,12 +626,13 @@ pub fn uses_local(e: &Expr, l: LocalId) -> bool {
     named_local(e) == Some(l) || children(e).into_iter().any(|c| uses_local(c, l))
 }
 
-/// The local `e` itself names: read (`Local`, `Move`), changed in place (push, pop, set,
+/// The local `e` itself names: read (`Local`, `Move`, `Take`), changed in place (push, pop, set,
 /// remove) or holding a value (`?`). The locals its children name are theirs.
 pub fn named_local(e: &Expr) -> Option<LocalId> {
     match &e.kind {
         ExprKind::Local(l)
         | ExprKind::Move(l)
+        | ExprKind::Take { local: l, .. }
         | ExprKind::Push { local: l, .. }
         | ExprKind::Pop { local: l, .. }
         | ExprKind::MapSet { local: l, .. }
@@ -655,7 +664,7 @@ macro_rules! children_fn {
                     }
                     out.push(& $($m)? **value);
                 }
-                ExprKind::Pop { path, .. } => {
+                ExprKind::Pop { path, .. } | ExprKind::Take { path, .. } => {
                     for s in path {
                         if let Step::Index { index, .. } = s {
                             out.push(index);

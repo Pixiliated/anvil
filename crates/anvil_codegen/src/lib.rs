@@ -640,8 +640,8 @@ fn mutates(e: &Expr) -> bool {
         | ExprKind::Str(_)
         | ExprKind::Local(_)
         | ExprKind::FnRef(_) => false,
-        // A move empties a local that nothing else in its statement names.
-        ExprKind::Move(_) => false,
+        // A move empties a local, and a take a place, that nothing else in its statement names.
+        ExprKind::Move(_) | ExprKind::Take { .. } => false,
         ExprKind::CallValue(callee, es) => mutates(callee) || any(es),
         ExprKind::Bits { l, r, .. } => mutates(l) || mutates(r),
         ExprKind::BitNot(x) => mutates(x),
@@ -1193,6 +1193,36 @@ impl<'a, 'b> Gen<'a, 'b> {
                 }
                 (vals, true)
             }
+            // The last read of a place: its references are taken and the place left null,
+            // reached as a write to it would be (arrays on the way made unique).
+            ExprKind::Take { local, path } => {
+                let indices = self.indices(path);
+                let lay = self.layout(&e.ty);
+                let vals = match self.locate(*local, path, &indices) {
+                    Loc::Vars(l, start, _) => {
+                        let vals: Vec<Value> = (0..lay.len()).map(|k| self.b.use_var(self.vars[l][start + k])).collect();
+                        for (k, s) in lay.iter().enumerate() {
+                            if s.heap {
+                                let z = self.zero(*s);
+                                self.b.def_var(self.vars[l][start + k], z);
+                            }
+                        }
+                        vals
+                    }
+                    Loc::Mem(addr, _) => {
+                        let vals = self.load(addr, &lay);
+                        let mut left = vals.clone();
+                        for (k, s) in lay.iter().enumerate() {
+                            if s.heap {
+                                left[k] = self.zero(*s);
+                            }
+                        }
+                        self.store(addr, &left);
+                        vals
+                    }
+                };
+                (vals, true)
+            }
             ExprKind::Field(base, idx) => {
                 let (vals, owned) = self.borrow(base);
                 let Ty::Struct(sid) = base.ty else { unreachable!() };
@@ -1223,7 +1253,7 @@ impl<'a, 'b> Gen<'a, 'b> {
             ExprKind::Bool(v) => vec![self.b.ins().iconst(types::I8, *v as i64)],
             // Static strings are never freed, so the pointer needs no reference.
             ExprKind::Str(s) => vec![self.str_obj(s)],
-            ExprKind::Local(_) | ExprKind::Move(_) | ExprKind::Field(..) => {
+            ExprKind::Local(_) | ExprKind::Move(_) | ExprKind::Take { .. } | ExprKind::Field(..) => {
                 let (vals, owned) = self.borrow(e);
                 if !owned {
                     let lay = self.layout(&e.ty);

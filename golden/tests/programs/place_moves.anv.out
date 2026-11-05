@@ -1,0 +1,17 @@
+exit: 0
+---
+field: 10000 49995000
+rebuilt: 10000 10000 re
+grown: 1001 1001
+rows: 3000 3000 13501500
+shelf: 1000 1000
+kept bag: 2 3
+kept grid: 1 2 true
+same: 2 1
+twice: 2 1
+around: 2 2
+fill: 2 2
+none: none
+stock: true 3
+text: xy
+bytes: 7

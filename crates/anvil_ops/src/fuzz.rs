@@ -61,6 +61,8 @@ struct Gen {
     /// and whether it has.
     random: bool,
     used_random: bool,
+    /// The types held in a struct by some update loop (`struct BoxStr { v: str, n: i64 }`).
+    boxes: Vec<T>,
 }
 
 impl Gen {
@@ -113,6 +115,20 @@ impl Gen {
                 }
             }
         }
+    }
+
+    /// The struct holding a `t` for update loops, declared with the program.
+    fn box_of(&mut self, t: T) -> String {
+        if !self.boxes.contains(&t) {
+            self.boxes.push(t);
+        }
+        match t {
+            T::S => "BoxStr",
+            T::Ai => "BoxInts",
+            T::As => "BoxStrs",
+            _ => unreachable!("only heap values are updated in loops"),
+        }
+        .to_string()
     }
 
     fn str_lit(&mut self) -> String {
@@ -413,7 +429,9 @@ impl Gen {
 
     /// `var v = ...; for i in 0..k { v = f(.., v, ..); }`: a value handed to a call and given
     /// back, so its read is a move (the call may hold the only reference); sometimes another
-    /// argument reads it too, which keeps it.
+    /// argument reads it too, which keeps it. Half the time the value lives in a place instead:
+    /// a struct's field (`w.v = f(.., w.v, ..)`, or the struct rebuilt around it) or an element
+    /// (`w[j] = f(.., w[j], ..)`), taken by the read when nothing else reads the place.
     fn update_loop(&mut self, out: &mut String, indent: &str, t: T) {
         let cands = self.updaters(t);
         let f = *self.pick(&cands);
@@ -422,18 +440,42 @@ impl Gen {
         let at = *self.pick(&at);
         let v = self.fresh("v");
         let i = self.fresh("i");
-        out.push_str(&format!("{indent}var {v}: {} = {};\n", t.name(), self.expr(t, 1)));
+        let w = self.fresh("w");
+        let j = self.fresh("j");
+        // 0, 1: a variable; 2: a field; 3: a field, the struct rebuilt around it; 4, 5: an element.
+        let form = self.rng.below(6);
+        let init = self.expr(t, 1);
+        let (place, comment) = match form {
+            0 | 1 => {
+                out.push_str(&format!("{indent}var {v}: {} = {init};\n", t.name()));
+                (v.clone(), "")
+            }
+            2 | 3 => {
+                let b = self.box_of(t);
+                out.push_str(&format!("{indent}var {w}: {b} = {b} {{ v: {init}, n: 0 }};\n"));
+                (format!("{w}.v"), " in a place")
+            }
+            _ => {
+                let other = self.expr(t, 1);
+                out.push_str(&format!("{indent}var {w}: [{}] = [{init}, {other}];\n", t.name()));
+                (format!("{w}[{j}]"), " in a place")
+            }
+        };
         let k = self.rng.below(6);
-        out.push_str(&format!("{indent}// handed over and back\n{indent}for {i} in 0..{k} {{\n"));
+        out.push_str(&format!("{indent}// handed over and back{comment}\n{indent}for {i} in 0..{k} {{\n"));
+        if form >= 4 {
+            out.push_str(&format!("{indent}    let {j}: i64 = {i} % 2;\n"));
+        }
         self.vars.push((i.clone(), T::I));
-        if self.rng.below(4) == 0 {
+        let read_again = self.rng.below(4) == 0;
+        if read_again && form <= 1 {
             self.vars.push((v.clone(), t));
         }
         let args: Vec<String> = params
             .iter()
             .enumerate()
-            .map(|(j, (p, pt))| {
-                let e = if j == at { v.clone() } else { self.expr(*pt, 2) };
+            .map(|(n, (p, pt))| {
+                let e = if n == at || (read_again && form > 1 && *pt == t) { place.clone() } else { self.expr(*pt, 2) };
                 if params.len() > 1 {
                     format!("{p}: {e}")
                 } else {
@@ -441,8 +483,19 @@ impl Gen {
                 }
             })
             .collect();
-        out.push_str(&format!("{indent}    {v} = {name}({});\n{indent}}}\n", args.join(", ")));
+        let call = format!("{name}({})", args.join(", "));
+        if form == 3 {
+            let b = self.box_of(t);
+            out.push_str(&format!("{indent}    {w} = {b} {{ v: {call}, n: {w}.n + 1 }};\n{indent}}}\n"));
+        } else {
+            out.push_str(&format!("{indent}    {place} = {call};\n{indent}}}\n"));
+        }
         self.vars.retain(|(n, _)| *n != i && *n != v);
+        match form {
+            0 | 1 => {}
+            2 | 3 => out.push_str(&format!("{indent}let {v}: {} = {w}.v;\n", t.name())),
+            _ => out.push_str(&format!("{indent}let {v}: {} = {w}[{}];\n", t.name(), self.rng.below(2))),
+        }
         self.vars.push((v, t));
     }
 
@@ -519,6 +572,13 @@ impl Gen {
                 ));
             }
         }
+        let decls: String = self
+            .boxes
+            .clone()
+            .into_iter()
+            .map(|t| format!("\nstruct {} {{\n    v: {},\n    n: i64,\n}}\n", self.box_of(t), t.name()))
+            .collect();
+        out.insert_str("// anvil fuzz program\n".len(), &decls);
         let uses = if self.used_random { "io, random" } else { "io" };
         out.push_str(&format!("\nfn main() uses {uses} {{\n{body}"));
         for (v, t) in self.vars.clone() {
@@ -546,6 +606,7 @@ pub fn program_for(seed: u64) -> String {
         next: 0,
         random: false,
         used_random: false,
+        boxes: Vec::new(),
     };
     let text = g.program();
     match anvil_front::fmt::format(&SourceFile::new("fuzz.anv", text.clone())) {
@@ -648,6 +709,17 @@ mod tests {
     fn some_programs_hand_values_over() {
         let n = (1..=50).filter(|s| super::program_for(*s).contains("// handed over and back")).count();
         assert!(n >= 3, "only {n} of 50 fuzz programs hand a value to a call and back");
+    }
+
+    #[test]
+    fn some_programs_update_places() {
+        let progs: Vec<String> = (1..=300).map(super::program_for).collect();
+        let fields = progs.iter().filter(|p| p.contains("// handed over and back in a place") && p.contains(".v = ")).count();
+        let rebuilt = progs.iter().filter(|p| p.contains(".n + 1")).count();
+        let elements = progs.iter().filter(|p| p.contains("// handed over and back in a place") && p.contains("] = ")).count();
+        let counts = (fields, rebuilt, elements);
+        assert!(fields >= 3 && rebuilt >= 3 && elements >= 3, "fuzz programs (fields, rebuilt, elements) of 300: {counts:?}");
+        eprintln!("place updates in 300 fuzz programs (fields, rebuilt, elements): {counts:?}");
     }
 
     #[test]

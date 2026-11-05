@@ -1403,6 +1403,34 @@ fn stack(n: i64) -> [i64]
     return xs;
 }
 
+struct Bag {
+    items: [i64],
+}
+
+// n ones in a field, each added by a call handed the field's only reference.
+fn bagged(n: i64) -> Bag
+    requires n >= 0
+    allocs 8 * n
+{
+    var b: Bag = Bag { items: [] };
+    for _i in 0..n {
+        b.items = grow(b.items);
+    }
+    return b;
+}
+
+// n ones in the first of two arrays, each added in place the same way.
+fn rows(n: i64) -> [[i64]]
+    requires n >= 0
+    allocs 8 * n + 16
+{
+    var r: [[i64]] = [[], []];
+    for _i in 0..n {
+        r[0] = grow(r[0]);
+    }
+    return r;
+}
+
 // n, in one step more than its bound says.
 fn same(n: i64) -> i64
     steps 0
@@ -1412,6 +1440,7 @@ fn same(n: i64) -> i64
 
 test "they work" {
     assert(grow([2]) == [2, 1] && dashes(3) == "aaa" && tail(3) == "aaa" && stack(2) == [1, 1] && same(4) == 4);
+    assert(bagged(2).items == [1, 1] && rows(1) == [[1], []]);
 }
 "#,
     );
@@ -1430,6 +1459,12 @@ test "they work" {
     assert_eq!(f("stack")["bytes"]["growth"], "linear", "{v}");
     assert_eq!(f("stack")["bytes"]["suggested"], "allocs 8 * n", "{v}");
     assert_eq!(f("stack")["bytes"]["bound_holds"], true, "{v}");
+    // The same in a field and in an element: taken on the last read, so linear too.
+    for (name, clause) in [("bagged", "allocs 8 * n"), ("rows", "allocs 8 * n + 16")] {
+        assert_eq!(f(name)["bytes"]["growth"], "linear", "{name}: {v}");
+        assert_eq!(f(name)["bytes"]["suggested"], clause, "{name}: {v}");
+        assert_eq!(f(name)["bytes"]["bound_holds"], true, "{name}: {v}");
+    }
     assert_eq!(f("same")["steps"]["bound_holds"], false, "one step past `steps 0`: {v}");
 
     // verify: the allocs bound and the steps bound one step short, each shrunk.

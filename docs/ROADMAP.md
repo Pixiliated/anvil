@@ -226,3 +226,18 @@ green and the interpreter and native backend agreeing on every program in `tests
 - [x] A corpus program (kept copies, later reads, loops, branches, closures, structs, enums,
   ensures) on both backends with the leak check; the fuzzer hands values to calls and back;
   100,000 updates natively take 18.8 s when a copy is kept and 10,000,000 take 0.5 s moved
+
+## M31: Moves out of places (v0.32)
+- [x] The last read of a field or an element moves too (`ExprKind::Take`, marked by the same
+  pass): when the statement writes the place again (`s.items = add(s.items, x)`,
+  `rows[i] = add(rows[i], x)`), or the value holding it is dead and the place is reached by
+  fields (`s = State { items: add(s.items, x), n: s.n + 1 }`); places that may be the same
+  (another index, the place read twice, a place around it) are still shared
+- [x] Both backends take the value and leave the place empty, reached as a write would reach it
+  (arrays on the way made unique), so a place left empty by an early `?` return is released
+  with its value; the byte model and `profile` count the same
+- [x] A corpus program (fields, rebuilt structs, elements, fields of elements, kept copies,
+  same-element indices, early returns, maps, text and bytes) on both backends with the leak
+  check; the fuzzer updates fields, rebuilt structs and elements; `cost` finds field and
+  element updates linear; 10,000,000 field and element updates natively take 0.5 s, 100,000
+  with a copy kept take 69 s

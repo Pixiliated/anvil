@@ -3,6 +3,12 @@
 Each version is one roadmap milestone (docs/ROADMAP.md); docs/DECISIONS.md says why things are
 the way they are.
 
+## 0.32.0
+- The last read of a field or an element moves too: `s.items = add(s.items, x)`,
+  `rows[i] = add(rows[i], x)` and `s = State { items: add(s.items, x), n: s.n + 1 }` change the
+  value in place instead of copying it, in both backends. 10,000,000 such updates natively
+  take 0.5 s; with a copy kept, 100,000 take 69 s.
+
 ## 0.31.0
 - The last read of a variable moves its value instead of sharing it, so passing a value on and
   taking it back (`xs = add(xs, x)`) changes it in place, in both backends. 100,000 such

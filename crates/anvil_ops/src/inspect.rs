@@ -252,8 +252,8 @@ pub fn profile(root: &Path, file: &str, test: Option<&str>, max_steps: Option<u6
     text.push_str(&format!("{steps} steps, {bytes} bytes allocated; end: {}\n", ended.text()));
     if copied > 0 {
         text.push_str(&format!(
-            "{copied} of those bytes copied values still shared when they changed; a value read \
-             for the last time is moved instead of shared\n"
+            "{copied} of those bytes copied values still shared when they changed; a variable, \
+             field or element read for the last time is moved instead of shared\n"
         ));
     }
     if !not_run.is_empty() {

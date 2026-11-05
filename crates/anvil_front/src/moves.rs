@@ -5,8 +5,12 @@
 //!
 //! A read in a statement (`let`, an assignment, an expression statement, `return`) becomes a
 //! `Move` when the statement names that local only once and nothing reads the local again
-//! before it is next written, on any path (loops included). The values `ensures` clauses read
-//! are never moved. Both backends follow the marks, so the rule is only here.
+//! before it is next written, on any path (loops included). A read of a place inside a local
+//! becomes a `Take` when nothing else in the statement names that place (or one around or
+//! inside it) and either the statement writes the place again (`s.items = add(s.items, x)`,
+//! `rows[i] = add(rows[i], x)`) or the local is dead after it and the place is reached by
+//! fields alone (`s = State(items: add(s.items, x), n: s.n + 1)`). The values `ensures`
+//! clauses read are never moved. Both backends follow the marks, so the rule is only here.
 
 use crate::ir::*;
 use std::collections::BTreeSet;
@@ -40,29 +44,205 @@ fn refs(e: &Expr, out: &mut Live) {
     }
 }
 
-/// How many times each local is named in `e`, added to `counts`.
-fn count(e: &Expr, counts: &mut Vec<(LocalId, usize)>) {
-    if let Some(l) = named_local(e) {
-        match counts.iter_mut().find(|(x, _)| *x == l) {
-            Some((_, n)) => *n += 1,
-            None => counts.push((l, 1)),
-        }
-    }
-    for c in children(e) {
-        count(c, counts);
+/// One step into a place: a field, or an index, known (`Some`) when it is a local or a literal,
+/// so that two such steps are the same element.
+#[derive(Clone, Copy, PartialEq)]
+enum Seg {
+    Field(usize),
+    Index(Option<Simple>),
+}
+
+#[derive(Clone, Copy, PartialEq)]
+enum Simple {
+    Local(LocalId),
+    Int(i64),
+}
+
+/// A local a statement names, and the place inside it; `read` when the statement only reads
+/// it there (so the read could move), not changing it in place or holding it.
+struct Occ {
+    local: LocalId,
+    path: Vec<Seg>,
+    read: bool,
+}
+
+/// What a read becomes.
+#[derive(PartialEq)]
+enum Act {
+    Keep,
+    /// The local's whole value moves (`Move` at the root of the place).
+    Move,
+    /// The value at the place is taken (`Take`).
+    Take,
+}
+
+fn simple(e: &Expr) -> Option<Simple> {
+    match e.kind {
+        ExprKind::Local(l) => Some(Simple::Local(l)),
+        ExprKind::Int(v) => Some(Simple::Int(v)),
+        _ => None,
     }
 }
 
-fn rewrite(e: &mut Expr, moved: &Live) {
-    if let ExprKind::Local(l) = e.kind {
-        if moved.contains(&l) {
-            e.kind = ExprKind::Move(l);
+fn segs(path: &[Step]) -> Vec<Seg> {
+    path.iter()
+        .map(|s| match s {
+            Step::Field(i) => Seg::Field(*i),
+            Step::Index { index, .. } => Seg::Index(simple(index)),
+        })
+        .collect()
+}
+
+/// `e` as a read of a place: its local and the steps to the place.
+fn place(e: &Expr) -> Option<(LocalId, Vec<Seg>)> {
+    match &e.kind {
+        ExprKind::Local(l) => Some((*l, Vec::new())),
+        ExprKind::Field(base, i) => {
+            let (l, mut p) = place(base)?;
+            p.push(Seg::Field(*i));
+            Some((l, p))
+        }
+        ExprKind::Index { base, index, .. } if matches!(base.ty, Ty::Array(_)) => {
+            let (l, mut p) = place(base)?;
+            p.push(Seg::Index(simple(index)));
+            Some((l, p))
+        }
+        _ => None,
+    }
+}
+
+/// The index expressions of a place read, from its local outwards.
+fn place_indices(e: &Expr) -> Vec<&Expr> {
+    match &e.kind {
+        ExprKind::Field(base, _) => place_indices(base),
+        ExprKind::Index { base, index, .. } => {
+            let mut out = place_indices(base);
+            out.push(index);
+            out
+        }
+        _ => Vec::new(),
+    }
+}
+
+fn place_indices_mut(e: &mut Expr) -> Vec<&mut Expr> {
+    match &mut e.kind {
+        ExprKind::Field(base, _) => place_indices_mut(base),
+        ExprKind::Index { base, index, .. } => {
+            let mut out = place_indices_mut(base);
+            out.push(index);
+            out
+        }
+        _ => Vec::new(),
+    }
+}
+
+/// The locals `e` names and the places in them, in evaluation-independent walk order (the
+/// order `apply` visits them in).
+fn occs(e: &Expr, out: &mut Vec<Occ>) {
+    if let Some((local, path)) = place(e) {
+        out.push(Occ { local, path, read: true });
+        for i in place_indices(e) {
+            occs(i, out);
         }
         return;
     }
-    for c in children_mut(e) {
-        rewrite(c, moved);
+    if let Some(local) = named_local(e) {
+        let path = match &e.kind {
+            ExprKind::Push { path, .. }
+            | ExprKind::Pop { path, .. }
+            | ExprKind::MapSet { path, .. }
+            | ExprKind::MapRemove { path, .. } => segs(path),
+            _ => Vec::new(),
+        };
+        out.push(Occ { local, path, read: false });
     }
+    for c in children(e) {
+        occs(c, out);
+    }
+}
+
+/// Whether two places in one local can share a value: one is around the other, unless a field
+/// tells them apart (indices may always be the same element).
+fn overlap(a: &[Seg], b: &[Seg]) -> bool {
+    a.iter().zip(b).all(|(x, y)| !matches!((x, y), (Seg::Field(i), Seg::Field(j)) if i != j))
+}
+
+/// Whether place `t` is `p` or around it, by steps known to be the same.
+fn covers(t: &[Seg], p: &[Seg]) -> bool {
+    t.len() <= p.len() && t.iter().zip(p).all(|(x, y)| x == y && *x != Seg::Index(None))
+}
+
+fn by_fields(p: &[Seg]) -> bool {
+    p.iter().all(|s| matches!(s, Seg::Field(_)))
+}
+
+/// Applies `acts` to the reads of `e`, visiting them in `occs` order.
+fn apply(e: &mut Expr, acts: &[Act], k: &mut usize) {
+    if place(e).is_some() {
+        let act = &acts[*k];
+        *k += 1;
+        match act {
+            Act::Take => {
+                take(e);
+                let ExprKind::Take { path, .. } = &mut e.kind else { unreachable!() };
+                for step in path {
+                    if let Step::Index { index, .. } = step {
+                        apply(index, acts, k);
+                    }
+                }
+                return;
+            }
+            Act::Move => {
+                let root = root_mut(e);
+                let ExprKind::Local(l) = root.kind else { unreachable!("place without a local") };
+                root.kind = ExprKind::Move(l);
+            }
+            Act::Keep => {}
+        }
+        for i in place_indices_mut(e) {
+            apply(i, acts, k);
+        }
+        return;
+    }
+    if named_local(e).is_some() {
+        *k += 1;
+    }
+    for c in children_mut(e) {
+        apply(c, acts, k);
+    }
+}
+
+/// The local at the root of a place read.
+fn root_mut(e: &mut Expr) -> &mut Expr {
+    if !matches!(e.kind, ExprKind::Field(..) | ExprKind::Index { .. }) {
+        return e;
+    }
+    match &mut e.kind {
+        ExprKind::Field(base, _) | ExprKind::Index { base, .. } => root_mut(base),
+        _ => unreachable!(),
+    }
+}
+
+/// Turns a place read into a `Take` of the same place.
+fn take(e: &mut Expr) {
+    let mut path = Vec::new();
+    let mut cur = std::mem::replace(&mut e.kind, ExprKind::Int(0));
+    let local = loop {
+        match cur {
+            ExprKind::Local(l) => break l,
+            ExprKind::Field(base, i) => {
+                path.push(Step::Field(i));
+                cur = base.kind;
+            }
+            ExprKind::Index { base, index, site } => {
+                path.push(Step::Index { index: *index, site });
+                cur = base.kind;
+            }
+            other => unreachable!("take of {other:?}"),
+        }
+    };
+    path.reverse();
+    e.kind = ExprKind::Take { local, path };
 }
 
 fn union(a: &Live, b: &Live) -> Live {
@@ -83,26 +263,58 @@ impl Walk {
         live
     }
 
-    /// Marks the moves of one statement that evaluates `exprs`. `place` is a local the
-    /// statement also names (the target of an assignment to a place inside it); `written` is
-    /// the local it overwrites after evaluating everything, whose old value is then dead.
-    fn leaf(&self, exprs: Vec<&mut Expr>, place: Option<LocalId>, written: Option<LocalId>, after: &Live) {
-        let mut counts = Vec::new();
+    /// Marks the moves of one statement that evaluates `exprs`. `target` is the place inside a
+    /// local the statement writes after evaluating everything; `written` is the local it
+    /// overwrites whole, whose old value is then dead.
+    fn leaf(&self, exprs: Vec<&mut Expr>, target: Option<(LocalId, Vec<Seg>)>, written: Option<LocalId>, after: &Live) {
+        let mut all = Vec::new();
         for e in &exprs {
-            count(e, &mut counts);
+            occs(e, &mut all);
         }
-        if let Some(l) = place {
-            counts.push((l, 2));
-        }
-        let moved: Live = counts
-            .into_iter()
-            .filter(|(l, n)| *n == 1 && !self.pinned.contains(l) && (!after.contains(l) || written == Some(*l)))
-            .map(|(l, _)| l)
-            .collect();
-        if !moved.is_empty() {
+        let acts: Vec<Act> = (0..all.len()).map(|k| self.act(&all, k, target.as_ref(), written, after)).collect();
+        if acts.iter().any(|a| *a != Act::Keep) {
+            let mut k = 0;
             for e in exprs {
-                rewrite(e, &moved);
+                apply(e, &acts, &mut k);
             }
+        }
+    }
+
+    /// What read `all[k]` of a statement becomes.
+    fn act(
+        &self,
+        all: &[Occ],
+        k: usize,
+        target: Option<&(LocalId, Vec<Seg>)>,
+        written: Option<LocalId>,
+        after: &Live,
+    ) -> Act {
+        let o = &all[k];
+        if !o.read || self.pinned.contains(&o.local) {
+            return Act::Keep;
+        }
+        let l = o.local;
+        let dead = !after.contains(&l) || written == Some(l);
+        let others: Vec<&[Seg]> =
+            all.iter().enumerate().filter(|(j, x)| *j != k && x.local == l).map(|(_, x)| &x.path[..]).collect();
+        let target = target.filter(|(t, _)| *t == l).map(|(_, p)| &p[..]);
+        let alone = others.is_empty() && target.is_none();
+        if !o.path.is_empty() && others.iter().all(|p| !overlap(p, &o.path)) {
+            // Written again by the statement: taken along the steps the write takes anyway, and
+            // fields from there (an index past them would copy a shared array for nothing).
+            if let Some(t) = target {
+                if covers(t, &o.path) && by_fields(&o.path[t.len()..]) {
+                    return Act::Take;
+                }
+            }
+            if dead && by_fields(&o.path) && target.is_none_or(|t| !overlap(t, &o.path)) {
+                return Act::Take;
+            }
+        }
+        if alone && dead {
+            Act::Move
+        } else {
+            Act::Keep
         }
     }
 
@@ -133,14 +345,14 @@ impl Walk {
                     }
                 }
                 if mark && !append {
+                    let (target, written) = if path.is_empty() { (None, Some(*l)) } else { (Some((*l, segs(path))), None) };
                     let mut exprs = vec![e];
-                    let (place, written) = if path.is_empty() { (None, Some(*l)) } else { (Some(*l), None) };
                     for step in path.iter_mut() {
                         if let Step::Index { index, .. } = step {
                             exprs.push(index);
                         }
                     }
-                    self.leaf(exprs, place, written, after);
+                    self.leaf(exprs, target, written, after);
                 }
                 live
             }
@@ -229,11 +441,23 @@ mod tests {
     use crate::ir::*;
     use crate::span::SourceFile;
 
-    /// The locals whose reads in function `name` are moves, in the order they appear.
+    /// The locals whose reads in function `name` are moves, in the order they appear; takes as
+    /// the local and their steps (`s.0` for field 0, `s[]` for an element).
     fn moved(src: &str, name: &str) -> Vec<String> {
         fn expr(e: &Expr, f: &Func, out: &mut Vec<String>) {
-            if let ExprKind::Move(l) = e.kind {
-                out.push(f.locals[l].name.clone());
+            match &e.kind {
+                ExprKind::Move(l) => out.push(f.locals[*l].name.clone()),
+                ExprKind::Take { local, path } => {
+                    let mut s = f.locals[*local].name.clone();
+                    for step in path {
+                        match step {
+                            Step::Field(i) => s.push_str(&format!(".{i}")),
+                            Step::Index { .. } => s.push_str("[]"),
+                        }
+                    }
+                    out.push(s);
+                }
+                _ => {}
             }
             for c in children(e) {
                 expr(c, f, out);
@@ -297,6 +521,45 @@ mod tests {
             "{ADD}\nfn longer(xs: [i64]) -> [i64]\n    ensures result.len() == xs.len() + 1\n{{\n    return add(xs: xs, x: 0);\n}}\n"
         );
         assert!(moved(&src, "longer").is_empty());
+    }
+
+    const BAG: &str = "struct Bag {\n    items: [i64],\n    n: i64,\n}\n";
+
+    #[test]
+    fn a_field_written_again_is_taken() {
+        let src = format!(
+            "{ADD}\n{BAG}\nfn fill(b: Bag) -> Bag {{\n    var c: Bag = b;\n    c.items = add(xs: c.items, x: c.n);\n    return c;\n}}\n"
+        );
+        assert_eq!(moved(&src, "fill"), ["b", "c.0", "c"]);
+    }
+
+    #[test]
+    fn fields_of_a_dead_value_are_taken_apart() {
+        let src = format!(
+            "{ADD}\n{BAG}\nfn bump(b: Bag) -> Bag {{\n    return Bag {{ items: add(xs: b.items, x: 1), n: b.n + 1 }};\n}}\n"
+        );
+        assert_eq!(moved(&src, "bump"), ["b.0", "b.1"]);
+    }
+
+    #[test]
+    fn an_element_written_again_is_taken() {
+        let src = format!(
+            "{ADD}\nfn grow(rows: [[i64]], i: i64) -> [[i64]] {{\n    var r: [[i64]] = rows;\n    r[i] = add(xs: r[i], x: 0);\n    return r;\n}}\n"
+        );
+        assert_eq!(moved(&src, "grow"), ["rows", "r[]", "r"]);
+    }
+
+    #[test]
+    fn places_that_may_be_the_same_stay() {
+        // r[j] may be r[i]; c whole holds c.items; the element of a dead array is not taken.
+        let src = format!(
+            "{ADD}\n{BAG}\nfn other(rows: [[i64]], i: i64, j: i64) -> [[i64]] {{\n    var r: [[i64]] = rows;\n    r[i] = add(xs: r[j], x: 0);\n    return r;\n}}\n\n\
+             fn whole(b: Bag) -> i64 {{\n    var c: Bag = b;\n    c.items = add(xs: c.items, x: c.items.len());\n    return c.n;\n}}\n\n\
+             fn first(rows: [[i64]]) -> [i64] {{\n    return rows[0];\n}}\n"
+        );
+        assert_eq!(moved(&src, "other"), ["rows", "j", "r"]);
+        assert_eq!(moved(&src, "whole"), ["b", "c.1"]);
+        assert_eq!(moved(&src, "first"), ["rows"]);
     }
 
     #[test]
