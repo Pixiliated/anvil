@@ -10,7 +10,8 @@
 //! inside it) and either the statement writes the place again (`s.items = add(s.items, x)`,
 //! `rows[i] = add(rows[i], x)`) or the local is dead after it and the place is reached by
 //! fields alone (`s = State(items: add(s.items, x), n: s.n + 1)`). The values `ensures`
-//! clauses read are never moved. Both backends follow the marks, so the rule is only here.
+//! clauses read are never moved. Tests are marked like functions. Both backends follow the
+//! marks, so the rule is only here.
 
 use crate::ir::*;
 use std::cell::RefCell;
@@ -32,19 +33,26 @@ const MAY_BE_WRITTEN: &str = "the statement writes a place that may be the same"
 const READ_LATER: &str = "it is read again later";
 const ELEMENT: &str = "an element is moved only when the statement writes it back";
 
-/// Marks the moves in every function of `program`, and lists the arguments of calls and whether
-/// each moves (`Program::handed`). Tests are left as written.
+/// Marks the moves in every function and test of `program`, and lists the arguments of calls
+/// and whether each moves (`Program::handed`).
 pub fn mark(program: &mut Program) {
-    let Program { funcs, structs, handed, .. } = program;
+    let Program { funcs, tests, structs, handed, .. } = program;
+    let mut bodies: Vec<(Live, &[Local], &mut Vec<Stmt>)> = Vec::new();
     for f in funcs.iter_mut() {
         let mut pinned = Live::new();
         for c in &f.ensures {
             refs(&c.expr, &mut pinned);
         }
+        bodies.push((pinned, &f.locals, &mut f.body));
+    }
+    for t in tests.iter_mut() {
+        bodies.push((Live::new(), &t.locals, &mut t.body));
+    }
+    for (pinned, locals, body) in bodies {
         let walk = Walk { pinned, handed: RefCell::new(Vec::new()) };
-        walk.block(&mut f.body, &Live::new(), None, true);
+        walk.block(body, &Live::new(), None, true);
         for (site, local, path, kept) in walk.handed.into_inner() {
-            let what = describe(&f.locals, structs, local, &path);
+            let what = describe(locals, structs, local, &path);
             let list = handed.entry(site).or_default();
             let k = Handed { what, kept };
             // A generic's instances share its sites.

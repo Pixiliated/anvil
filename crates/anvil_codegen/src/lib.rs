@@ -654,7 +654,7 @@ fn mutates(e: &Expr) -> bool {
         | ExprKind::Cmp(_, l, r)
         | ExprKind::And(l, r)
         | ExprKind::Or(l, r)
-        | ExprKind::StrConcat(l, r) => mutates(l) || mutates(r),
+        | ExprKind::StrConcat(l, r, _) => mutates(l) || mutates(r),
         ExprKind::Call(_, es, _)
         | ExprKind::StructLit(_, es)
         | ExprKind::ArrayLit(es)
@@ -1494,7 +1494,14 @@ impl<'a, 'b> Gen<'a, 'b> {
                 }
                 vec![acc]
             }
-            ExprKind::StrConcat(l, r) => {
+            // A value handed over (see ir::concat_appends): appended to in place when it is the
+            // only reference with room; the append takes both references.
+            ExprKind::StrConcat(l, r, _) if concat_appends(e) => {
+                let a = self.expr(l)[0];
+                let c = self.expr(r)[0];
+                vec![self.call_rt("anvil_str_append", &[a, c]).unwrap()]
+            }
+            ExprKind::StrConcat(l, r, _) => {
                 let a = self.expr(l)[0];
                 let c = self.expr(r)[0];
                 let joined = self.call_rt("anvil_str_concat", &[a, c]).unwrap();

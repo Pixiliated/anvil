@@ -252,3 +252,18 @@ green and the interpreter and native backend agreeing on every program in `tests
 - [x] `profile` lists the copy sites, costliest first, with their lines, and under each the
   calls that handed the shared values in and what their arguments did, in text and `--json`
   (`copies`); a corpus test pins the site, the call and the reason
+
+## M33: Text appends everywhere (v0.34)
+- [x] `a + b` appends to `a`'s text when `a` is handed over (a move or a take) or itself such an
+  append (`ir::concat_appends`), in both backends: `return s + x`, `p.name = p.name + x` and
+  `s + a + b` on a moved `s` grow text in place, so building text in a field or through a
+  function is linear
+- [x] The byte model knows which text has room, as the runtime does (text made by appends; kept
+  across `to_bytes` and `to_str` when the old value is gone): the first append to other text
+  counts the copy the native code makes, closing the gap left in v0.30
+- [x] Tests are move-marked like functions, so they run as functions do and `profile` gives
+  reasons for their calls
+- [x] A corpus program (fields, bytes, functions, chains, kept copies, static text, conversions,
+  a test) on both backends with the leak check; the fuzzer appends to text in fields; `cost`
+  finds text built through a function linear and counts the first copy; natively 10,000,000
+  field and function appends take 0.84 s, 100,000 with copies kept 1.5 s

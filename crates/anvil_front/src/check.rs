@@ -3304,7 +3304,8 @@ impl<'a> Checker<'a> {
             match op {
                 BinOp::Add => {
                     self.note_alloc(b, e.span, "joining bytes");
-                    return Expr { kind: ExprKind::StrConcat(Box::new(x), Box::new(y)), ty: Ty::Bytes };
+                    let site = self.site(e.span);
+                    return Expr { kind: ExprKind::StrConcat(Box::new(x), Box::new(y), site), ty: Ty::Bytes };
                 }
                 BinOp::Eq | BinOp::Ne => {
                     return Expr { kind: ExprKind::Cmp(cmp_op(op), Box::new(x), Box::new(y)), ty: Ty::Bool };
@@ -3333,7 +3334,7 @@ impl<'a> Checker<'a> {
         if lt == Ty::Str && rt == Ty::Str {
             if op == BinOp::Add {
                 self.note_alloc(b, e.span, "joining strings");
-                return Expr { kind: ExprKind::StrConcat(bx(x), bx(y)), ty: Ty::Str };
+                return Expr { kind: ExprKind::StrConcat(bx(x), bx(y), site), ty: Ty::Str };
             }
             if op.is_comparison() {
                 return Expr { kind: ExprKind::Cmp(cmp_op(op), bx(x), bx(y)), ty: Ty::Bool };

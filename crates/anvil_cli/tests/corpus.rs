@@ -1431,6 +1431,31 @@ fn rows(n: i64) -> [[i64]]
     return r;
 }
 
+// s with a mark after it: handed s, it appends in place.
+fn bang(s: str) -> str {
+    return s + "!";
+}
+
+// n marks, each added by a call handed the text: linear, as `out = out + "!"` is.
+fn bangs(n: i64) -> str
+    requires n >= 0
+    allocs 3 * n
+{
+    var out: str = "";
+    for _i in 0..n {
+        out = bang(out);
+    }
+    return out;
+}
+
+// "abcdef" has no room to grow, so the first append copies it: 6 + (6 + the end).
+fn once(end: str) -> str {
+    let a: str = "abc" + "def";
+    var s: str = a;
+    s = s + end;
+    return s;
+}
+
 // n, in one step more than its bound says.
 fn same(n: i64) -> i64
     steps 0
@@ -1441,6 +1466,7 @@ fn same(n: i64) -> i64
 test "they work" {
     assert(grow([2]) == [2, 1] && dashes(3) == "aaa" && tail(3) == "aaa" && stack(2) == [1, 1] && same(4) == 4);
     assert(bagged(2).items == [1, 1] && rows(1) == [[1], []]);
+    assert(bangs(2) == "!!" && once("g") == "abcdefg");
 }
 "#,
     );
@@ -1459,6 +1485,11 @@ test "they work" {
     assert_eq!(f("stack")["bytes"]["growth"], "linear", "{v}");
     assert_eq!(f("stack")["bytes"]["suggested"], "allocs 8 * n", "{v}");
     assert_eq!(f("stack")["bytes"]["bound_holds"], true, "{v}");
+    // Text handed to a call and given back grows in place; the first append to text without room
+    // copies it, as the native code does.
+    assert_eq!(f("bangs")["bytes"]["growth"], "linear", "{v}");
+    assert_eq!(f("bangs")["bytes"]["bound_holds"], true, "{v}");
+    assert_eq!(f("once")["bytes"]["suggested"], "allocs end.len() + 12", "{v}");
     // The same in a field and in an element: taken on the last read, so linear too.
     for (name, clause) in [("bagged", "allocs 8 * n"), ("rows", "allocs 8 * n + 16")] {
         assert_eq!(f(name)["bytes"]["growth"], "linear", "{name}: {v}");

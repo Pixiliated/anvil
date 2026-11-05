@@ -1,4 +1,4 @@
-# Anvil language specification (v0.33)
+# Anvil language specification (v0.34)
 
 Anvil is a small, compiled, general-purpose language designed to be written mostly by AI agents
 and read by humans. Its rules aim at three things: one obvious way to write each thing, code
@@ -358,7 +358,8 @@ native runtime copies:
 | writing into an array or map shared with another value (value semantics copy it first; a variable, field or element read for the last time is not shared, see Moves) | 8 or 16 per element copied |
 | a function literal that captures values | 8 per value |
 | `split`, `chars`, `args`, `list_dir` | the array and each new str in it |
-| `s = s + x` on a str or bytes local that alone holds its text (see Text) | x's length, and all of the text when its room doubles |
+| appending to text that alone holds its room (`s = s + x`, or text handed over, see Building text) | x's length, and all of the text when its room doubles |
+| appending to text without room of its own (shared, static, or never appended to) | all of the text and x: it is copied into new room first |
 
 Literal text is static and costs nothing; Options, Results and structs are held inline, so only
 what they hold counts. `s = "-" + s` in a loop copies all of `s` each round, so its bytes grow
@@ -525,6 +526,12 @@ kept in another variable, an array or a struct, or a literal) is copied first, s
 ever changes; a part that reads `s` (`s = s + s`) is evaluated with the old text, as everywhere
 else. Prepending (`s = x + s`), or interpolating `s` into itself, copies: build a list of parts
 and `join` them instead.
+
+Text **handed over** appends the same way: `a + b` where `a` is a variable, field or element read
+for the last time (see Moves), or itself such an append, adds `b` to `a`'s text. So
+`return s + "!"` in a function handed `s`, `p.name = p.name + x` and `s + a + b` on a moved `s`
+grow the text in place too. Only text made by an append has room; the first append to other
+text copies it into room of its own.
 
 ## Bytes
 

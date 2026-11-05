@@ -578,3 +578,16 @@ Short records of choices that are not obvious from the code. Newest last.
 - **Reasons come from the same pass**: the move pass records why it kept each argument while it
   decides, so the explanation can never disagree with what the backends do. When every
   argument moved, it says the sharing is elsewhere rather than guess where.
+
+## M33 (v0.34)
+
+- **One append rule, wider**: v0.30 appended only `s = s + x` on a local; moves made other text
+  the only reference too (a field written back, a parameter returned). Appending whenever the
+  left text is handed over makes those linear without a new statement form.
+- **The model must know about room**: an append is cheap only into text that has room, which
+  only appends make. The interpreter keeps the texts with room by address (weak references keep
+  an address from being reused), so it counts the copy the native code makes into new room
+  instead of assuming every lone text can grow. Conversions between str and bytes share one
+  object natively, so they carry the room when the old value is gone and drop it while shared.
+- **Tests move too**: leaving test bodies unmarked made them a second semantics to reason about
+  and left `profile` without reasons there.

@@ -1,0 +1,84 @@
+// Text handed over is appended to in place: `return s + x` and `p.name = p.name + x` grow the
+// text like `s = s + x` does, when the text is the only reference. Every line here must match
+// the interpreter, text still shared must keep its value, and the native run checks that
+// nothing leaks.
+struct Page {
+    title: str,
+    body: bytes,
+}
+
+// s with a mark after it: s is handed over, so its text grows in place.
+fn bang(s: str) -> str {
+    return s + "!";
+}
+
+// Several parts after s, one append each.
+fn framed(s: str, left: str, right: str) -> str {
+    return s + left + "|" + right;
+}
+
+fn main() uses io {
+    // A field appended to in a loop.
+    var page: Page = Page { title: "", body: "".to_bytes() };
+    for i in 0..2000 {
+        page.title = page.title + "ab";
+        page.body = page.body + bytes_of([i % 256]);
+    }
+    print("field: {page.title.len()} {page.body.len()} {page.body[255]}");
+
+    // Through a function handed the text and giving it back.
+    var shout: str = "hey";
+    for _j in 0..1000 {
+        shout = bang(shout);
+    }
+    print("handed: {shout.len()} {shout[0..5]}");
+
+    // A chain of parts after a moved value.
+    let start: str = "a";
+    let all: str = framed(s: start, left: "b", right: "c");
+    print("chain: {all}");
+
+    // A copy kept first keeps its value; the field is copied, then grows.
+    var kept_page: Page = Page { title: "x", body: bytes_of([1]) };
+    let old_title: str = kept_page.title;
+    kept_page.title = kept_page.title + "y";
+    kept_page.title = kept_page.title + "z";
+    print("kept: {old_title} {kept_page.title}");
+
+    // Static text handed over is copied into room of its own.
+    let word: str = "ab";
+    let longer: str = word + "c";
+    print("static: {longer}");
+
+    // The same text read twice: not handed over.
+    let twin: str = "tw";
+    let both: str = twin + twin;
+    print("twice: {both}");
+
+    // Converted to bytes while the text is still used: the two share it, so each appends to a
+    // copy.
+    var text: str = "q";
+    text = text + "r";
+    let as_bytes: bytes = text.to_bytes();
+    text = text + "s";
+    let more: bytes = as_bytes + bytes_of([33]);
+    print("converted: {text} {more.len()} {as_bytes.len()}");
+
+    // Converted after its last use: handed over, it keeps growing.
+    var grown: str = "g";
+    for _k in 0..10 {
+        grown = grown + "h";
+    }
+    let raw: bytes = grown.to_bytes() + bytes_of([105]);
+    print("handed bytes: {raw.len()} {raw[11]}");
+}
+
+test "appends inside a test" {
+    var page: Page = Page { title: "t", body: "".to_bytes() };
+    for _i in 0..3 {
+        page.title = bang(page.title);
+    }
+    let copy: str = page.title;
+    page.title = page.title + "?";
+    assert(copy == "t!!!" && page.title == "t!!!?");
+}

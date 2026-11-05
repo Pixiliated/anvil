@@ -3,6 +3,14 @@
 Each version is one roadmap milestone (docs/ROADMAP.md); docs/DECISIONS.md says why things are
 the way they are.
 
+## 0.34.0
+- `a + b` appends in place when `a` is handed over (its last read, or such an append):
+  `return s + x`, `p.name = p.name + x` and chains on a moved value build text in linear time
+  and memory, in both backends.
+- The byte model counts the copy the first append to text without room makes, as the native
+  code does (it counted only the new bytes before).
+- Test bodies move values as functions do.
+
 ## 0.33.0
 - `profile` says where values were copied because they were still shared: each site's line,
   function, bytes and times, the calls that handed the values in, and for each argument there

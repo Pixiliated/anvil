@@ -388,24 +388,39 @@ impl Gen {
                 }
                 2 if t == T::S => {
                     // Text built by appending (in place natively); sometimes a part reads the
-                    // text itself, or a copy of it is kept, which must not change.
+                    // text itself, or a copy of it is kept, which must not change. A third of
+                    // the time the text is a struct's field, taken by the read and appended to.
                     let v = self.fresh("v");
                     let i = self.fresh("i");
-                    out.push_str(&format!("{indent}var {v}: str = {};\n", self.expr(T::S, 1)));
+                    let w = self.fresh("w");
+                    let field = self.rng.below(3) == 0;
+                    let init = self.expr(T::S, 1);
+                    let text = if field {
+                        let b = self.box_of(T::S);
+                        out.push_str(&format!("{indent}var {w}: {b} = {b} {{ v: {init}, n: 0 }};\n"));
+                        format!("{w}.v")
+                    } else {
+                        out.push_str(&format!("{indent}var {v}: str = {init};\n"));
+                        v.clone()
+                    };
                     if self.rng.below(3) == 0 {
                         let kept = self.fresh("v");
-                        out.push_str(&format!("{indent}let {kept}: str = {v};\n"));
+                        out.push_str(&format!("{indent}let {kept}: str = {text};\n"));
                         self.vars.push((kept, T::S));
                     }
                     let k = self.rng.below(6);
-                    out.push_str(&format!("{indent}// appended to in place\n{indent}for {i} in 0..{k} {{\n"));
+                    let comment = if field { "appended to in a place" } else { "appended to in place" };
+                    out.push_str(&format!("{indent}// {comment}\n{indent}for {i} in 0..{k} {{\n"));
                     self.vars.push((i.clone(), T::I));
-                    if self.rng.below(4) == 0 {
+                    if self.rng.below(4) == 0 && !field {
                         self.vars.push((v.clone(), T::S));
                     }
                     let parts: Vec<String> = (0..1 + self.rng.below(3)).map(|_| self.expr(T::S, 2)).collect();
-                    out.push_str(&format!("{indent}    {v} = {v} + {};\n{indent}}}\n", parts.join(" + ")));
+                    out.push_str(&format!("{indent}    {text} = {text} + {};\n{indent}}}\n", parts.join(" + ")));
                     self.vars.retain(|(n, _)| *n != i && *n != v);
+                    if field {
+                        out.push_str(&format!("{indent}let {v}: str = {w}.v;\n"));
+                    }
                     self.vars.push((v, T::S));
                 }
                 3 => self.function_value(out, indent, t),
@@ -724,8 +739,10 @@ mod tests {
 
     #[test]
     fn some_programs_append_text() {
-        let n = (1..=50).filter(|s| super::program_for(*s).contains("// appended to in place")).count();
-        assert!(n >= 3, "only {n} of 50 fuzz programs append text");
+        let progs: Vec<String> = (1..=100).map(super::program_for).collect();
+        let n = progs.iter().filter(|p| p.contains("// appended to in place")).count();
+        let fields = progs.iter().filter(|p| p.contains("// appended to in a place")).count();
+        assert!(n >= 5 && fields >= 2, "of 100 fuzz programs, {n} append text and {fields} text in a field");
     }
 
     #[test]

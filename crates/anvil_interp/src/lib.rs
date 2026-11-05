@@ -9,7 +9,7 @@ use anvil_front::ir::*;
 use std::collections::{BTreeMap, HashMap};
 use std::io::{BufRead, Write};
 use std::path::Path;
-use std::rc::Rc;
+use std::rc::{Rc, Weak};
 
 /// Arrays and maps share storage until written (Rc::make_mut), which gives value semantics
 /// cheaply. The derived `==` is Anvil's: structural, with floats compared as IEEE values.
@@ -163,6 +163,57 @@ pub struct Interp<'p, 'h> {
     /// Of those, the bytes copied because a value was still shared when it was changed.
     copied: u64,
     rec: Option<&'p mut Recorder>,
+    /// The texts with room to grow in place, as the runtime's growable text (made by appends),
+    /// by the address of their bytes. Each Weak keeps its address from being reused while it is
+    /// listed; dead ones are dropped when the list doubles.
+    growable: HashMap<usize, Grown>,
+    grown_limit: usize,
+}
+
+/// A text with room to grow (see `Interp::growable`).
+enum Grown {
+    Str(Weak<str>),
+    Bytes(Weak<[u8]>),
+}
+
+impl Grown {
+    fn alive(&self) -> bool {
+        match self {
+            Grown::Str(w) => w.strong_count() > 0,
+            Grown::Bytes(w) => w.strong_count() > 0,
+        }
+    }
+}
+
+/// The address of a text's bytes, and how many references it has and its length.
+fn text_of(v: &Value) -> (usize, usize, u64) {
+    match v {
+        Value::Str(s) => (Rc::as_ptr(s) as *const u8 as usize, Rc::strong_count(s), s.len() as u64),
+        Value::Bytes(b) => (Rc::as_ptr(b) as *const u8 as usize, Rc::strong_count(b), b.len() as u64),
+        other => unreachable!("text of {other:?}"),
+    }
+}
+
+/// `a` with `parts` after it: str or bytes as `a` is.
+fn joined(a: &Value, parts: &[Value]) -> Value {
+    match a {
+        Value::Bytes(b) => {
+            let mut all = b.to_vec();
+            for p in parts {
+                if let Value::Bytes(x) = p {
+                    all.extend_from_slice(x);
+                }
+            }
+            Value::Bytes(all.into())
+        }
+        old => {
+            let mut all = old.as_str().to_string();
+            for p in parts {
+                all.push_str(p.as_str());
+            }
+            Value::Str(all.into())
+        }
+    }
 }
 
 /// What a run did, for `profile`, `trace` and coverage. Counts are always kept; the timeline only
@@ -398,6 +449,8 @@ impl<'p, 'h> Interp<'p, 'h> {
             allocated: 0,
             copied: 0,
             rec,
+            growable: HashMap::new(),
+            grown_limit: 1024,
         }
     }
 }
@@ -870,8 +923,9 @@ fn alloc_bytes(e: &Expr, v: &Value) -> u64 {
         | ExprKind::MapLit { .. }
         | ExprKind::Slice { .. }
         | ExprKind::Interp(_)
-        | ExprKind::StrConcat(..)
         | ExprKind::Closure { .. } => made_bytes(v, false),
+        // An append counts itself (`Interp::append`).
+        ExprKind::StrConcat(..) if !concat_appends(e) => made_bytes(v, false),
         ExprKind::Builtin(b, _) => match b {
             Builtin::StrSplit { .. } | Builtin::StrChars | Builtin::Args | Builtin::ListDir => made_bytes(v, true),
             Builtin::MapKeys
@@ -954,6 +1008,61 @@ impl<'p, 'h> Interp<'p, 'h> {
             r.bytes = self.allocated;
             r.copied = self.copied;
         }
+    }
+
+    fn is_growable(&self, v: &Value) -> bool {
+        self.growable.contains_key(&text_of(v).0)
+    }
+
+    /// Lists text `v` as having room to grow (it was just made by an append).
+    fn mark_growable(&mut self, v: &Value) {
+        if self.growable.len() >= self.grown_limit {
+            self.growable.retain(|_, g| g.alive());
+            self.grown_limit = (self.growable.len() * 2).max(1024);
+        }
+        let g = match v {
+            Value::Str(s) => Grown::Str(Rc::downgrade(s)),
+            Value::Bytes(b) => Grown::Bytes(Rc::downgrade(b)),
+            other => unreachable!("growable {other:?}"),
+        };
+        self.growable.insert(text_of(v).0, g);
+    }
+
+    /// Text converted between str and bytes is the same object in the runtime: it keeps its
+    /// room when the old value is gone, and loses it while both share it.
+    fn converted(&mut self, from: &Value, to: &Value) {
+        let (at, refs, _) = text_of(from);
+        if self.growable.contains_key(&at) {
+            if refs == 1 {
+                self.mark_growable(to);
+            } else {
+                self.growable.remove(&at);
+            }
+        }
+    }
+
+    /// Counts appending `parts` to text `a` as the runtime does it, and gives the text: text
+    /// that is the only reference and has room grows in place (its room doubling when it runs
+    /// out); other text is copied into new room first, a copy at `site` when it was shared.
+    fn append(&mut self, a: &Value, parts: &[Value], site: &str) -> Value {
+        let (_, refs, mut len) = text_of(a);
+        let mut grown = refs == 1 && self.is_growable(a);
+        if !grown && refs > 1 {
+            self.note_copy(site, len);
+        }
+        for p in parts {
+            let k = text_of(p).2;
+            if !grown || len + k + 1 > text_room(len) {
+                self.allocated += len + k;
+                grown = true;
+            } else {
+                self.allocated += k;
+            }
+            len += k;
+        }
+        let v = joined(a, parts);
+        self.mark_growable(&v);
+        v
     }
 
     /// `copy_bytes`, counted as copied at site `at` too.
@@ -1088,49 +1197,8 @@ impl<'p, 'h> Interp<'p, 'h> {
                 for p in append_parts(*l, e).unwrap() {
                     parts.push(self.eval(p, frame)?);
                 }
-                let (unique, old_len) = match &frame[*l] {
-                    Value::Str(s) => (Rc::strong_count(s) == 1, s.len() as u64),
-                    Value::Bytes(b) => (Rc::strong_count(b) == 1, b.len() as u64),
-                    other => unreachable!("append to {other:?}"),
-                };
-                let mut len = old_len;
-                // Shared text is copied first, into new room; text the local alone holds grows in place.
-                let mut grown = unique;
-                for p in &parts {
-                    let k = match p {
-                        Value::Str(s) => s.len() as u64,
-                        Value::Bytes(b) => b.len() as u64,
-                        other => unreachable!("append of {other:?}"),
-                    };
-                    if !grown {
-                        self.allocated += len + k;
-                        self.note_copy(site, len);
-                        grown = true;
-                    } else if len + k + 1 > text_room(len) {
-                        self.allocated += len + k;
-                    } else {
-                        self.allocated += k;
-                    }
-                    len += k;
-                }
-                frame[*l] = match &frame[*l] {
-                    Value::Bytes(b) => {
-                        let mut all = b.to_vec();
-                        for p in &parts {
-                            if let Value::Bytes(x) = p {
-                                all.extend_from_slice(x);
-                            }
-                        }
-                        Value::Bytes(all.into())
-                    }
-                    old => {
-                        let mut all = old.as_str().to_string();
-                        for p in &parts {
-                            all.push_str(p.as_str());
-                        }
-                        Value::Str(all.into())
-                    }
-                };
+                let old = std::mem::replace(&mut frame[*l], Value::Void);
+                frame[*l] = self.append(&old, &parts, site);
             }
             Stmt::Assign(l, path, e, _) => {
                 let v = self.eval(e, frame)?;
@@ -1336,7 +1404,13 @@ impl<'p, 'h> Interp<'p, 'h> {
                 }
                 Value::Str(text.into())
             }
-            ExprKind::StrConcat(l, r) => match (self.eval(l, frame)?, self.eval(r, frame)?) {
+            // A value handed over is appended to, as `s = s + x` is (ir::concat_appends).
+            ExprKind::StrConcat(l, r, site) if concat_appends(e) => {
+                let a = self.eval(l, frame)?;
+                let b = self.eval(r, frame)?;
+                self.append(&a, &[b], site)
+            }
+            ExprKind::StrConcat(l, r, _) => match (self.eval(l, frame)?, self.eval(r, frame)?) {
                 (Value::Bytes(a), Value::Bytes(b)) => Value::Bytes([&a[..], &b[..]].concat().into()),
                 (a, b) => Value::Str(format!("{}{}", a.as_str(), b.as_str()).into()),
             },
@@ -1515,7 +1589,11 @@ impl<'p, 'h> Interp<'p, 'h> {
                 }
                 Value::Bytes(out.into())
             }
-            Builtin::StrToBytes => Value::Bytes(x.as_str().as_bytes().into()),
+            Builtin::StrToBytes => {
+                let v = Value::Bytes(x.as_str().as_bytes().into());
+                self.converted(&x, &v);
+                v
+            }
             Builtin::StrReplace { message } => {
                 let old = self.eval(&args[1], frame)?;
                 let new = self.eval(&args[2], frame)?;
@@ -1562,8 +1640,12 @@ impl<'p, 'h> Interp<'p, 'h> {
                 Value::Array(Rc::new(out))
             }
             Builtin::BytesToStr => {
-                let Value::Bytes(bs) = x else { unreachable!() };
-                option(String::from_utf8(bs.to_vec()).ok().map(|s| Value::Str(s.into())))
+                let Value::Bytes(bs) = &x else { unreachable!() };
+                let v = String::from_utf8(bs.to_vec()).ok().map(|s| Value::Str(s.into()));
+                if let Some(v) = &v {
+                    self.converted(&x, v);
+                }
+                option(v)
             }
             Builtin::BytesHex => {
                 let Value::Bytes(bs) = x else { unreachable!() };

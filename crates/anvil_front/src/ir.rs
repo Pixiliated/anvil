@@ -588,7 +588,8 @@ pub enum ExprKind {
     },
     /// Concatenation of the text of each part (str, i64, f64 with its unit, bool).
     Interp(Vec<Expr>),
-    StrConcat(Box<Expr>, Box<Expr>),
+    /// `a + b` on str or bytes; the site (`file:line:col`) names a copy it makes (`concat_appends`).
+    StrConcat(Box<Expr>, Box<Expr>, String),
     /// `xs.push(v)` on the array at a place.
     Push {
         local: LocalId,
@@ -724,7 +725,7 @@ macro_rules! children_fn {
                 | ExprKind::Cmp(_, a, b)
                 | ExprKind::And(a, b)
                 | ExprKind::Or(a, b)
-                | ExprKind::StrConcat(a, b)
+                | ExprKind::StrConcat(a, b, _)
                 | ExprKind::Index { base: a, index: b, .. } => {
                     out.push(& $($m)? **a);
                     out.push(& $($m)? **b);
@@ -762,7 +763,7 @@ pub fn append_parts(l: LocalId, e: &Expr) -> Option<Vec<&Expr>> {
     let mut cur = e;
     loop {
         match &cur.kind {
-            ExprKind::StrConcat(left, right) => {
+            ExprKind::StrConcat(left, right, _) => {
                 parts.push(&**right);
                 cur = left;
             }
@@ -775,6 +776,19 @@ pub fn append_parts(l: LocalId, e: &Expr) -> Option<Vec<&Expr>> {
         return None;
     }
     Some(parts)
+}
+
+/// Whether `a + b` (a StrConcat) appends `b` to the text of `a` instead of copying both: when
+/// `a` is a value handed over (a move or a take, see `moves`) or itself such an append, so it
+/// may be the only reference. Then `return s + x` and `p.name = p.name + x` grow the text in
+/// place like `s = s + x` (`append_parts`) does; both backends use this rule.
+pub fn concat_appends(e: &Expr) -> bool {
+    match &e.kind {
+        ExprKind::StrConcat(left, _, _) => {
+            matches!(left.kind, ExprKind::Move(_) | ExprKind::Take { .. }) || concat_appends(left)
+        }
+        _ => false,
+    }
 }
 
 /// The room text of `len` bytes has to grow into when it is appended to in place: a power of two
