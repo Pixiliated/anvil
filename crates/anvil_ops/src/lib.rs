@@ -10,6 +10,7 @@ mod fuzz;
 pub mod golden;
 mod inspect;
 mod lsp;
+mod measure;
 mod mutate;
 pub(crate) mod proj;
 pub mod project;
@@ -23,6 +24,7 @@ pub use docs::docs;
 pub use fuzz::{fuzz, program_for};
 pub use inspect::{profile, trace, TRACE_LIMIT};
 pub use lsp::lsp;
+pub use measure::measure;
 pub use mutate::mutate;
 pub use proj::{
     fmt, golden_approve, golden_check, list, record_decide, record_export, record_import_roadmap, record_query,
@@ -231,6 +233,12 @@ pub const COMMANDS: &[Command] = &[
         positionals: &["file?"],
         options: &[STEPS],
         summary: "store a file's usage (every project file's that changed) as approved (look at the changes first)",
+    },
+    Command {
+        name: "measure",
+        positionals: &["file?"],
+        options: &[STEPS],
+        summary: "run programs natively: heap bytes asked for, the most held at once, objects and time, beside the interpreter's counts",
     },
     Command {
         name: "golden check",

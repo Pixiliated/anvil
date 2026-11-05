@@ -277,3 +277,16 @@ green and the interpreter and native backend agreeing on every program in `tests
 - [x] Every corpus program, example and standard library module has its usage approved, so a
   change to the compiler that costs programs more is found: with moves switched off, 11 of 73
   files fail (place_moves.anv's bytes grow from 256,633 to 920,136,769)
+
+## M35: Native measurement (v0.36)
+- [x] The runtime counts what objects ask of the heap when `ANVIL_MEASURE` names a file: bytes
+  asked for, the most held at once, objects made
+- [x] `anvil measure [FILE]` builds and runs programs under their goldens' input, one worker at
+  a time, and shows those numbers and the time beside the interpreter's counts, in the CLI and
+  over MCP
+- [x] Native memory is tested, not only timed by hand: moved updates and text in a field are
+  linear, kept copies quadratic, a loop's temporaries are given back, and one small program's
+  numbers are pinned exactly
+- [x] What it found: each `{part}` of an interpolation built a whole new string, so one with many
+  parts was quadratic. It now allocates its result once (floats_sweep.anv: 120,002 heap bytes
+  to 49,842, 2,080 objects to 960)

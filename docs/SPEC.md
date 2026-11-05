@@ -1,4 +1,4 @@
-# Anvil language specification (v0.35)
+# Anvil language specification (v0.36)
 
 Anvil is a small, compiled, general-purpose language designed to be written mostly by AI agents
 and read by humans. Its rules aim at three things: one obvious way to write each thing, code
@@ -960,6 +960,8 @@ anvil api approve FILE                      approve a file's current public API
 anvil usage [FILE]                          each run's steps, bytes and copies against the
                                             approved ones; any growth fails
 anvil usage approve [FILE]                  approve a file's usage (or every changed one)
+anvil measure [FILE]                        run programs natively: heap bytes, peak, objects
+                                            and time, beside the interpreter's counts
 anvil verify [--native]                     check, test and golden-check every file;
                                             store the findings in the record
 anvil review [--native]                     verify, then write out/review.md for sign-off
@@ -1008,6 +1010,16 @@ failing test, or a main whose golden does not match, is not measured (it is a fi
 own). `anvil usage approve FILE` stores the current numbers after the changes have been read;
 without a file it does so for every file whose usage changed, skipping those that cannot be
 measured.
+
+`anvil measure` builds a program (or every project file with a main) and runs it natively under
+its golden's input, with one `parallel_map` worker. It reports what the program's objects asked
+of the heap as the runtime counts it: the bytes asked for (each time an array or text grows, all
+of its new size), the most held at once, and the objects made, beside the interpreter's steps,
+bytes and copied bytes. The model counts what a program makes, so the runtime's bytes are higher:
+each object has a header (24 bytes for text, 48 for an array) and arrays double, and numbers
+interpolated into text are temporaries. Heap numbers are the same on every run and every 64-bit
+platform; the time is reported and never compared. A native run that differs from the
+interpreter fails.
 
 **Lints** are checks `verify` makes beyond type errors. Each counts what the project's tests
 and golden-checked `main`s run, in the interpreter, across every project file (a module is

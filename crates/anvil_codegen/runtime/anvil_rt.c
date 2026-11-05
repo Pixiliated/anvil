@@ -105,6 +105,48 @@ typedef struct {
  * never share an object). */
 static int64_t live_objects = 0;
 
+/* What the program's objects ask of the heap, counted when ANVIL_MEASURE names a file (`anvil
+ * measure`), which gets the totals at exit: bytes asked for, the most held at once, and objects
+ * made. Runs that are measured use one worker (ANVIL_THREADS=1), so the numbers are the same on
+ * every run. */
+static int mem_measuring = 0;
+static const char *mem_file = NULL;
+static int64_t mem_allocated = 0, mem_live = 0, mem_peak = 0, mem_objects = 0;
+
+/* `asked` bytes asked for, changing what is held by `change`. */
+static void mem_note(int64_t asked, int64_t change) {
+    if (!mem_measuring) return;
+    ATOMIC_ADD(&mem_allocated, asked);
+    int64_t live = ATOMIC_ADD(&mem_live, change) + change;
+    if (live > mem_peak) mem_peak = live;
+}
+
+/* A new object of `size` bytes. */
+static void mem_object(int64_t size) {
+    if (!mem_measuring) return;
+    ATOMIC_ADD(&mem_objects, 1);
+    mem_note(size, size);
+}
+
+static void mem_report(void) {
+    FILE *f = fopen(mem_file, "w");
+    if (!f) {
+        fprintf(stderr, "anvil runtime error: cannot write %s\n", mem_file);
+        fflush(stderr);
+        _Exit(ANVIL_RUNTIME_ERROR_EXIT);
+    }
+    fprintf(f, "%lld %lld %lld\n", (long long)mem_allocated, (long long)mem_peak, (long long)mem_objects);
+    fclose(f);
+}
+
+static void init_measure(void) {
+    mem_file = getenv("ANVIL_MEASURE");
+    if (mem_file) {
+        mem_measuring = 1;
+        atexit(mem_report);
+    }
+}
+
 /* Output is byte-exact on every platform: no newline translation. */
 static void init_stdout(void) {
     static int done = 0;
@@ -131,6 +173,8 @@ static void *xmalloc(size_t n) {
     return p;
 }
 
+static int64_t text_room(int64_t len);
+
 void anvil_retain(AnvObj *o) {
     if (!o || o->rc < 0) return;
     if (o->rc == 0) runtime_error("retain of a freed object");
@@ -147,10 +191,15 @@ void anvil_release(AnvObj *o) {
             char *elem = a->data + i * a->ti->elem_size;
             for (int64_t k = 0; k < a->ti->nptrs; k++) anvil_release(*(AnvObj **)(elem + a->ti->offsets[k]));
         }
+        mem_note(0, -(int64_t)sizeof(AnvArr) - a->cap * a->ti->elem_size);
         free(a->data);
     } else if (o->kind == KIND_FN) {
         AnvFn *f = (AnvFn *)o;
         for (int64_t k = 0; k < f->ti->nptrs; k++) anvil_release(*(AnvObj **)(f->env + f->ti->offsets[k]));
+        mem_note(0, -(int64_t)sizeof(AnvFn) - f->ti->elem_size);
+    } else {
+        const AnvStr *s = (const AnvStr *)o;
+        mem_note(0, -(int64_t)sizeof(AnvStr) - (o->kind == KIND_TEXT ? text_room(s->len) : s->len + 1));
     }
     ATOMIC_ADD(&live_objects, -1);
     free(o);
@@ -163,6 +212,7 @@ AnvFn *anvil_fn_new(const AnvTypeInfo *ti, void *code) {
     f->kind = KIND_FN;
     f->ti = ti;
     f->code = code;
+    mem_object((int64_t)sizeof(AnvFn) + ti->elem_size);
     ATOMIC_ADD(&live_objects, 1);
     return f;
 }
@@ -175,6 +225,7 @@ static AnvStr *str_new(int64_t len) {
     s->kind = KIND_STR;
     s->len = len;
     s->bytes[len] = 0;
+    mem_object((int64_t)sizeof(AnvStr) + len + 1);
     ATOMIC_ADD(&live_objects, 1);
     return s;
 }
@@ -201,7 +252,12 @@ AnvStr *anvil_str_append(AnvStr *a, AnvStr *b) {
     int64_t len = a->len + b->len;
     AnvStr *s;
     if (a->rc == 1 && a->kind == KIND_TEXT) {
-        s = len + 1 > text_room(a->len) ? realloc(a, sizeof(AnvStr) + (size_t)text_room(len)) : a;
+        if (len + 1 > text_room(a->len)) {
+            mem_note((int64_t)sizeof(AnvStr) + text_room(len), text_room(len) - text_room(a->len));
+            s = realloc(a, sizeof(AnvStr) + (size_t)text_room(len));
+        } else {
+            s = a;
+        }
         if (!s) runtime_error("out of memory");
     } else {
         s = xmalloc(sizeof(AnvStr) + (size_t)text_room(len));
@@ -209,6 +265,7 @@ AnvStr *anvil_str_append(AnvStr *a, AnvStr *b) {
         s->kind = KIND_TEXT;
         s->len = a->len;
         memcpy(s->bytes, a->bytes, (size_t)a->len);
+        mem_object((int64_t)sizeof(AnvStr) + text_room(len));
         ATOMIC_ADD(&live_objects, 1);
         anvil_release((AnvObj *)a);
     }
@@ -217,6 +274,19 @@ AnvStr *anvil_str_append(AnvStr *a, AnvStr *b) {
     s->bytes[len] = 0;
     anvil_release((AnvObj *)b);
     return s;
+}
+
+/* Interpolation: text of exactly `len` bytes, then each part copied in at its offset (taking the
+ * part's reference), so an interpolation allocates its result once. */
+AnvStr *anvil_str_alloc(int64_t len) {
+    return str_new(len);
+}
+
+int64_t anvil_str_fill(AnvStr *s, int64_t at, AnvStr *part) {
+    int64_t len = part->len;
+    memcpy(s->bytes + at, part->bytes, (size_t)len);
+    anvil_release((AnvObj *)part);
+    return at + len;
 }
 
 AnvStr *anvil_str_concat(const AnvStr *a, const AnvStr *b) {
@@ -419,6 +489,7 @@ AnvArr *anvil_arr_new(const AnvTypeInfo *ti, int64_t cap) {
     a->cap = cap;
     a->ti = ti;
     a->data = cap ? xmalloc((size_t)(cap * ti->elem_size)) : NULL;
+    mem_object((int64_t)sizeof(AnvArr) + cap * ti->elem_size);
     ATOMIC_ADD(&live_objects, 1);
     return a;
 }
@@ -444,6 +515,7 @@ char *anvil_arr_push_slot(AnvArr *a) {
     if (a->len == a->cap) {
         if (a->cap > INT64_MAX / 2 / (a->ti->elem_size ? a->ti->elem_size : 1)) runtime_error("array too large");
         int64_t cap = a->cap ? a->cap * 2 : 4;
+        mem_note(cap * a->ti->elem_size, (cap - a->cap) * a->ti->elem_size);
         char *data = realloc(a->data, (size_t)(cap * a->ti->elem_size) + 1);
         if (!data) runtime_error("out of memory");
         a->data = data;
@@ -1584,6 +1656,7 @@ int wmain(int argc, wchar_t **wargv) {
     saved_argv = argv;
     init_clock();
     init_files();
+    init_measure();
     anvil_program();
     return 0;
 }
@@ -1601,6 +1674,7 @@ int main(int argc, char **argv) {
     saved_argv = argv;
     init_clock();
     init_files();
+    init_measure();
     pthread_attr_t attr;
     pthread_t thread;
     if (pthread_attr_init(&attr) != 0 || pthread_attr_setstacksize(&attr, (size_t)64 << 20) != 0 ||

@@ -3,6 +3,12 @@
 Each version is one roadmap milestone (docs/ROADMAP.md); docs/DECISIONS.md says why things are
 the way they are.
 
+## 0.36.0
+- `anvil measure [FILE]`: programs run natively, with the heap bytes their objects asked for, the
+  most held at once, the objects made and the time, beside the interpreter's counts.
+- Interpolation allocates its result once natively instead of a new string per part
+  (floats_sweep.anv: 120,002 heap bytes to 49,842).
+
 ## 0.35.0
 - `anvil usage` and `anvil usage approve`: each run's steps, bytes and copied bytes (main, each
   test) against the approved numbers in `golden/FILE.usage`; `verify` reports growth, runs not

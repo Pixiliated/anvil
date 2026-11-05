@@ -93,6 +93,8 @@ const RUNTIME: &[(&str, &[Type], &[Type])] = &[
     ("anvil_retain", &[I], &[]),
     ("anvil_release", &[I], &[]),
     ("anvil_str_concat", &[I, I], &[I]),
+    ("anvil_str_alloc", &[I], &[I]),
+    ("anvil_str_fill", &[I, I, I], &[I]),
     ("anvil_str_append", &[I, I], &[I]),
     ("anvil_str_cmp", &[I, I], &[I]),
     ("anvil_str_from_i64", &[I], &[I]),
@@ -1483,16 +1485,23 @@ impl<'a, 'b> Gen<'a, 'b> {
                 self.call_rt("anvil_arr_remove_slot", &[m, at]);
                 Vec::new()
             }
+            // Each part's text in order, then one result of their total length.
             ExprKind::Interp(parts) => {
-                let mut acc = self.text(&parts[0]);
-                for p in &parts[1..] {
-                    let t = self.text(p);
-                    let joined = self.call_rt("anvil_str_concat", &[acc, t]).unwrap();
-                    self.call_rt("anvil_release", &[acc]);
-                    self.call_rt("anvil_release", &[t]);
-                    acc = joined;
+                let texts: Vec<Value> = parts.iter().map(|p| self.text(p)).collect();
+                if let [only] = texts[..] {
+                    return vec![only];
                 }
-                vec![acc]
+                let mut total = self.b.ins().iconst(I, 0);
+                for t in &texts {
+                    let len = self.b.ins().load(I, self.trusted, *t, OBJ_LEN);
+                    total = self.b.ins().iadd(total, len);
+                }
+                let out = self.call_rt("anvil_str_alloc", &[total]).unwrap();
+                let mut at = self.b.ins().iconst(I, 0);
+                for t in texts {
+                    at = self.call_rt("anvil_str_fill", &[out, at, t]).unwrap();
+                }
+                vec![out]
             }
             // A value handed over (see ir::concat_appends): appended to in place when it is the
             // only reference with room; the append takes both references.

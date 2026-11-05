@@ -2045,3 +2045,58 @@ fn usage_is_approved_and_growth_is_found() {
     assert_eq!(out.status.code(), Some(2));
     assert!(String::from_utf8_lossy(&out.stderr).contains("test \"again\" cannot be measured, as it fails"), "{out:?}");
 }
+
+/// Measures a program natively: (heap bytes asked for, the most held at once, objects).
+fn heap_of(p: &Scratch, src: &str) -> (u64, u64, u64) {
+    p.write("src/hello.anv", src);
+    let v = p.json(&["measure", "src/hello.anv"]);
+    assert_eq!(v["ok"], true, "{v}");
+    let h = &v["programs"][0]["native"];
+    (h["allocated"].as_u64().unwrap(), h["peak"].as_u64().unwrap(), h["objects"].as_u64().unwrap())
+}
+
+#[test]
+fn native_memory_is_measured() {
+    let p = hello_project("measure");
+    const ADD: &str = "fn add(xs: [i64], x: i64) -> [i64] {\n    var ys: [i64] = xs;\n    ys.push(x);\n    return ys;\n}\n\n";
+    let updates = |n: u64, keep: &str| {
+        format!("{ADD}fn main() uses io {{\n    var xs: [i64] = [];\n    for i in 0..{n} {{\n{keep}        xs = add(xs: xs, x: i);\n    }}\n    print(\"{{xs.len()}}\");\n}}\n")
+    };
+
+    // An update handed the only reference does not copy, natively: doubling n doubles the bytes.
+    let (one, ..) = heap_of(&p, &updates(1000, ""));
+    let (two, ..) = heap_of(&p, &updates(2000, ""));
+    assert!(two <= one * 9 / 4, "moved updates grow faster than n: {one} then {two}");
+    // A copy kept each round makes it quadratic: doubling n quadruples them, far above the rest.
+    let keep = "        let _kept: [i64] = xs;\n";
+    let (kept_one, ..) = heap_of(&p, &updates(1000, keep));
+    let (kept_two, ..) = heap_of(&p, &updates(2000, keep));
+    assert!(kept_two >= kept_one * 7 / 2, "kept copies do not grow quadratically: {kept_one} then {kept_two}");
+    assert!(kept_one >= one * 20, "kept copies cost too little: {kept_one} against {one}");
+
+    // The same for text in a field.
+    let field = |n: u64| {
+        format!("struct Page {{\n    title: str,\n}}\n\nfn main() uses io {{\n    var p: Page = Page {{ title: \"\" }};\n    for _i in 0..{n} {{\n        p.title = p.title + \"x\";\n    }}\n    print(\"{{p.title.len()}}\");\n}}\n")
+    };
+    let (text_one, ..) = heap_of(&p, &field(4000));
+    let (text_two, ..) = heap_of(&p, &field(8000));
+    assert!(text_two <= text_one * 9 / 4, "text in a field grows faster than n: {text_one} then {text_two}");
+
+    // Peak: what a loop's temporary holds is given back each round.
+    let temps = format!(
+        "{ADD}fn big(n: i64) -> [i64] {{\n    var xs: [i64] = [];\n    for i in 0..n {{\n        xs = add(xs: xs, x: i);\n    }}\n    return xs;\n}}\n\n\
+         fn main() uses io {{\n    var total: i64 = 0;\n    for _r in 0..100 {{\n        total = total + big(1000).len();\n    }}\n    print(\"{{total}}\");\n}}\n"
+    );
+    let (allocated, peak, _) = heap_of(&p, &temps);
+    assert!(allocated >= peak * 50, "the temporaries were not given back: {allocated} asked for, {peak} at most");
+
+    // Exactly: two numbers' text and one result, each with its 24-byte header; the literal is static.
+    let exact = "fn main() uses io {\n    let a: i64 = 12;\n    let b: i64 = 345;\n    let s: str = \"{a}-{b}\";\n    print(s);\n}\n";
+    assert_eq!(heap_of(&p, exact), (86, 86, 3));
+
+    // A program without a main has nothing to measure; a project measures those that do.
+    assert_eq!(p.anvil(&["measure", "src/maths.anv"]).status.code(), Some(2));
+    let all = p.json(&["measure"]);
+    assert_eq!(all["programs"].as_array().unwrap().len(), 1, "{all}");
+    assert_eq!(all["programs"][0]["file"], "src/hello.anv", "{all}");
+}

@@ -604,3 +604,15 @@ Short records of choices that are not obvious from the code. Newest last.
   a file whose test fails is not measured, since its numbers would mean nothing.
 - **It guards the compiler too**: the corpus's usage pins what the optimizations of M28-M33 buy;
   switching moves off fails 11 files.
+
+## M35 (v0.36)
+
+- **Check the model against the machine**: every memory number so far came from the interpreter's
+  model, and that native code does not copy was only timed by hand. The runtime now counts its
+  objects' heap use, so tests can assert it and an agent can see it.
+- **Counted by the runtime, not the allocator**: logical sizes (header, length, capacity) rather
+  than `malloc`'s, so the numbers repeat exactly across runs and 64-bit platforms. Time is shown
+  but never compared. The counters cost one branch per allocation when off.
+- **Not part of usage**: approved usage must be checkable without building anything, on every
+  `verify`; heap numbers need a native run, so they stay in `measure` and its tests.
+- **It paid at once**: comparing the two showed interpolation allocating a string per part.

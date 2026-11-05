@@ -505,6 +505,15 @@ impl AnvilServer {
         self.op(move |root| anvil_ops::api_approve(root, &a.file)).await
     }
 
+    #[tool(description = "Build programs and run them natively under their goldens' input, one worker at a \
+        time: the heap bytes their objects asked for, the most held at once and the objects made \
+        (the same on every run), and the time taken (which is not), beside the interpreter's steps, \
+        bytes and copied bytes. The file's own program, or every project file with a main. A native \
+        run that differs from the interpreter is a tool error.")]
+    async fn measure(&self, Parameters(a): Parameters<UsageArgs>) -> Result<CallToolResult, ErrorData> {
+        self.op(move |root| anvil_ops::measure(root, a.file.as_deref(), Some(steps(a.max_steps)))).await
+    }
+
     #[tool(description = "What each run of a file takes (main under its golden's input, and each test): \
         steps, bytes allocated and bytes copied, by the interpreter's deterministic count, compared \
         with the approved numbers (golden/FILE.usage). More than approved, a run not approved yet or \
