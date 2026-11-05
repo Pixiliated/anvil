@@ -215,3 +215,14 @@ green and the interpreter and native backend agreeing on every program in `tests
 - [x] A corpus program for aliasing, sharing, self-reference, chains and bytes; the fuzzer
   appends; building 400,000 characters natively takes 12.3 s by copying and well under 0.1 s
   by appending
+
+## M30: Moves (v0.31)
+- [x] The last read of a variable moves its value (`ExprKind::Move`, marked by one liveness
+  pass, `moves::mark`, through loops, branches, break and continue): the receiver may hold
+  the only reference, so `xs = add(xs, x)` changes `xs` in place in both backends; values
+  `ensures` reads never move
+- [x] `profile` shows, per function, the bytes copied because a value was still shared when it
+  changed, so the copies a move would avoid are found by measuring, not by reading
+- [x] A corpus program (kept copies, later reads, loops, branches, closures, structs, enums,
+  ensures) on both backends with the leak check; the fuzzer hands values to calls and back;
+  100,000 updates natively take 18.8 s when a copy is kept and 10,000,000 take 0.5 s moved

@@ -3,6 +3,13 @@
 Each version is one roadmap milestone (docs/ROADMAP.md); docs/DECISIONS.md says why things are
 the way they are.
 
+## 0.31.0
+- The last read of a variable moves its value instead of sharing it, so passing a value on and
+  taking it back (`xs = add(xs, x)`) changes it in place, in both backends. 100,000 such
+  updates natively took 18.8 s when a copy was kept; 10,000,000 moved take 0.5 s.
+- `profile` shows the bytes each function copied because a value was still shared when it
+  changed (`self_copied` and `copied` in `--json`).
+
 ## 0.30.0
 - `s = s + x` (and `s = s + a + b`) on a str or bytes local appends in place while the local
   holds the only reference: building text is linear in time and memory, in both backends.

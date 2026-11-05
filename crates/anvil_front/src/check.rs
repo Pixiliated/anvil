@@ -474,7 +474,7 @@ pub fn analyze_modules<'a>(modules: &[Module<'a>], order: &[usize]) -> Analysis 
             _ => None,
         })
         .collect();
-    let program = Program {
+    let mut program = Program {
         structs: c.structs.clone(),
         enums: c.enums.clone(),
         funcs,
@@ -485,6 +485,9 @@ pub fn analyze_modules<'a>(modules: &[Module<'a>], order: &[usize]) -> Analysis 
         c_files: c.c_files.clone(),
         branches: c.branches.clone(),
     };
+    if c.diags.is_empty() {
+        crate::moves::mark(&mut program);
+    }
     let program = c.diags.is_empty().then_some(program);
     Analysis { program, diags: c.diags, facts: c.facts }
 }

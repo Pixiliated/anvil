@@ -1,0 +1,139 @@
+// Moves: the last read of a local hands its value on, so the receiver may change it in place.
+// Every line here must match the interpreter, a value read again after a move would be gone,
+// and the native run checks that nothing leaks.
+struct Bag {
+    name: str,
+    items: [i64],
+}
+
+enum Held {
+    Nothing,
+    Some_of(items: [i64]),
+}
+
+// xs with x after it: in place when the caller hands xs over.
+fn add(xs: [i64], x: i64) -> [i64] {
+    var ys: [i64] = xs;
+    ys.push(x);
+    return ys;
+}
+
+fn total(xs: [i64]) -> i64 {
+    var sum: i64 = 0;
+    for x in xs {
+        sum = sum + x;
+    }
+    return sum;
+}
+
+// The ensures clause reads xs after the body, so xs is never moved here.
+fn longer(xs: [i64]) -> [i64]
+    ensures result.len() == xs.len() + 1
+{
+    return add(xs: xs, x: 0);
+}
+
+fn bag_of(name: str, items: [i64]) -> Bag {
+    return Bag { name: name, items: items };
+}
+
+fn main() uses io {
+    // A functional update in a loop: linear, as each call is handed the only reference.
+    var xs: [i64] = [];
+    for i in 0..10000 {
+        xs = add(xs: xs, x: i);
+    }
+    print("built: {xs.len()} {total(xs)}");
+
+    // A copy kept before the call keeps its value.
+    var a: [i64] = [1, 2];
+    let kept: [i64] = a;
+    a = add(xs: a, x: 3);
+    print("kept: {kept.len()} {a.len()}");
+
+    // Read again after the call: not moved.
+    let b: [i64] = [4, 5];
+    let c: [i64] = add(xs: b, x: 6);
+    print("again: {b.len()} {c.len()}");
+
+    // Named twice in one statement: not moved.
+    let d: [i64] = [7];
+    let e: [i64] = add(xs: d, x: d.len());
+    print("twice: {d.len()} {e[1]}");
+
+    // Moved inside a loop body but read on the next round: not moved.
+    let base: [i64] = [1];
+    var sizes: i64 = 0;
+    for _i in 0..3 {
+        let grown: [i64] = add(xs: base, x: 2);
+        sizes = sizes + grown.len();
+    }
+    print("loop: {sizes} {base.len()}");
+
+    // Read after a while loop that may run: not moved inside it.
+    let w: [i64] = [9, 9];
+    var n: i64 = 0;
+    while n < 2 {
+        let t: [i64] = add(xs: w, x: n);
+        n = n + t.len() - 2;
+    }
+    print("while: {n} {w.len()}");
+
+    // Moved on one branch only, and not read on either afterwards.
+    let f: [i64] = [3];
+    var out: i64 = 0;
+    if xs.len() > 5 {
+        out = total(add(xs: f, x: 1));
+    } else {
+        out = f.len();
+    }
+    print("branch: {out}");
+
+    // Read after a break, so never moved inside the loop; the update in it is.
+    let g: [i64] = [1, 1];
+    var acc: [i64] = [];
+    for j in 0..5 {
+        if j == 2 {
+            break;
+        }
+        let u: [i64] = add(xs: g, x: j);
+        acc = add(xs: acc, x: u.len());
+    }
+    print("break: {acc.len()} {g.len()}");
+
+    // Into a struct, then out of it again.
+    let name: str = "box";
+    let items: [i64] = [1, 2, 3];
+    var bag: Bag = bag_of(name: name, items: items);
+    bag.items = add(xs: bag.items, x: 4);
+    print("bag: {bag.name} {bag.items.len()}");
+
+    // Captured by a closure, then dead: moved in.
+    let caught: [i64] = [5, 6, 7];
+    let size: fn() -> i64 = fn() -> i64 {
+        return caught.len();
+    };
+    print("closure: {size()} {size()}");
+
+    // Into an enum and matched out again.
+    let h: [i64] = [8];
+    let held: Held = Held.Some_of(h);
+    match held {
+        Nothing => { print("nothing"); }
+        Some_of(items: inner) => { print("held: {add(xs: inner, x: 9).len()}"); }
+    }
+
+    // ensures reads the parameter after the body.
+    print("ensured: {longer([1, 2]).len()}");
+
+    // Short-circuited: the move on the right is skipped, and the value released at the end.
+    let s: [i64] = [1];
+    let both: bool = xs.len() == 0 && total(s) > 0;
+    print("short: {both}");
+
+    // Text moves the same way.
+    var word: str = "a";
+    let other: str = word;
+    word = other + "b";
+    print("text: {word} {other}");
+}

@@ -1,0 +1,16 @@
+exit: 0
+---
+built: 10000 49995000
+kept: 2 3
+again: 2 3
+twice: 1 1
+loop: 6 1
+while: 2 2
+branch: 4
+break: 2 2
+bag: box 4
+closure: 3 3
+held: 2
+ensured: 3
+short: false
+text: ab a

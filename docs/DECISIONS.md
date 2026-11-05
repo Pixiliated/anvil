@@ -537,3 +537,19 @@ Short records of choices that are not obvious from the code. Newest last.
 - **One rule, two backends, one model**: `ir::append_parts` decides for the interpreter and the
   native code alike, and the byte model counts what the runtime does, so the tools' numbers
   stay true after the optimization.
+
+## M30 (v0.31)
+
+- **Value semantics without the copies**: passing a value on and taking it back (`xs = f(xs)`)
+  is how value-semantics code is written, and each call copied the whole value because the
+  caller still held it. The last read now moves the value, so the obvious code is linear.
+- **Marked once, in the IR**: a liveness pass after checking turns last reads into
+  `ExprKind::Move`; the interpreter takes the value out of the frame and the native code takes
+  the reference and leaves the local null. Neither backend decides anything, so they cannot
+  disagree, and the byte model sees the same moves.
+- **Conservative where it is cheap to be**: only reads in plain statements move, and only when
+  the statement names the variable once, so evaluation order inside a statement never matters;
+  loop counters and snapshots stay live through their loops, and `ensures` keeps what it reads.
+- **Say where the copies are**: `profile` counts the bytes copied because a value was shared,
+  per function, so an agent finds a quadratic copy by measuring instead of reasoning about
+  references.

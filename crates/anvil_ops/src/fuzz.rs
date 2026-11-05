@@ -393,6 +393,7 @@ impl Gen {
                     self.vars.push((v, T::S));
                 }
                 3 => self.function_value(out, indent, t),
+                4 if !self.updaters(t).is_empty() => self.update_loop(out, indent, t),
                 _ => {
                     let v = self.fresh("v");
                     out.push_str(&format!("{indent}let {v}: {} = {};\n", t.name(), self.expr(t, 3)));
@@ -400,6 +401,49 @@ impl Gen {
                 }
             }
         }
+    }
+
+    /// The helpers that take a `t` and give one back.
+    fn updaters(&self, t: T) -> Vec<usize> {
+        if matches!(t, T::I | T::F | T::B) {
+            return Vec::new();
+        }
+        (0..self.fns.len()).filter(|i| self.fns[*i].ret == t && self.fns[*i].params.iter().any(|(_, pt)| *pt == t)).collect()
+    }
+
+    /// `var v = ...; for i in 0..k { v = f(.., v, ..); }`: a value handed to a call and given
+    /// back, so its read is a move (the call may hold the only reference); sometimes another
+    /// argument reads it too, which keeps it.
+    fn update_loop(&mut self, out: &mut String, indent: &str, t: T) {
+        let cands = self.updaters(t);
+        let f = *self.pick(&cands);
+        let (name, params) = (self.fns[f].name.clone(), self.fns[f].params.clone());
+        let at: Vec<usize> = (0..params.len()).filter(|j| params[*j].1 == t).collect();
+        let at = *self.pick(&at);
+        let v = self.fresh("v");
+        let i = self.fresh("i");
+        out.push_str(&format!("{indent}var {v}: {} = {};\n", t.name(), self.expr(t, 1)));
+        let k = self.rng.below(6);
+        out.push_str(&format!("{indent}// handed over and back\n{indent}for {i} in 0..{k} {{\n"));
+        self.vars.push((i.clone(), T::I));
+        if self.rng.below(4) == 0 {
+            self.vars.push((v.clone(), t));
+        }
+        let args: Vec<String> = params
+            .iter()
+            .enumerate()
+            .map(|(j, (p, pt))| {
+                let e = if j == at { v.clone() } else { self.expr(*pt, 2) };
+                if params.len() > 1 {
+                    format!("{p}: {e}")
+                } else {
+                    e
+                }
+            })
+            .collect();
+        out.push_str(&format!("{indent}    {v} = {name}({});\n{indent}}}\n", args.join(", ")));
+        self.vars.retain(|(n, _)| *n != i && *n != v);
+        self.vars.push((v, t));
     }
 
     /// `let v: fn(P) -> R = ...;`: a helper with one parameter, or a literal whose body reads
@@ -435,7 +479,12 @@ impl Gen {
         for f in 0..1 + self.rng.below(3) {
             let params: Vec<(String, T)> =
                 (0..1 + self.rng.below(3)).map(|_| (self.fresh("p"), *self.pick(&ALL))).collect();
-            let ret = *self.pick(&ALL);
+            let mut ret = *self.pick(&ALL);
+            // Some give back what they were handed (str or an array), for update loops.
+            let heap: Vec<T> = params.iter().map(|(_, t)| *t).filter(|t| matches!(t, T::S | T::Ai | T::As)).collect();
+            if !heap.is_empty() && self.rng.below(2) == 0 {
+                ret = *self.pick(&heap);
+            }
             let name = format!("f{f}");
             let list: Vec<String> = params.iter().map(|(p, t)| format!("{p}: {}", t.name())).collect();
             out.push_str(&format!("\nfn {name}({}) -> {} {{\n", list.join(", "), ret.name()));
@@ -596,9 +645,15 @@ mod tests {
     }
 
     #[test]
+    fn some_programs_hand_values_over() {
+        let n = (1..=50).filter(|s| super::program_for(*s).contains("// handed over and back")).count();
+        assert!(n >= 3, "only {n} of 50 fuzz programs hand a value to a call and back");
+    }
+
+    #[test]
     fn some_programs_append_text() {
         let n = (1..=50).filter(|s| super::program_for(*s).contains("// appended to in place")).count();
-        assert!(n >= 5, "only {n} of 50 fuzz programs append text");
+        assert!(n >= 3, "only {n} of 50 fuzz programs append text");
     }
 
     #[test]

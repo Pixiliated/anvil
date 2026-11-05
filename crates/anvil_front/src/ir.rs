@@ -504,6 +504,10 @@ pub enum ExprKind {
     Bool(bool),
     Str(String),
     Local(LocalId),
+    /// The last read of a local's value (marked by `moves::mark`): the value is taken and the
+    /// local left empty, so whoever receives it may hold the only reference and change it in
+    /// place. Nothing reads the local again before it is next written.
+    Move(LocalId),
     Field(Box<Expr>, usize),
     Call(FuncId, Vec<Expr>),
     /// A declared function as a value.
@@ -611,41 +615,114 @@ pub enum ExprKind {
 /// Whether evaluating `e` reads or writes local `l` anywhere (function literals' bodies are
 /// functions of their own; what they captured is read where the literal is).
 pub fn uses_local(e: &Expr, l: LocalId) -> bool {
-    let any = |es: &[Expr]| es.iter().any(|x| uses_local(x, l));
-    let path = |p: &[Step]| p.iter().any(|s| matches!(s, Step::Index { index, .. } if uses_local(index, l)));
+    named_local(e) == Some(l) || children(e).into_iter().any(|c| uses_local(c, l))
+}
+
+/// The local `e` itself names: read (`Local`, `Move`), changed in place (push, pop, set,
+/// remove) or holding a value (`?`). The locals its children name are theirs.
+pub fn named_local(e: &Expr) -> Option<LocalId> {
     match &e.kind {
-        ExprKind::Local(x) => *x == l,
-        ExprKind::Int(_) | ExprKind::Float(_) | ExprKind::Bool(_) | ExprKind::Str(_) | ExprKind::FnRef(_) => false,
-        ExprKind::Push { local, path: p, value } => *local == l || path(p) || uses_local(value, l),
-        ExprKind::Pop { local, path: p, .. } => *local == l || path(p),
-        ExprKind::MapSet { local, path: p, key, value } => {
-            *local == l || path(p) || uses_local(key, l) || uses_local(value, l)
-        }
-        ExprKind::MapRemove { local, path: p, key, .. } => *local == l || path(p) || uses_local(key, l),
-        ExprKind::Slice { base, from, to, .. } => uses_local(base, l) || uses_local(from, l) || uses_local(to, l),
-        ExprKind::MapLit { entries, .. } => entries.iter().any(|(k, v)| uses_local(k, l) || uses_local(v, l)),
-        ExprKind::CallValue(callee, es) => uses_local(callee, l) || any(es),
-        ExprKind::Bits { l: a, r: b, .. }
-        | ExprKind::IArith { l: a, r: b, .. }
-        | ExprKind::FArith(_, a, b)
-        | ExprKind::Cmp(_, a, b)
-        | ExprKind::And(a, b)
-        | ExprKind::Or(a, b)
-        | ExprKind::StrConcat(a, b)
-        | ExprKind::Index { base: a, index: b, .. } => uses_local(a, l) || uses_local(b, l),
-        ExprKind::BitNot(x) | ExprKind::Field(x, _) | ExprKind::Not(x) | ExprKind::FNeg(x) | ExprKind::INeg { e: x, .. } => {
-            uses_local(x, l)
-        }
-        ExprKind::Try { held, inner, .. } => *held == l || uses_local(inner, l),
-        ExprKind::Closure { captures: es, .. }
-        | ExprKind::Call(_, es)
-        | ExprKind::StructLit(_, es)
-        | ExprKind::ArrayLit(es)
-        | ExprKind::Interp(es)
-        | ExprKind::Builtin(_, es)
-        | ExprKind::Variant { fields: es, .. } => any(es),
+        ExprKind::Local(l)
+        | ExprKind::Move(l)
+        | ExprKind::Push { local: l, .. }
+        | ExprKind::Pop { local: l, .. }
+        | ExprKind::MapSet { local: l, .. }
+        | ExprKind::MapRemove { local: l, .. }
+        | ExprKind::Try { held: l, .. } => Some(*l),
+        _ => None,
     }
 }
+
+// The expressions evaluated as part of `e` (index expressions of places included), in no
+// particular order; function literals' bodies are functions of their own and are left out.
+macro_rules! children_fn {
+    ($name:ident $(, $m:tt)?) => {
+        pub fn $name(e: & $($m)? Expr) -> Vec<& $($m)? Expr> {
+            let mut out = Vec::new();
+            match & $($m)? e.kind {
+                ExprKind::Int(_)
+                | ExprKind::Float(_)
+                | ExprKind::Bool(_)
+                | ExprKind::Str(_)
+                | ExprKind::FnRef(_)
+                | ExprKind::Local(_)
+                | ExprKind::Move(_) => {}
+                ExprKind::Push { path, value, .. } | ExprKind::MapRemove { path, key: value, .. } => {
+                    for s in path {
+                        if let Step::Index { index, .. } = s {
+                            out.push(index);
+                        }
+                    }
+                    out.push(& $($m)? **value);
+                }
+                ExprKind::Pop { path, .. } => {
+                    for s in path {
+                        if let Step::Index { index, .. } = s {
+                            out.push(index);
+                        }
+                    }
+                }
+                ExprKind::MapSet { path, key, value, .. } => {
+                    for s in path {
+                        if let Step::Index { index, .. } = s {
+                            out.push(index);
+                        }
+                    }
+                    out.push(& $($m)? **key);
+                    out.push(& $($m)? **value);
+                }
+                ExprKind::Slice { base, from, to, .. } => {
+                    out.push(& $($m)? **base);
+                    out.push(& $($m)? **from);
+                    out.push(& $($m)? **to);
+                }
+                ExprKind::MapLit { entries, .. } => {
+                    for (k, v) in entries {
+                        out.push(k);
+                        out.push(v);
+                    }
+                }
+                ExprKind::CallValue(callee, es) => {
+                    out.push(& $($m)? **callee);
+                    for x in es {
+                        out.push(x);
+                    }
+                }
+                ExprKind::Bits { l: a, r: b, .. }
+                | ExprKind::IArith { l: a, r: b, .. }
+                | ExprKind::FArith(_, a, b)
+                | ExprKind::Cmp(_, a, b)
+                | ExprKind::And(a, b)
+                | ExprKind::Or(a, b)
+                | ExprKind::StrConcat(a, b)
+                | ExprKind::Index { base: a, index: b, .. } => {
+                    out.push(& $($m)? **a);
+                    out.push(& $($m)? **b);
+                }
+                ExprKind::BitNot(x)
+                | ExprKind::Field(x, _)
+                | ExprKind::Not(x)
+                | ExprKind::FNeg(x)
+                | ExprKind::INeg { e: x, .. }
+                | ExprKind::Try { inner: x, .. } => out.push(& $($m)? **x),
+                ExprKind::Closure { captures: es, .. }
+                | ExprKind::Call(_, es)
+                | ExprKind::StructLit(_, es)
+                | ExprKind::ArrayLit(es)
+                | ExprKind::Interp(es)
+                | ExprKind::Builtin(_, es)
+                | ExprKind::Variant { fields: es, .. } => {
+                    for x in es {
+                        out.push(x);
+                    }
+                }
+            }
+            out
+        }
+    };
+}
+children_fn!(children);
+children_fn!(children_mut, mut);
 
 /// `l = l + a + b + ...` on a str or bytes local, where no part reads `l`: the parts to append,
 /// in order. Both backends append them in place when `l` holds the only reference to its text,

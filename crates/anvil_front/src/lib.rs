@@ -7,6 +7,7 @@ pub mod doc;
 pub mod fmt;
 pub mod ir;
 pub mod lexer;
+pub mod moves;
 pub mod parser;
 pub mod span;
 pub mod units;

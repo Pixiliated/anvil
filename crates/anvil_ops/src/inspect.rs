@@ -228,41 +228,49 @@ pub fn profile(root: &Path, file: &str, test: Option<&str>, max_steps: Option<u6
     let given = try_report!(given(root, which, input));
     let run = run_name(&program, which);
     let observed = observe(program, which, max_steps, root, given, Recorder::new, |p, rec, ended| {
-        let mut ran: Vec<(String, u64, u64, u64, u64, u64)> = Vec::new();
+        let mut ran: Vec<(String, u64, u64, u64, u64, u64, u64)> = Vec::new();
         let mut not_run = Vec::new();
         for (f, s) in p.funcs.iter().zip(&rec.funcs) {
             if s.calls == 0 {
                 not_run.push(f.name.clone());
             } else {
-                ran.push((f.name.clone(), s.calls, s.steps, s.self_steps, s.bytes, s.self_bytes));
+                ran.push((f.name.clone(), s.calls, s.steps, s.self_steps, s.bytes, s.self_bytes, s.self_copied));
             }
         }
         // Most expensive first; the name breaks ties so the order never depends on anything else.
         ran.sort_by(|a, b| b.3.cmp(&a.3).then(a.0.cmp(&b.0)));
-        (ran, not_run, rec.steps, rec.bytes, ended)
+        (ran, not_run, rec.steps, rec.bytes, rec.copied, ended)
     });
-    let (funcs, not_run, steps, bytes, ended) = try_report!(observed.map_err(Report::error));
+    let (funcs, not_run, steps, bytes, copied, ended) = try_report!(observed.map_err(Report::error));
     let mut text = format!(
-        "{:>10} {:>10} {:>8} {:>11} {:>11}  function ({run} in {file})\n",
-        "self", "total", "calls", "self bytes", "bytes"
+        "{:>10} {:>10} {:>8} {:>11} {:>11} {:>11}  function ({run} in {file})\n",
+        "self", "total", "calls", "self bytes", "copied", "bytes"
     );
-    for (name, calls, total, own, b, own_b) in &funcs {
-        text.push_str(&format!("{own:>10} {total:>10} {calls:>8} {own_b:>11} {b:>11}  {name}\n"));
+    for (name, calls, total, own, b, own_b, own_c) in &funcs {
+        text.push_str(&format!("{own:>10} {total:>10} {calls:>8} {own_b:>11} {own_c:>11} {b:>11}  {name}\n"));
     }
     text.push_str(&format!("{steps} steps, {bytes} bytes allocated; end: {}\n", ended.text()));
+    if copied > 0 {
+        text.push_str(&format!(
+            "{copied} of those bytes copied values still shared when they changed; a value read \
+             for the last time is moved instead of shared\n"
+        ));
+    }
     if !not_run.is_empty() {
         text.push_str(&format!("not run: {}\n", not_run.join(", ")));
     }
     let functions: Vec<Value> = funcs
         .iter()
-        .map(|(name, calls, total, own, b, own_b)| {
+        .map(|(name, calls, total, own, b, own_b, own_c)| {
             json!({
                 "name": name, "calls": calls, "steps": total, "self_steps": own, "bytes": b, "self_bytes": own_b,
+                "self_copied": own_c,
             })
         })
         .collect();
     let json = json!({
-        "ok": true, "file": file, "run": run, "steps": steps, "bytes": bytes, "functions": functions, "not_run": not_run,
+        "ok": true, "file": file, "run": run, "steps": steps, "bytes": bytes, "copied": copied, "functions": functions,
+        "not_run": not_run,
         "end": ended.to_json(),
     });
     Report::ok(json, text)

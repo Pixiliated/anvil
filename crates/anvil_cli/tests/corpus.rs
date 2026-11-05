@@ -1391,6 +1391,18 @@ fn tail(n: i64) -> str
     return out;
 }
 
+// n ones, each added by a call that is handed the only reference: nothing is copied.
+fn stack(n: i64) -> [i64]
+    requires n >= 0
+    allocs 8 * n
+{
+    var xs: [i64] = [];
+    for _i in 0..n {
+        xs = grow(xs);
+    }
+    return xs;
+}
+
 // n, in one step more than its bound says.
 fn same(n: i64) -> i64
     steps 0
@@ -1399,7 +1411,7 @@ fn same(n: i64) -> i64
 }
 
 test "they work" {
-    assert(grow([2]) == [2, 1] && dashes(3) == "aaa" && tail(3) == "aaa" && same(4) == 4);
+    assert(grow([2]) == [2, 1] && dashes(3) == "aaa" && tail(3) == "aaa" && stack(2) == [1, 1] && same(4) == 4);
 }
 "#,
     );
@@ -1414,6 +1426,10 @@ test "they work" {
     // Appending grows in place: linear, within its bound of three bytes a character.
     assert_eq!(f("tail")["bytes"]["growth"], "linear", "{v}");
     assert_eq!(f("tail")["bytes"]["bound_holds"], true, "{v}");
+    // Handed over on its last read, the array is pushed to in place: linear, not quadratic.
+    assert_eq!(f("stack")["bytes"]["growth"], "linear", "{v}");
+    assert_eq!(f("stack")["bytes"]["suggested"], "allocs 8 * n", "{v}");
+    assert_eq!(f("stack")["bytes"]["bound_holds"], true, "{v}");
     assert_eq!(f("same")["steps"]["bound_holds"], false, "one step past `steps 0`: {v}");
 
     // verify: the allocs bound and the steps bound one step short, each shrunk.
@@ -1437,11 +1453,26 @@ test "they work" {
     );
     let prof = p.json(&["profile", "src/hello.anv"]);
     let row = |name: &str| prof["functions"].as_array().unwrap().iter().find(|f| f["name"] == name).unwrap().clone();
-    // grow copies the shared array (24) and pushes (8); main makes the literal (24) and the
-    // interpolated "4" (1); the format text itself is static.
-    assert_eq!((row("grow")["bytes"].as_u64(), row("grow")["self_bytes"].as_u64()), (Some(32), Some(32)), "{prof}");
-    assert_eq!((row("main")["bytes"].as_u64(), row("main")["self_bytes"].as_u64()), (Some(57), Some(25)), "{prof}");
-    assert_eq!(prof["bytes"], 57, "{prof}");
+    // grow is given main's literal, which nothing else holds, and moves it into ys, so the
+    // push (8) needs no copy; main makes the literal (24) and the interpolated "4" (1); the
+    // format text itself is static.
+    assert_eq!((row("grow")["bytes"].as_u64(), row("grow")["self_bytes"].as_u64()), (Some(8), Some(8)), "{prof}");
+    assert_eq!((row("main")["bytes"].as_u64(), row("main")["self_bytes"].as_u64()), (Some(33), Some(25)), "{prof}");
+    assert_eq!(prof["bytes"], 33, "{prof}");
+    assert_eq!((prof["copied"].as_u64(), row("grow")["self_copied"].as_u64()), (Some(0), Some(0)), "{prof}");
+
+    // Kept by main after the call, xs is shared when grow pushes to it: copied (24), and said so.
+    p.write(
+        "src/hello.anv",
+        "// xs with 1 after it.\nfn grow(xs: [i64]) -> [i64] {\n    var ys: [i64] = xs;\n    ys.push(1);\n    return ys;\n}\n\n\
+         fn main() uses io {\n    let xs: [i64] = [1, 2, 3];\n    let ys: [i64] = grow(xs);\n    print(\"{xs.len()} {ys.len()}\");\n}\n",
+    );
+    let prof = p.json(&["profile", "src/hello.anv"]);
+    let row = |name: &str| prof["functions"].as_array().unwrap().iter().find(|f| f["name"] == name).unwrap().clone();
+    assert_eq!((row("grow")["self_bytes"].as_u64(), row("grow")["self_copied"].as_u64()), (Some(32), Some(24)), "{prof}");
+    assert_eq!(prof["copied"], 24, "{prof}");
+    let text = String::from_utf8_lossy(&p.anvil(&["profile", "src/hello.anv"]).stdout).to_string();
+    assert!(text.contains("24 of those bytes copied values still shared"), "{text}");
 
     // The clauses are ordered after requires and ensures, one of each.
     let code = |text: &str| {

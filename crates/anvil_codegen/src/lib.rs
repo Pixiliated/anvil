@@ -640,6 +640,8 @@ fn mutates(e: &Expr) -> bool {
         | ExprKind::Str(_)
         | ExprKind::Local(_)
         | ExprKind::FnRef(_) => false,
+        // A move empties a local that nothing else in its statement names.
+        ExprKind::Move(_) => false,
         ExprKind::CallValue(callee, es) => mutates(callee) || any(es),
         ExprKind::Bits { l, r, .. } => mutates(l) || mutates(r),
         ExprKind::BitNot(x) => mutates(x),
@@ -1180,6 +1182,17 @@ impl<'a, 'b> Gen<'a, 'b> {
     fn borrow(&mut self, e: &Expr) -> (Vec<Value>, bool) {
         match &e.kind {
             ExprKind::Local(l) => (self.use_local(*l), false),
+            // The last read: the reference is taken from the local, which is left null.
+            ExprKind::Move(l) => {
+                let vals = self.use_local(*l);
+                for (k, s) in self.layouts[*l].clone().into_iter().enumerate() {
+                    if s.heap {
+                        let z = self.zero(s);
+                        self.b.def_var(self.vars[*l][k], z);
+                    }
+                }
+                (vals, true)
+            }
             ExprKind::Field(base, idx) => {
                 let (vals, owned) = self.borrow(base);
                 let Ty::Struct(sid) = base.ty else { unreachable!() };
@@ -1210,7 +1223,7 @@ impl<'a, 'b> Gen<'a, 'b> {
             ExprKind::Bool(v) => vec![self.b.ins().iconst(types::I8, *v as i64)],
             // Static strings are never freed, so the pointer needs no reference.
             ExprKind::Str(s) => vec![self.str_obj(s)],
-            ExprKind::Local(_) | ExprKind::Field(..) => {
+            ExprKind::Local(_) | ExprKind::Move(_) | ExprKind::Field(..) => {
                 let (vals, owned) = self.borrow(e);
                 if !owned {
                     let lay = self.layout(&e.ty);

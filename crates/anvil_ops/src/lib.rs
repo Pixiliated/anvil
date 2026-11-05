@@ -176,7 +176,7 @@ pub const COMMANDS: &[Command] = &[
         name: "profile",
         positionals: &["file", "args*"],
         options: &[("test", "NAME", "profile this test instead of main"), STEPS, INPUT],
-        summary: "calls and steps per function",
+        summary: "calls, steps, bytes allocated and bytes copied per function",
     },
     // Project commands: they find anvil.toml in the current directory or above.
     Command {

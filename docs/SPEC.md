@@ -1,4 +1,4 @@
-# Anvil language specification (v0.30)
+# Anvil language specification (v0.31)
 
 Anvil is a small, compiled, general-purpose language designed to be written mostly by AI agents
 and read by humans. Its rules aim at three things: one obvious way to write each thing, code
@@ -173,6 +173,33 @@ variable or parameter that is never read is an error unless its name starts with
 Assignment (only `var` bindings): `name = value;`, `name.field = value;`,
 `name[i] = value;`, and any chain of these: `shapes[2].points[0].x = 1.0;`.
 
+### Moves
+
+Values are values: passing, storing or returning one never lets a change show through
+another name. Underneath, arrays, maps, text and closures are shared until written, and a
+write to a shared one copies it first. The **last read** of a variable does not share: the
+value **moves** to where it goes, so the receiver may hold the only reference and change it
+in place. A read moves when its statement (`let`, an assignment, an expression statement or
+`return`) names the variable once and nothing reads the variable again before it is next
+written, on any path through loops and branches; what an `ensures` clause reads never moves.
+So a functional update is as cheap as changing the value directly:
+
+```
+fn add(xs: [i64], x: i64) -> [i64] {
+    var ys: [i64] = xs;   // moves: the caller's array, if it was handed over
+    ys.push(x);           // in place
+    return ys;
+}
+
+for i in 0..n {
+    xs = add(xs: xs, x: i);   // linear: xs is handed over and given back
+}
+```
+
+Keep a copy of `xs` (or read it after the call) and each call copies it, as value semantics
+require. Moves change no result, only what is copied: `profile` shows the bytes copied per
+function, and the byte model counts what both backends do.
+
 ## Functions
 
 ```
@@ -314,7 +341,7 @@ native runtime copies:
 | a new array (a literal, a slice, `sorted`, `keys`, ...) | 8 per element |
 | a new map | 16 per entry |
 | `push`; `set` of a new key | 8; 16 |
-| writing into an array or map shared with another value (value semantics copy it first) | 8 or 16 per element copied |
+| writing into an array or map shared with another value (value semantics copy it first; a value read for the last time is not shared, see Moves) | 8 or 16 per element copied |
 | a function literal that captures values | 8 per value |
 | `split`, `chars`, `args`, `list_dir` | the array and each new str in it |
 | `s = s + x` on a str or bytes local that alone holds its text (see Text) | x's length, and all of the text when its room doubles |
@@ -827,7 +854,7 @@ anvil fuzz    [--seed N] [--count N]   random programs on both backends (see bel
 anvil trace   file.anv [--test NAME] [--only F,G] [--limit N] [--input FILE] [-- ARGS...]
                                        a run as a timeline: calls, returns, prints
 anvil profile file.anv [--test NAME] [--input FILE] [-- ARGS...]
-                                       calls, steps and bytes allocated per function
+                                       calls, steps, bytes allocated and copied per function
 anvil cost file.anv [--only NAMES]     how each pure function's steps and bytes grow, and
                                        the steps and allocs bounds that fit
 anvil outline file.anv                 items and signatures, without reading the whole file
@@ -877,7 +904,9 @@ depth; values are written as Anvil source (`2.0[m]`, `Shape.Circle(1.5)`, `Some(
 after 8 elements, 80 string bytes or 200 characters, saying how much was cut. `--only` keeps
 the calls of the named functions (prints are always kept); `--limit` (default 1000) counts the
 events left out. A profile gives, per function, its calls, its steps including callees and its
-own steps. Both count steps, never time, so they give the same answer everywhere; a panic or
+own steps, the bytes it allocated (by the model of `allocs`) and, of its own, those that copied
+a value still shared when it changed (`copied`, `self_copied` in `--json`): the copies a move
+would avoid (see Moves). Both count steps, never time, so they give the same answer everywhere; a panic or
 the step limit ends the run and is reported, not treated as a failure of the command.
 
 ### Projects

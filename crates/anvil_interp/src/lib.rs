@@ -160,25 +160,36 @@ pub struct Interp<'p, 'h> {
     taken: u64,
     /// Bytes allocated so far, by the model of `alloc_bytes`.
     allocated: u64,
+    /// Of those, the bytes copied because a value was still shared when it was changed.
+    copied: u64,
     rec: Option<&'p mut Recorder>,
 }
 
 /// What a run did, for `profile`, `trace` and coverage. Counts are always kept; the timeline only
 /// when `trace` is set. Everything here is deterministic: steps, not time.
 pub struct Recorder {
-    /// Steps the whole run took, and the bytes it allocated (by the model of `made_bytes`).
+    /// Steps the whole run took, the bytes it allocated (by the model of `made_bytes`), and of
+    /// those the bytes it copied because a value was still shared when it was changed.
     pub steps: u64,
     pub bytes: u64,
+    pub copied: u64,
     /// Indexed by FuncId.
     pub funcs: Vec<FuncStats>,
     pub trace: Option<Trace>,
-    /// Active calls: function, steps taken when it began, steps its finished callees took,
-    /// bytes allocated when it began, and bytes its finished callees allocated.
-    stack: Vec<(FuncId, u64, u64, u64, u64)>,
+    /// Active calls, innermost last.
+    stack: Vec<Active>,
     /// Frames of each function on the stack, so recursion counts inclusive steps once.
     active: Vec<u32>,
     /// Runs of each branch, by BranchId.
     pub branches: Vec<u64>,
+}
+
+/// A call in progress: what had been counted when it began (steps, bytes, copied), and what its
+/// finished callees counted since.
+struct Active {
+    func: FuncId,
+    at: [u64; 3],
+    callees: [u64; 3],
 }
 
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -193,6 +204,9 @@ pub struct FuncStats {
     /// its own body.
     pub bytes: u64,
     pub self_bytes: u64,
+    /// Of `self_bytes`, those its own body copied because a value was still shared when it was
+    /// changed (copy on write): what moving the value on its last read would save.
+    pub self_copied: u64,
 }
 
 /// A bounded timeline of calls, returns and prints.
@@ -235,6 +249,7 @@ impl Recorder {
         Recorder {
             steps: 0,
             bytes: 0,
+            copied: 0,
             funcs: vec![FuncStats::default(); n],
             trace: None,
             stack: Vec::new(),
@@ -265,27 +280,31 @@ impl Recorder {
         }
     }
 
-    fn enter(&mut self, func: FuncId, args: &[Value], taken: u64, allocated: u64, depth: usize) {
+    /// `now` is what has been counted so far: steps taken, bytes allocated, bytes copied.
+    fn enter(&mut self, func: FuncId, args: &[Value], now: [u64; 3], depth: usize) {
+        let taken = now[0];
         self.funcs[func].calls += 1;
-        self.stack.push((func, taken, 0, allocated, 0));
+        self.stack.push(Active { func, at: now, callees: [0; 3] });
         self.active[func] += 1;
         self.event(Some(func), || Event::Call { step: taken, depth, func, args: args.to_vec() });
     }
 
-    fn leave(&mut self, result: Option<&Value>, taken: u64, allocated: u64, depth: usize) {
-        let (func, start, callees, alloc_start, callee_bytes) = self.stack.pop().expect("leave without enter");
-        let inclusive = taken - start;
-        let bytes = allocated - alloc_start;
-        self.funcs[func].self_steps += inclusive - callees;
-        self.funcs[func].self_bytes += bytes - callee_bytes;
+    fn leave(&mut self, result: Option<&Value>, now: [u64; 3], depth: usize) {
+        let Active { func, at, callees } = self.stack.pop().expect("leave without enter");
+        let taken = now[0];
+        let inclusive: [u64; 3] = std::array::from_fn(|k| now[k] - at[k]);
+        self.funcs[func].self_steps += inclusive[0] - callees[0];
+        self.funcs[func].self_bytes += inclusive[1] - callees[1];
+        self.funcs[func].self_copied += inclusive[2] - callees[2];
         self.active[func] -= 1;
         if self.active[func] == 0 {
-            self.funcs[func].steps += inclusive;
-            self.funcs[func].bytes += bytes;
+            self.funcs[func].steps += inclusive[0];
+            self.funcs[func].bytes += inclusive[1];
         }
         if let Some(parent) = self.stack.last_mut() {
-            parent.2 += inclusive;
-            parent.4 += bytes;
+            for k in 0..3 {
+                parent.callees[k] += inclusive[k];
+            }
         }
         if let Some(v) = result {
             self.event(Some(func), || Event::Return { step: taken, depth, func, value: v.clone() });
@@ -333,6 +352,7 @@ impl<'p, 'h> Interp<'p, 'h> {
             steps_left: max_steps,
             taken: 0,
             allocated: 0,
+            copied: 0,
             rec,
         }
     }
@@ -837,7 +857,13 @@ fn alloc_bytes(e: &Expr, v: &Value) -> u64 {
 
 /// The value at `path` inside `root`, ready to be changed. Array storage on the way is made
 /// unique first, so other copies of the array never see the change.
-fn place_mut<'v>(mut slot: &'v mut Value, path: &[Step], indices: &[i64], allocated: &mut u64) -> R<&'v mut Value> {
+fn place_mut<'v>(
+    mut slot: &'v mut Value,
+    path: &[Step],
+    indices: &[i64],
+    allocated: &mut u64,
+    copied: &mut u64,
+) -> R<&'v mut Value> {
     let mut next_index = indices.iter();
     for step in path {
         slot = match step {
@@ -849,7 +875,9 @@ fn place_mut<'v>(mut slot: &'v mut Value, path: &[Step], indices: &[i64], alloca
                 let i = *next_index.next().unwrap();
                 match slot {
                     Value::Array(items) => {
-                        *allocated += copy_bytes(items, 8);
+                        let c = copy_bytes(items, 8);
+                        *allocated += c;
+                        *copied += c;
                         let items = Rc::make_mut(items);
                         let len = items.len() as i64;
                         if i < 0 || i >= len {
@@ -882,11 +910,19 @@ impl<'p, 'h> Interp<'p, 'h> {
         let _ = self.out.flush();
         if let Some(r) = &mut self.rec {
             while !r.stack.is_empty() {
-                r.leave(None, self.taken, self.allocated, 0);
+                r.leave(None, [self.taken, self.allocated, self.copied], 0);
             }
             r.steps = self.taken;
             r.bytes = self.allocated;
+            r.copied = self.copied;
         }
+    }
+
+    /// `copy_bytes`, counted as copied too.
+    fn copy_of<T>(&mut self, items: &Rc<Vec<T>>, per: u64) -> u64 {
+        let c = copy_bytes(items, per);
+        self.copied += c;
+        c
     }
 
     fn call(&mut self, fid: FuncId, args: Vec<Value>) -> R<Value> {
@@ -896,11 +932,11 @@ impl<'p, 'h> Interp<'p, 'h> {
         }
         self.depth += 1;
         if let Some(r) = &mut self.rec {
-            r.enter(fid, &args, self.taken, self.allocated, self.depth);
+            r.enter(fid, &args, [self.taken, self.allocated, self.copied], self.depth);
         }
         let result = self.call_body(fid, args);
         if let (Some(r), Ok(v)) = (&mut self.rec, &result) {
-            r.leave(Some(v), self.taken, self.allocated, self.depth);
+            r.leave(Some(v), [self.taken, self.allocated, self.copied], self.depth);
         }
         self.depth -= 1;
         result
@@ -1018,6 +1054,7 @@ impl<'p, 'h> Interp<'p, 'h> {
                     };
                     if !grown {
                         self.allocated += len + k;
+                        self.copied += len;
                         grown = true;
                     } else if len + k + 1 > text_room(len) {
                         self.allocated += len + k;
@@ -1048,7 +1085,7 @@ impl<'p, 'h> Interp<'p, 'h> {
             Stmt::Assign(l, path, e) => {
                 let v = self.eval(e, frame)?;
                 let indices = self.indices(path, frame)?;
-                *place_mut(&mut frame[*l], path, &indices, &mut self.allocated)? = v;
+                *place_mut(&mut frame[*l], path, &indices, &mut self.allocated, &mut self.copied)? = v;
             }
             Stmt::Expr(e) => {
                 self.eval(e, frame)?;
@@ -1125,6 +1162,8 @@ impl<'p, 'h> Interp<'p, 'h> {
             ExprKind::Bool(v) => Value::Bool(*v),
             ExprKind::Str(s) => Value::Str(s.as_str().into()),
             ExprKind::Local(l) => frame[*l].clone(),
+            // The last read: the value is taken, so it may be the only reference.
+            ExprKind::Move(l) => std::mem::replace(&mut frame[*l], Value::Void),
             ExprKind::Field(base, i) => match self.eval(base, frame)? {
                 Value::Struct(mut fields) => fields.swap_remove(*i),
                 v => unreachable!("field of {v:?}"),
@@ -1185,9 +1224,9 @@ impl<'p, 'h> Interp<'p, 'h> {
                 let k = self.eval(key, frame)?;
                 let v = self.eval(value, frame)?;
                 let indices = self.indices(path, frame)?;
-                match place_mut(&mut frame[*local], path, &indices, &mut self.allocated)? {
+                match place_mut(&mut frame[*local], path, &indices, &mut self.allocated, &mut self.copied)? {
                     Value::Map(entries) => {
-                        self.allocated += copy_bytes(entries, 16);
+                        self.allocated += self.copy_of(entries, 16);
                         let entries = Rc::make_mut(entries);
                         match find_key(entries, &k) {
                             Ok(at) => entries[at].1 = v,
@@ -1204,10 +1243,10 @@ impl<'p, 'h> Interp<'p, 'h> {
             ExprKind::MapRemove { local, path, key, missing } => {
                 let k = self.eval(key, frame)?;
                 let indices = self.indices(path, frame)?;
-                match place_mut(&mut frame[*local], path, &indices, &mut self.allocated)? {
+                match place_mut(&mut frame[*local], path, &indices, &mut self.allocated, &mut self.copied)? {
                     Value::Map(entries) => match find_key(entries, &k) {
                         Ok(at) => {
-                            self.allocated += copy_bytes(entries, 16);
+                            self.allocated += self.copy_of(entries, 16);
                             Rc::make_mut(entries).remove(at);
                         }
                         Err(_) => return panic(missing.clone()),
@@ -1248,9 +1287,9 @@ impl<'p, 'h> Interp<'p, 'h> {
             ExprKind::Push { local, path, value } => {
                 let v = self.eval(value, frame)?;
                 let indices = self.indices(path, frame)?;
-                match place_mut(&mut frame[*local], path, &indices, &mut self.allocated)? {
+                match place_mut(&mut frame[*local], path, &indices, &mut self.allocated, &mut self.copied)? {
                     Value::Array(items) => {
-                        self.allocated += copy_bytes(items, 8) + 8;
+                        self.allocated += self.copy_of(items, 8) + 8;
                         Rc::make_mut(items).push(v);
                     }
                     other => unreachable!("push to {other:?}"),
@@ -1259,9 +1298,9 @@ impl<'p, 'h> Interp<'p, 'h> {
             }
             ExprKind::Pop { local, path, message } => {
                 let indices = self.indices(path, frame)?;
-                match place_mut(&mut frame[*local], path, &indices, &mut self.allocated)? {
+                match place_mut(&mut frame[*local], path, &indices, &mut self.allocated, &mut self.copied)? {
                     Value::Array(items) => match {
-                        self.allocated += copy_bytes(items, 8);
+                        self.allocated += self.copy_of(items, 8);
                         Rc::make_mut(items).pop()
                     } {
                         Some(v) => v,
