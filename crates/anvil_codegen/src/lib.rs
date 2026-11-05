@@ -93,6 +93,7 @@ const RUNTIME: &[(&str, &[Type], &[Type])] = &[
     ("anvil_retain", &[I], &[]),
     ("anvil_release", &[I], &[]),
     ("anvil_str_concat", &[I, I], &[I]),
+    ("anvil_str_append", &[I, I], &[I]),
     ("anvil_str_cmp", &[I, I], &[I]),
     ("anvil_str_from_i64", &[I], &[I]),
     ("anvil_str_from_f64", &[types::F64], &[I]),
@@ -914,6 +915,17 @@ impl<'a, 'b> Gen<'a, 'b> {
             Stmt::Let(l, e) => {
                 let vals = self.expr(e);
                 self.store_local(*l, 0, &vals);
+            }
+            // `s = s + a + b`: appended in place (see ir::append_parts); each append consumes the
+            // local's reference and gives back the text's new one.
+            Stmt::Assign(l, path, e) if path.is_empty() && append_parts(*l, e).is_some() => {
+                let var = self.vars[*l][0];
+                for part in append_parts(*l, e).unwrap() {
+                    let v = self.expr(part)[0];
+                    let cur = self.b.use_var(var);
+                    let next = self.call_rt("anvil_str_append", &[cur, v]).unwrap();
+                    self.b.def_var(var, next);
+                }
             }
             Stmt::Assign(l, path, e) => {
                 let vals = self.expr(e);

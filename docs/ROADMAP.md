@@ -205,3 +205,13 @@ green and the interpreter and native backend agreeing on every program in `tests
 - [x] The standard library's text functions made linear in memory: `repeat` (2,259,840 bytes at
   its costliest call, now 16,640), `pad_left` and `pad_right` (quadratic in width), `words`
   (a str per character); their bounds approved as part of their APIs
+
+## M29: In-place text building (v0.30)
+- [x] `s = s + a + b` on a str or bytes local whose parts do not read it appends in place while
+  the local holds the only reference: growable text in the runtime (room that doubles), one
+  rule (`ir::append_parts`) for both backends; shared text is copied first
+- [x] The byte model counts appends as the runtime does, so `profile`, `cost` and `allocs` stay
+  true; prepending is still quadratic, and is the example of repeated copying
+- [x] A corpus program for aliasing, sharing, self-reference, chains and bytes; the fuzzer
+  appends; building 400,000 characters natively takes 12.3 s by copying and well under 0.1 s
+  by appending

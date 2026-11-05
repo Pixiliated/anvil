@@ -996,6 +996,55 @@ impl<'p, 'h> Interp<'p, 'h> {
             Stmt::Let(l, e) => {
                 frame[*l] = self.eval(e, frame)?;
             }
+            // `s = s + a + b`: the same text as concatenating, counted as the native append is.
+            Stmt::Assign(l, path, e) if path.is_empty() && append_parts(*l, e).is_some() => {
+                let mut parts = Vec::new();
+                for p in append_parts(*l, e).unwrap() {
+                    parts.push(self.eval(p, frame)?);
+                }
+                let (unique, old_len) = match &frame[*l] {
+                    Value::Str(s) => (Rc::strong_count(s) == 1, s.len() as u64),
+                    Value::Bytes(b) => (Rc::strong_count(b) == 1, b.len() as u64),
+                    other => unreachable!("append to {other:?}"),
+                };
+                let mut len = old_len;
+                // Shared text is copied first, into new room; text the local alone holds grows in place.
+                let mut grown = unique;
+                for p in &parts {
+                    let k = match p {
+                        Value::Str(s) => s.len() as u64,
+                        Value::Bytes(b) => b.len() as u64,
+                        other => unreachable!("append of {other:?}"),
+                    };
+                    if !grown {
+                        self.allocated += len + k;
+                        grown = true;
+                    } else if len + k + 1 > text_room(len) {
+                        self.allocated += len + k;
+                    } else {
+                        self.allocated += k;
+                    }
+                    len += k;
+                }
+                frame[*l] = match &frame[*l] {
+                    Value::Bytes(b) => {
+                        let mut all = b.to_vec();
+                        for p in &parts {
+                            if let Value::Bytes(x) = p {
+                                all.extend_from_slice(x);
+                            }
+                        }
+                        Value::Bytes(all.into())
+                    }
+                    old => {
+                        let mut all = old.as_str().to_string();
+                        for p in &parts {
+                            all.push_str(p.as_str());
+                        }
+                        Value::Str(all.into())
+                    }
+                };
+            }
             Stmt::Assign(l, path, e) => {
                 let v = self.eval(e, frame)?;
                 let indices = self.indices(path, frame)?;

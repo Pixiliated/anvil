@@ -608,6 +608,74 @@ pub enum ExprKind {
     Builtin(Builtin, Vec<Expr>),
 }
 
+/// Whether evaluating `e` reads or writes local `l` anywhere (function literals' bodies are
+/// functions of their own; what they captured is read where the literal is).
+pub fn uses_local(e: &Expr, l: LocalId) -> bool {
+    let any = |es: &[Expr]| es.iter().any(|x| uses_local(x, l));
+    let path = |p: &[Step]| p.iter().any(|s| matches!(s, Step::Index { index, .. } if uses_local(index, l)));
+    match &e.kind {
+        ExprKind::Local(x) => *x == l,
+        ExprKind::Int(_) | ExprKind::Float(_) | ExprKind::Bool(_) | ExprKind::Str(_) | ExprKind::FnRef(_) => false,
+        ExprKind::Push { local, path: p, value } => *local == l || path(p) || uses_local(value, l),
+        ExprKind::Pop { local, path: p, .. } => *local == l || path(p),
+        ExprKind::MapSet { local, path: p, key, value } => {
+            *local == l || path(p) || uses_local(key, l) || uses_local(value, l)
+        }
+        ExprKind::MapRemove { local, path: p, key, .. } => *local == l || path(p) || uses_local(key, l),
+        ExprKind::Slice { base, from, to, .. } => uses_local(base, l) || uses_local(from, l) || uses_local(to, l),
+        ExprKind::MapLit { entries, .. } => entries.iter().any(|(k, v)| uses_local(k, l) || uses_local(v, l)),
+        ExprKind::CallValue(callee, es) => uses_local(callee, l) || any(es),
+        ExprKind::Bits { l: a, r: b, .. }
+        | ExprKind::IArith { l: a, r: b, .. }
+        | ExprKind::FArith(_, a, b)
+        | ExprKind::Cmp(_, a, b)
+        | ExprKind::And(a, b)
+        | ExprKind::Or(a, b)
+        | ExprKind::StrConcat(a, b)
+        | ExprKind::Index { base: a, index: b, .. } => uses_local(a, l) || uses_local(b, l),
+        ExprKind::BitNot(x) | ExprKind::Field(x, _) | ExprKind::Not(x) | ExprKind::FNeg(x) | ExprKind::INeg { e: x, .. } => {
+            uses_local(x, l)
+        }
+        ExprKind::Try { held, inner, .. } => *held == l || uses_local(inner, l),
+        ExprKind::Closure { captures: es, .. }
+        | ExprKind::Call(_, es)
+        | ExprKind::StructLit(_, es)
+        | ExprKind::ArrayLit(es)
+        | ExprKind::Interp(es)
+        | ExprKind::Builtin(_, es)
+        | ExprKind::Variant { fields: es, .. } => any(es),
+    }
+}
+
+/// `l = l + a + b + ...` on a str or bytes local, where no part reads `l`: the parts to append,
+/// in order. Both backends append them in place when `l` holds the only reference to its text,
+/// which grows into room that doubles, so building text this way is linear, not quadratic.
+pub fn append_parts(l: LocalId, e: &Expr) -> Option<Vec<&Expr>> {
+    let mut parts = Vec::new();
+    let mut cur = e;
+    loop {
+        match &cur.kind {
+            ExprKind::StrConcat(left, right) => {
+                parts.push(&**right);
+                cur = left;
+            }
+            ExprKind::Local(x) if *x == l && !parts.is_empty() => break,
+            _ => return None,
+        }
+    }
+    parts.reverse();
+    if parts.iter().any(|p| uses_local(p, l)) {
+        return None;
+    }
+    Some(parts)
+}
+
+/// The room text of `len` bytes has to grow into when it is appended to in place: a power of two
+/// above it, at least 16. Mirrors `text_room` in the C runtime.
+pub fn text_room(len: u64) -> u64 {
+    (len + 1).next_power_of_two().max(16)
+}
+
 // ---- shared runtime semantics: both backends must use these ----
 
 pub const PANIC_EXIT_CODE: i32 = 101;

@@ -1,0 +1,63 @@
+// Building text with `s = s + x`: the text grows in place while the local holds the only
+// reference to it, and is copied first whenever anything else shares it, so values never change
+// under anyone's feet.
+
+fn dashes(n: i64) -> str {
+    var out: str = "";
+    for _i in 0..n {
+        out = out + "-";
+    }
+    return out;
+}
+
+fn hex(xs: [i64]) -> bytes {
+    let none: [i64] = [];
+    var out: bytes = bytes_of(none);
+    for x in xs {
+        out = out + bytes_of([x]);
+    }
+    return out;
+}
+
+fn main() uses io {
+    // A long one: linear natively, as each append fills room that doubles.
+    let long: str = dashes(100000);
+    print("long: {long.len()} {long[99990..100000]}");
+
+    // A copy taken before an append keeps its text.
+    var s: str = "ab";
+    s = s + "c";
+    let kept: str = s;
+    s = s + "d";
+    print("aliased: {kept} {s}");
+
+    // Text in an array is shared with it, so appending copies.
+    var t: str = "x";
+    t = t + "y";
+    let parts: [str] = [t, t];
+    t = t + "z";
+    print("in an array: {parts.join(",")} {t}");
+
+    // Parts that read the local itself use its old text.
+    var u: str = "ha";
+    u = u + u;
+    u = u + "-" + u;
+    print("self: {u}");
+
+    // A chain appends each part in order; interpolation is a part like any other.
+    var v: str = "1";
+    let n: i64 = 2;
+    v = v + "+" + "{n}" + "=" + "{1 + n}";
+    print("chain: {v}");
+
+    // Bytes grow the same way.
+    let b: bytes = hex([104, 105, 33]);
+    print("bytes: {b.hex()} {b.len()}");
+
+    // Many small appends in a loop, checked against a count.
+    var w: str = "";
+    for i in 0..500 {
+        w = w + "{i % 10}";
+    }
+    print("digits: {w.len()} {w[0..12]} {w[488..500]}");
+}

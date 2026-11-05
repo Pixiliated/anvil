@@ -3,6 +3,12 @@
 Each version is one roadmap milestone (docs/ROADMAP.md); docs/DECISIONS.md says why things are
 the way they are.
 
+## 0.30.0
+- `s = s + x` (and `s = s + a + b`) on a str or bytes local appends in place while the local
+  holds the only reference: building text is linear in time and memory, in both backends.
+  Building 400,000 characters natively went from 12.3 s to under 0.1 s.
+- The byte model counts appends as the runtime does.
+
 ## 0.29.0
 - Memory: the interpreter counts bytes allocated by a fixed model; `profile` shows each
   function's bytes, `cost` fits them and suggests `allocs` clauses, and `allocs EXPR` bounds a

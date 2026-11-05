@@ -83,9 +83,9 @@ in full (`anvil spec` prints it).
 
 ## Status
 
-v0.29: programs of one or more files (modules with explicit imports and `pub`), generic
+v0.30: programs of one or more files (modules with explicit imports and `pub`), generic
 functions, structs and enums with built-in constraints, i64, f64 with units, bool, strings with interpolation,
-search and split, growable arrays and slices, maps in key order, structs, enums with
+search and split (`s = s + x` appends in place, so building text is linear), growable arrays and slices, maps in key order, structs, enums with
 exhaustive `match`, structural `==`, `Option` and `Result` with `?`, function values and
 closures, methods and interfaces, bytes and bit operations, deterministic parallel work
 (`parallel_map`), built-ins for text,

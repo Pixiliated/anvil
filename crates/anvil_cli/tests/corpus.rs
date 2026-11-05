@@ -1367,10 +1367,22 @@ fn grow(xs: [i64]) -> [i64]
     return ys;
 }
 
-// "a" n times, one concatenation at a time: each copies all that came before.
+// "a" n times, each put before all that came before: each copies it all.
 fn dashes(n: i64) -> str
     requires n >= 0
     allocs 2 * n
+{
+    var out: str = "";
+    for _i in 0..n {
+        out = "a" + out;
+    }
+    return out;
+}
+
+// "a" n times, each put after: the text grows in place into room that doubles.
+fn tail(n: i64) -> str
+    requires n >= 0
+    allocs 3 * n
 {
     var out: str = "";
     for _i in 0..n {
@@ -1387,7 +1399,7 @@ fn same(n: i64) -> i64
 }
 
 test "they work" {
-    assert(grow([2]) == [2, 1] && dashes(3) == "aaa" && same(4) == 4);
+    assert(grow([2]) == [2, 1] && dashes(3) == "aaa" && tail(3) == "aaa" && same(4) == 4);
 }
 "#,
     );
@@ -1399,6 +1411,9 @@ test "they work" {
     assert_eq!(f("dashes")["bytes"]["growth"], "quadratic", "{v}");
     assert_eq!(f("dashes")["bytes"]["suggested"], "allocs n * (n + 1) / 2", "{v}");
     assert_eq!(f("dashes")["bytes"]["bound_holds"], false, "{v}");
+    // Appending grows in place: linear, within its bound of three bytes a character.
+    assert_eq!(f("tail")["bytes"]["growth"], "linear", "{v}");
+    assert_eq!(f("tail")["bytes"]["bound_holds"], true, "{v}");
     assert_eq!(f("same")["steps"]["bound_holds"], false, "one step past `steps 0`: {v}");
 
     // verify: the allocs bound and the steps bound one step short, each shrunk.

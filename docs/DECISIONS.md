@@ -522,3 +522,18 @@ Short records of choices that are not obvious from the code. Newest last.
   round; it and the padding functions now join once and `words` slices once per word, with
   `allocs` bounds and API goldens so they stay linear. Measuring also found that a call one
   step over its `steps` bound was let through; it is now a finding.
+
+## M29 (v0.30)
+
+- **Fix the common case in the language, not in every program**: `s = s + x` in a loop is the
+  first thing anyone writes to build text, and it was quadratic. It now appends in place, so the
+  obvious program is also the efficient one; rewriting it with `join` is no longer needed.
+- **Only when nobody can tell**: the text grows in place only while the local holds the only
+  reference (the runtime's count is 1) and no part reads the local, so value semantics hold
+  exactly; anything shared is copied first, as before.
+- **Room doubles, kept in the object's kind**: growable text is a kind of its own, sized to a
+  power of two above its length, so the room is known from the length alone and no field is
+  added to every str; everything else treats it as a str.
+- **One rule, two backends, one model**: `ir::append_parts` decides for the interpreter and the
+  native code alike, and the byte model counts what the runtime does, so the tools' numbers
+  stay true after the optimization.

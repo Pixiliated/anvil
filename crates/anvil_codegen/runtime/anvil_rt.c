@@ -58,7 +58,9 @@ static int64_t atomic_cas(int64_t *p, int64_t expected, int64_t desired) {
 #define ANVIL_PANIC_EXIT 101
 #define ANVIL_RUNTIME_ERROR_EXIT 70
 
-enum { KIND_STR = 0, KIND_ARR = 1, KIND_FN = 2 };
+/* KIND_TEXT: a str or bytes allocated with room to grow (text_room), which an append to the only
+ * reference fills in place. It is a str like any other everywhere else. */
+enum { KIND_STR = 0, KIND_ARR = 1, KIND_FN = 2, KIND_TEXT = 3 };
 
 typedef struct {
     int64_t rc;
@@ -180,6 +182,40 @@ static AnvStr *str_new(int64_t len) {
 static AnvStr *str_from(const char *p, int64_t len) {
     AnvStr *s = str_new(len);
     memcpy(s->bytes, p, (size_t)len);
+    return s;
+}
+
+/* The room text of `len` bytes grows into: a power of two above it, at least 16; mirrors
+ * ir::text_room. */
+static int64_t text_room(int64_t len) {
+    int64_t room = 16;
+    while (room < len + 1) room *= 2;
+    return room;
+}
+
+/* `s = s + b` (both backends: ir::append_parts): takes the local's reference to `a` and the
+ * reference to `b`. When `a` is the only reference and has room, b is copied onto its end;
+ * when it lacks room, it doubles (realloc). Otherwise `a` is shared (or static, or was never
+ * grown), so its text is copied into new growable text first: value semantics. */
+AnvStr *anvil_str_append(AnvStr *a, AnvStr *b) {
+    int64_t len = a->len + b->len;
+    AnvStr *s;
+    if (a->rc == 1 && a->kind == KIND_TEXT) {
+        s = len + 1 > text_room(a->len) ? realloc(a, sizeof(AnvStr) + (size_t)text_room(len)) : a;
+        if (!s) runtime_error("out of memory");
+    } else {
+        s = xmalloc(sizeof(AnvStr) + (size_t)text_room(len));
+        s->rc = 1;
+        s->kind = KIND_TEXT;
+        s->len = a->len;
+        memcpy(s->bytes, a->bytes, (size_t)a->len);
+        ATOMIC_ADD(&live_objects, 1);
+        anvil_release((AnvObj *)a);
+    }
+    memcpy(s->bytes + s->len, b->bytes, (size_t)b->len);
+    s->len = len;
+    s->bytes[len] = 0;
+    anvil_release((AnvObj *)b);
     return s;
 }
 
@@ -1074,7 +1110,7 @@ AnvArr *anvil_arr_sorted(const AnvArr *a, int64_t kind, const AnvStr *message) {
 /* A copy sharing nothing with `o` (static objects are shared: they never change). */
 static AnvObj *deep_copy(AnvObj *o) {
     if (!o || o->rc < 0) return o;
-    if (o->kind == KIND_STR) {
+    if (o->kind == KIND_STR || o->kind == KIND_TEXT) {
         const AnvStr *s = (const AnvStr *)o;
         return (AnvObj *)str_from(s->bytes, s->len);
     }

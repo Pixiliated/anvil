@@ -1,0 +1,9 @@
+exit: 0
+---
+long: 100000 ----------
+aliased: abc abcd
+in an array: xy,xy xyz
+self: haha-haha
+chain: 1+2=3
+bytes: 686921 3
+digits: 500 012345678901 890123456789

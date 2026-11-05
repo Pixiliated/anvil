@@ -1,4 +1,4 @@
-# Anvil language specification (v0.29)
+# Anvil language specification (v0.30)
 
 Anvil is a small, compiled, general-purpose language designed to be written mostly by AI agents
 and read by humans. Its rules aim at three things: one obvious way to write each thing, code
@@ -317,10 +317,11 @@ native runtime copies:
 | writing into an array or map shared with another value (value semantics copy it first) | 8 or 16 per element copied |
 | a function literal that captures values | 8 per value |
 | `split`, `chars`, `args`, `list_dir` | the array and each new str in it |
+| `s = s + x` on a str or bytes local that alone holds its text (see Text) | x's length, and all of the text when its room doubles |
 
 Literal text is static and costs nothing; Options, Results and structs are held inline, so only
-what they hold counts. `s = s + x` in a loop copies all of `s` each round, so its bytes grow with
-the square of the length: `cost` shows it, and `allocs` makes the fix stick.
+what they hold counts. `s = "-" + s` in a loop copies all of `s` each round, so its bytes grow
+with the square of the length: `cost` shows it, and `allocs` makes the fix stick.
 
 A contract is also checked without any test: `verify` calls each pure function that has one on
 generated arguments (the `contract` lint, under Projects).
@@ -472,6 +473,17 @@ Each `{...}` holds one expression of type `i64`, `f64`, `bool` or `str` and inse
 (the same text `print` writes). The expression must close on the same line and contain no
 braces; it may contain other strings (`"{greet("Ada")}"`). Write `{{` and `}}` for literal
 braces. Escapes: `\n \r \t \" \\`.
+
+### Building text
+
+`s = s + x`, or a chain `s = s + a + b + ...`, on a str or bytes local, when no part reads `s`
+itself, **appends in place**: while `s` holds the only reference to its text, the text grows into
+room that doubles (a power of two above its length, at least 16 bytes), so building text this way
+takes time and memory linear in its length, in both backends. Text anything else shares (a copy
+kept in another variable, an array or a struct, or a literal) is copied first, so no other value
+ever changes; a part that reads `s` (`s = s + s`) is evaluated with the old text, as everywhere
+else. Prepending (`s = x + s`), or interpolating `s` into itself, copies: build a list of parts
+and `join` them instead.
 
 ## Bytes
 
