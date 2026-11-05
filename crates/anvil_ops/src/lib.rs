@@ -15,6 +15,7 @@ pub(crate) mod proj;
 pub mod project;
 mod query;
 mod testing;
+mod usage;
 
 pub use api::{api, api_approve};
 pub use cost::cost;
@@ -29,6 +30,7 @@ pub use proj::{
 };
 pub use query::{complete_in, refs_in, type_at_in};
 pub use testing::{test, PROPERTY_CASES};
+pub use usage::{usage, usage_approve};
 
 use anvil_front::diag::{self, Diagnostic, FixKind};
 use anvil_front::ir::{Program, PANIC_EXIT_CODE};
@@ -217,6 +219,18 @@ pub const COMMANDS: &[Command] = &[
         positionals: &["file"],
         options: &[],
         summary: "store a file's current public API as approved (look at the changes first)",
+    },
+    Command {
+        name: "usage",
+        positionals: &["file?"],
+        options: &[STEPS],
+        summary: "the steps, bytes and copied bytes of each run (main, each test) against the approved ones; any growth fails",
+    },
+    Command {
+        name: "usage approve",
+        positionals: &["file?"],
+        options: &[STEPS],
+        summary: "store a file's usage (every project file's that changed) as approved (look at the changes first)",
     },
     Command {
         name: "golden check",

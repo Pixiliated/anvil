@@ -162,6 +162,8 @@ fn dispatch(p: &Parsed) -> Result<Report, String> {
         "mutate" => anvil_ops::mutate(root, file, text("only"), steps),
         "api" => anvil_ops::api(root, pos(0)),
         "api approve" => anvil_ops::api_approve(root, file),
+        "usage" => anvil_ops::usage(root, pos(0), steps),
+        "usage approve" => anvil_ops::usage_approve(root, pos(0), steps),
         "golden check" => anvil_ops::golden_check(root, pos(0), native, steps),
         "golden approve" => anvil_ops::golden_approve(root, file, steps),
         "record query" => anvil_ops::record_query(root, pos(0), p.options.contains_key("open")),

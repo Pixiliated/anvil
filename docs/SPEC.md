@@ -1,4 +1,4 @@
-# Anvil language specification (v0.34)
+# Anvil language specification (v0.35)
 
 Anvil is a small, compiled, general-purpose language designed to be written mostly by AI agents
 and read by humans. Its rules aim at three things: one obvious way to write each thing, code
@@ -957,6 +957,9 @@ anvil golden check [FILE] [--native]        compare output with approved goldens
 anvil golden approve FILE                   approve a program's current output
 anvil api [FILE]                            public APIs against their approved ones
 anvil api approve FILE                      approve a file's current public API
+anvil usage [FILE]                          each run's steps, bytes and copies against the
+                                            approved ones; any growth fails
+anvil usage approve [FILE]                  approve a file's usage (or every changed one)
 anvil verify [--native]                     check, test and golden-check every file;
                                             store the findings in the record
 anvil review [--native]                     verify, then write out/review.md for sign-off
@@ -993,6 +996,18 @@ difference, naming the project files whose programs include the file when the ch
 them (they need not compile any more), and a file with pub items but no approved API. `anvil
 api approve FILE` stores the current API after its changes have been read, and removes the
 approved file when no pub items are left.
+
+A file's **usage** is approved too, in `golden/<file>.usage`: one line per run, `main` under its
+golden's input and each test (`test "name"`, every case of a property test together), with the
+steps it takes, the bytes it allocates and the bytes it copies, as the interpreter counts them
+(see Memory and Moves). The counts are the same on every machine, so a difference is a change to
+the program or to the compiler. `anvil usage` lists each file's runs against the approved ones:
+**more** of anything, a run not approved yet, or an approved run that no longer runs fails, and
+`verify` reports each; **less** is listed but passes, to be approved so the gain is kept. A
+failing test, or a main whose golden does not match, is not measured (it is a finding of its
+own). `anvil usage approve FILE` stores the current numbers after the changes have been read;
+without a file it does so for every file whose usage changed, skipping those that cannot be
+measured.
 
 **Lints** are checks `verify` makes beyond type errors. Each counts what the project's tests
 and golden-checked `main`s run, in the interpreter, across every project file (a module is

@@ -293,6 +293,19 @@ fn verify_file(
     if let Some(c) = &g.counts {
         mark_ran(&mut ran, &mut reached, c);
     }
+    // What each run takes, against its approved usage.
+    let usage = match crate::usage::check(project, file, crate::usage::measured(&results, (g.status, g.counts.as_ref()))) {
+        Ok(u) => {
+            for m in u.findings() {
+                add("usage", m, String::new());
+            }
+            u.status
+        }
+        Err(e) => {
+            add("usage", e, String::new());
+            "error"
+        }
+    };
     // main runs only under its golden, and a missing golden is already a finding.
     let main = g.status != "no_main";
     let key = |f: &anvil_front::ir::Func| (modules[f.module].clone(), f.span.start);
@@ -342,7 +355,7 @@ fn verify_file(
     let steps = g.counts.as_ref().map(|c| c.steps);
     let json = json!({
         "file": file, "errors": 0, "tests": tests.len(), "tests_failed": test_failures, "golden": g.status,
-        "steps": steps, "untested": [], "unreached": [], "contracts": contracts,
+        "steps": steps, "usage": usage, "untested": [], "unreached": [], "contracts": contracts,
     });
     (json, Some(Coverage { file: file.to_string(), own, ran, branches: own_branches, reached, modules: modules.clone() }))
 }

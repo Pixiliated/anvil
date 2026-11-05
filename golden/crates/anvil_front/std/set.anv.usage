@@ -1,0 +1,9 @@
+test "a set holds each value once, in order": 42 steps, 288 bytes, 96 copied
+test "union, intersection and difference": 56 steps, 440 bytes, 48 copied
+test "a set of an array has its distinct values": 2580 steps, 5712 bytes, 0 copied
+test "example of set_of on line 9": 11 steps, 88 bytes, 0 copied
+test "example of Set.has on line 20": 13 steps, 48 bytes, 0 copied
+test "example of Set.add on line 26": 10 steps, 72 bytes, 0 copied
+test "example of Set.len on line 45": 11 steps, 56 bytes, 0 copied
+test "example of Set.union on line 56": 23 steps, 176 bytes, 0 copied
+test "example of Set.intersection on line 67": 24 steps, 144 bytes, 0 copied

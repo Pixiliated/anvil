@@ -35,6 +35,9 @@ pub(crate) struct Ran {
     pub inputs: Option<String>,
     pub case: Option<u64>,
     pub shrinks: u64,
+    /// Steps, bytes allocated and bytes copied, over all of its runs (counted when a recorder
+    /// was given).
+    pub usage: [u64; 3],
 }
 
 /// Runs every test of `program` in the interpreter: plain tests once, property tests on `cases`
@@ -60,7 +63,9 @@ pub(crate) fn run_all(
             inputs: None,
             case: None,
             shrinks: 0,
+            usage: [0; 3],
         };
+        let before = rec.as_ref().map_or([0; 3], |r| r.totals);
         if t.inputs.is_empty() {
             let mut buf = Vec::new();
             let mut err = Vec::new();
@@ -94,6 +99,9 @@ pub(crate) fn run_all(
                     ran.shrinks = shrinks;
                 }
             }
+        }
+        if let Some(r) = &rec {
+            ran.usage = std::array::from_fn(|k| r.totals[k] - before[k]);
         }
         out.push(ran);
     }

@@ -1,0 +1,17 @@
+test "map, keep and fold": 51 steps, 132 bytes, 0 copied
+test "any, all, count and first_where": 62 steps, 112 bytes, 0 copied
+test "index_of, contains and unique": 71 steps, 152 bytes, 0 copied
+test "sorting is stable": 171 steps, 408 bytes, 0 copied
+test "sort_by sorts": 7471 steps, 16264 bytes, 0 copied
+test "min and max by key": 94 steps, 136 bytes, 0 copied
+test "sum, range, concat, flatten and chunks": 72 steps, 360 bytes, 0 copied
+test "example of map on line 5": 10 steps, 48 bytes, 0 copied
+test "example of keep on line 15": 18 steps, 64 bytes, 0 copied
+test "example of fold on line 27": 13 steps, 24 bytes, 0 copied
+test "example of any on line 37": 9 steps, 16 bytes, 0 copied
+test "example of all on line 48": 9 steps, 16 bytes, 0 copied
+test "example of count on line 59": 15 steps, 24 bytes, 0 copied
+test "example of contains on line 91": 15 steps, 32 bytes, 0 copied
+test "example of sum on line 164": 10 steps, 24 bytes, 0 copied
+test "example of concat on line 185": 8 steps, 64 bytes, 0 copied
+test "example of flatten on line 197": 16 steps, 96 bytes, 0 copied

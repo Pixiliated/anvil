@@ -1,0 +1,6 @@
+main: 45 steps, 129 bytes, 0 copied
+test "reverse twice gives back the input": 3096 steps, 5856 bytes, 0 copied
+test "sort orders and keeps the length": 11311 steps, 16560 bytes, 0 copied
+test "flipping twice is no change": 300 steps, 0 bytes, 0 copied
+test "a set key reads back": 400 steps, 6160 bytes, 4608 copied
+test "an unsorted array is not sorted": 5 steps, 16 bytes, 0 copied

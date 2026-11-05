@@ -1,0 +1,4 @@
+test "padding counts characters": 106 steps, 43 bytes, 0 copied
+test "repeat": 13 steps, 30 bytes, 0 copied
+test "lines and words": 247 steps, 397 bytes, 0 copied
+test "joining lines gives the text back": 4123 steps, 13188 bytes, 0 copied

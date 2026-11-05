@@ -224,6 +224,8 @@ pub struct Recorder {
     pub steps: u64,
     pub bytes: u64,
     pub copied: u64,
+    /// The same, summed over every run the recorder counted (each case of a property test).
+    pub totals: [u64; 3],
     /// Indexed by FuncId.
     pub funcs: Vec<FuncStats>,
     pub trace: Option<Trace>,
@@ -320,6 +322,7 @@ impl Recorder {
             steps: 0,
             bytes: 0,
             copied: 0,
+            totals: [0; 3],
             funcs: vec![FuncStats::default(); n],
             trace: None,
             stack: Vec::new(),
@@ -1007,6 +1010,9 @@ impl<'p, 'h> Interp<'p, 'h> {
             r.steps = self.taken;
             r.bytes = self.allocated;
             r.copied = self.copied;
+            for (t, n) in r.totals.iter_mut().zip([self.taken, self.allocated, self.copied]) {
+                *t += n;
+            }
         }
     }
 

@@ -1,0 +1,7 @@
+test "min, max and clamp": 22 steps, 0 bytes, 0 copied
+test "pow, gcd and sign": 932 steps, 0 bytes, 0 copied
+test "floor, ceil and round": 145 steps, 0 bytes, 0 copied
+test "floor and ceil are within one of x": 1800 steps, 0 bytes, 0 copied
+test "pow agrees with repeated multiplication": 2753 steps, 0 bytes, 0 copied
+test "example of min on line 4": 3 steps, 0 bytes, 0 copied
+test "example of max on line 14": 3 steps, 0 bytes, 0 copied

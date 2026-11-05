@@ -229,6 +229,15 @@ pub struct ProfileArgs {
 
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
+pub struct UsageArgs {
+    /// A project file, relative to the server's root; without it, every project file.
+    pub file: Option<String>,
+    /// Stop each run after this many statements and loop iterations (default 100000000).
+    pub max_steps: Option<u64>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct GoldenCheckArgs {
     /// One project file to check; leave it out to check them all.
     pub file: Option<String>,
@@ -494,6 +503,21 @@ impl AnvilServer {
         break the files that use them.")]
     async fn api_approve(&self, Parameters(a): Parameters<FileArgs>) -> Result<CallToolResult, ErrorData> {
         self.op(move |root| anvil_ops::api_approve(root, &a.file)).await
+    }
+
+    #[tool(description = "What each run of a file takes (main under its golden's input, and each test): \
+        steps, bytes allocated and bytes copied, by the interpreter's deterministic count, compared \
+        with the approved numbers (golden/FILE.usage). More than approved, a run not approved yet or \
+        one that no longer runs is a tool error; less is listed, to approve so the gain is kept.")]
+    async fn usage(&self, Parameters(a): Parameters<UsageArgs>) -> Result<CallToolResult, ErrorData> {
+        self.op(move |root| anvil_ops::usage(root, a.file.as_deref(), Some(steps(a.max_steps)))).await
+    }
+
+    #[tool(description = "Store a file's current usage as approved (golden/FILE.usage); without a file, \
+        every project file whose usage changed. Returns the differences from what was approved \
+        before: look at them first. Refused while a test fails or main's golden does not match.")]
+    async fn usage_approve(&self, Parameters(a): Parameters<UsageArgs>) -> Result<CallToolResult, ErrorData> {
+        self.op(move |root| anvil_ops::usage_approve(root, a.file.as_deref(), Some(steps(a.max_steps)))).await
     }
 
     #[tool(description = "Mutation testing: change one thing at a time in the file's functions (an \

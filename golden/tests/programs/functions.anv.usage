@@ -1,0 +1,2 @@
+main: 460 steps, 820 bytes, 48 copied
+test "a closure keeps what it captured": 16 steps, 56 bytes, 0 copied

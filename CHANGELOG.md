@@ -3,6 +3,11 @@
 Each version is one roadmap milestone (docs/ROADMAP.md); docs/DECISIONS.md says why things are
 the way they are.
 
+## 0.35.0
+- `anvil usage` and `anvil usage approve`: each run's steps, bytes and copied bytes (main, each
+  test) against the approved numbers in `golden/FILE.usage`; `verify` reports growth, runs not
+  approved yet and files with no approved usage. Every corpus file's usage is approved.
+
 ## 0.34.0
 - `a + b` appends in place when `a` is handed over (its last read, or such an append):
   `return s + x`, `p.name = p.name + x` and chains on a moved value build text in linear time

@@ -171,6 +171,9 @@ fn lines_differ(what: &str, want: &str, got: &str) -> Option<String> {
 #[derive(Clone, Debug)]
 pub struct Counts {
     pub steps: u64,
+    /// Bytes allocated and bytes copied, by the interpreter's model.
+    pub bytes: u64,
+    pub copied: u64,
     pub funcs: Vec<FuncStats>,
     /// Runs of each branch, by BranchId.
     pub branches: Vec<u64>,
@@ -178,7 +181,13 @@ pub struct Counts {
 
 impl Counts {
     pub fn of(rec: &Recorder) -> Counts {
-        Counts { steps: rec.steps, funcs: rec.funcs.clone(), branches: rec.branches.clone() }
+        Counts {
+            steps: rec.steps,
+            bytes: rec.bytes,
+            copied: rec.copied,
+            funcs: rec.funcs.clone(),
+            branches: rec.branches.clone(),
+        }
     }
 }
 

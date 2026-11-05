@@ -1,0 +1,3 @@
+main: 2860 steps, 55 bytes, 0 copied
+test "a dropped ball falls": 8 steps, 0 bytes, 0 copied
+test "flight takes at least one step": 146 steps, 0 bytes, 0 copied

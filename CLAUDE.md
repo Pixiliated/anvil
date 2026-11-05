@@ -32,7 +32,8 @@ Anvil is a compiled language designed to be written by AI agents. The compiler i
    memory. A golden that needs arguments or stdin gets them from `golden/<file>.in`.
 6. **Goldens are reviewed, not just approved.** This repo is an Anvil project (`anvil.toml`);
    `anvil golden approve FILE` stores a program's output in `golden/`. Read the output it prints
-   and check it by hand first. `anvil golden check --native` must pass.
+   and check it by hand first. `anvil golden check --native` must pass. Usage is approved the
+   same way (`anvil usage approve FILE`): read what grew and why before approving it.
 7. **One implementation per command.** Commands live in `anvil_ops` and in its `COMMANDS`
    table; the CLI and `anvil-mcp` only parse and print, and `anvil lsp` only turns requests into
    those commands. A new command or option needs a tool parameter too, or the parity test fails.

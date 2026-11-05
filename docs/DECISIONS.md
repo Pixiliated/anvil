@@ -591,3 +591,16 @@ Short records of choices that are not obvious from the code. Newest last.
   object natively, so they carry the room when the old value is gone and drop it while shared.
 - **Tests move too**: leaving test bodies unmarked made them a second semantics to reason about
   and left `profile` without reasons there.
+
+## M34 (v0.35)
+
+- **Resources get goldens**: output goldens catch a change in what a program does, nothing caught
+  one in what it costs. The interpreter's steps and bytes are deterministic everywhere, so
+  they can be approved exactly, with no tolerance and no timing noise.
+- **Growth fails, gains pass**: any increase is a finding to look at (and approve when meant); a
+  decrease passes but is listed, so improvements are kept by approving them, not lost to the
+  next change.
+- **Required like goldens**: every file that runs has approved usage, as every main has a golden;
+  a file whose test fails is not measured, since its numbers would mean nothing.
+- **It guards the compiler too**: the corpus's usage pins what the optimizations of M28-M33 buy;
+  switching moves off fails 11 files.

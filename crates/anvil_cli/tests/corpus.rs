@@ -550,6 +550,7 @@ fn goldens_record_and_review_on_a_project() {
     assert!(p.anvil(&["golden", "check"]).status.success());
 
     // Clean verify, then a regression opens a finding and fixing it resolves it.
+    assert!(p.anvil(&["usage", "approve"]).status.success());
     assert!(p.anvil(&["verify"]).status.success());
     p.write("src/hello.anv", "fn main() uses io {\n    print(\"hullo\");\n}\n");
     let broken = p.anvil(&["verify", "--json"]);
@@ -791,6 +792,7 @@ test "twice" {
 }
 "#,
     );
+    assert!(p.anvil(&["usage", "approve"]).status.success());
     let v = json_of(&p.anvil(&["verify", "--json"]));
     let open: Vec<(&str, &str, &str)> = v["open"]
         .as_array()
@@ -883,6 +885,7 @@ test "some branches" {
 }
 "#,
     );
+    assert!(p.anvil(&["usage", "approve"]).status.success());
     let v = json_of(&p.anvil(&["verify", "--json"]));
     let mut open: Vec<(&str, &str)> = v["open"]
         .as_array()
@@ -1593,6 +1596,7 @@ fn watch_verifies_again_after_a_change() {
     use std::io::{BufRead, BufReader};
     let p = hello_project("watch");
     assert!(p.anvil(&["golden", "approve", "src/hello.anv"]).status.success());
+    assert!(p.anvil(&["usage", "approve"]).status.success());
     let mut child = Command::new(env!("CARGO_BIN_EXE_anvil"))
         .args(["watch", "--runs", "2", "--json"])
         .current_dir(&p.0)
@@ -1700,6 +1704,7 @@ fn modules_import_by_name_and_share_coverage() {
     // Coverage counts every project file's runs: shout runs under main's golden, whisper nowhere.
     assert!(p.anvil(&["golden", "approve", "src/main.anv"]).status.success());
     assert!(p.anvil(&["api", "approve", "src/text/words.anv"]).status.success());
+    assert!(p.anvil(&["usage", "approve"]).status.success());
     let v = p.json(&["verify"]);
     let open: Vec<(&str, &str)> = v["open"]
         .as_array()
@@ -1756,6 +1761,7 @@ fn main() uses io {
     // A generic that nothing instantiates is untested; one that runs for any type is tested, and
     // its branches count over all its instances.
     assert!(p.anvil(&["golden", "approve", "src/hello.anv"]).status.success());
+    assert!(p.anvil(&["usage", "approve"]).status.success());
     let v = p.json(&["verify"]);
     let open: Vec<&str> = v["open"].as_array().unwrap().iter().map(|f| f["message"].as_str().unwrap()).collect();
     assert_eq!(open.len(), 1, "{v}");
@@ -1975,4 +1981,67 @@ fn fuzzed_programs_agree_on_both_backends() {
     assert_eq!((v["ok"].as_bool(), v["failed"].as_u64()), (Some(true), Some(0)), "{v}");
     let statuses: Vec<&str> = v["programs"].as_array().unwrap().iter().map(|r| r["status"].as_str().unwrap()).collect();
     assert_eq!(statuses, ["same", "same", "same"]);
+}
+
+#[test]
+fn usage_is_approved_and_growth_is_found() {
+    let p = hello_project("usage");
+    assert!(p.anvil(&["golden", "approve", "src/hello.anv"]).status.success());
+    let usage_findings = |v: &serde_json::Value| -> Vec<String> {
+        v["open"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|f| f["check"] == "usage")
+            .map(|f| f["message"].as_str().unwrap().to_string())
+            .collect()
+    };
+    let twice = "fn twice(n: i64) -> i64 {\n    return n * 2;\n}\n\ntest \"twice\" {\n    assert(twice(2) == 4);\n}\n";
+
+    // Never approved: a finding for each file that runs, saying how to approve it.
+    let found = usage_findings(&json_of(&p.anvil(&["verify", "--json"])));
+    assert_eq!(found.len(), 2, "{found:?}");
+    assert!(found[1].starts_with("src/maths.anv has no approved usage; check it with `anvil usage src/maths.anv`"), "{found:?}");
+    let out = p.anvil(&["usage", "src/maths.anv", "--json"]);
+    assert_eq!(out.status.code(), Some(1));
+    let u = json_of(&out);
+    let run = &u["files"][0]["runs"][0];
+    assert_eq!(run["run"], "test \"twice\"", "{u}");
+    let steps = run["steps"].as_u64().unwrap();
+    assert!(steps > 0, "{u}");
+    let approved = p.json(&["usage", "approve"]);
+    assert_eq!(approved["approved"].as_array().unwrap().len(), 2, "{approved}");
+    let file = std::fs::read_to_string(p.0.join("golden/src/maths.anv.usage")).unwrap();
+    assert_eq!(file, format!("test \"twice\": {steps} steps, 0 bytes, 0 copied\n"));
+    assert!(usage_findings(&json_of(&p.anvil(&["verify", "--json"]))).is_empty());
+    assert!(p.anvil(&["usage"]).status.success());
+
+    // More work: a finding with the numbers, and how to accept it.
+    p.write("src/maths.anv", &twice.replace("return n * 2;", "var r: i64 = 0;\n    for _i in 0..2 {\n        r = r + n;\n    }\n    return r;"));
+    let found = usage_findings(&json_of(&p.anvil(&["verify", "--json"])));
+    assert_eq!(found.len(), 1, "{found:?}");
+    assert!(found[0].starts_with(&format!("usage test \"twice\": {steps} -> ")), "{found:?}");
+    assert!(found[0].contains(" steps (+"), "{found:?}");
+    assert!(found[0].ends_with("if that is meant, `anvil usage approve src/maths.anv`"), "{found:?}");
+    assert_eq!(p.anvil(&["usage"]).status.code(), Some(1));
+    assert_eq!(p.json(&["usage", "approve", "src/maths.anv"])["approved"][0]["approved"], "changed");
+
+    // Less: listed, not a finding; approving keeps the gain.
+    p.write("src/maths.anv", twice);
+    let out = p.anvil(&["usage", "src/maths.anv"]);
+    assert!(out.status.success());
+    let text = String::from_utf8_lossy(&out.stdout).to_string();
+    assert!(text.contains("(less)") && text.contains("approve it to keep the gain"), "{text}");
+    assert!(usage_findings(&json_of(&p.anvil(&["verify", "--json"]))).is_empty());
+    assert!(p.anvil(&["usage", "approve", "src/maths.anv"]).status.success());
+
+    // A new test is not approved yet; a failing one is not measured, and cannot be approved.
+    p.write("src/maths.anv", &format!("{twice}\ntest \"again\" {{\n    assert(twice(3) == 6);\n}}\n"));
+    let found = usage_findings(&json_of(&p.anvil(&["verify", "--json"])));
+    assert_eq!(found.len(), 1, "{found:?}");
+    assert!(found[0].starts_with("usage test \"again\": ") && found[0].contains("is not approved yet"), "{found:?}");
+    p.write("src/maths.anv", &format!("{twice}\ntest \"again\" {{\n    assert(twice(3) == 7);\n}}\n"));
+    let out = p.anvil(&["usage", "approve", "src/maths.anv"]);
+    assert_eq!(out.status.code(), Some(2));
+    assert!(String::from_utf8_lossy(&out.stderr).contains("test \"again\" cannot be measured, as it fails"), "{out:?}");
 }

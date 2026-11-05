@@ -1,0 +1,3 @@
+main: 6833 steps, 30 bytes, 0 copied
+test "dice stay on the die": 1502 steps, 0 bytes, 0 copied
+test "the clock ticks a millisecond per read in tests": 2 steps, 0 bytes, 0 copied

@@ -189,6 +189,10 @@ fn project_tools_answer_over_stdio() {
     assert!(!err && v["stdout"] == "hi\n", "{v}");
     let (err, v) = c.call("golden_check", json!({ "native": true }));
     assert!(!err && v["native"] == true, "{v}");
+    let (err, v) = c.call("usage", json!({}));
+    assert!(err && v["files"][0]["status"] == "missing", "{v}");
+    let (err, v) = c.call("usage_approve", json!({ "file": "src/main.anv" }));
+    assert!(!err && v["approved"][0]["approved"] == "new", "{v}");
     let (err, v) = c.call("verify", json!({}));
     assert!(!err && v["findings"]["open"] == 0, "{v}");
     let (err, v) = c.call("record_import_roadmap", json!({}));

@@ -267,3 +267,13 @@ green and the interpreter and native backend agreeing on every program in `tests
   a test) on both backends with the leak check; the fuzzer appends to text in fields; `cost`
   finds text built through a function linear and counts the first copy; natively 10,000,000
   field and function appends take 0.84 s, 100,000 with copies kept 1.5 s
+
+## M34: Usage baselines (v0.35)
+- [x] `golden/FILE.usage`: the steps, bytes and copied bytes of each run of a file (main under
+  its golden's input, each test), approved like goldens; `anvil usage` compares, `anvil usage
+  approve` stores (every changed file without a FILE), in the CLI and over MCP
+- [x] `verify` reports any growth, a run not approved yet, one that no longer runs, and a file
+  with runs but no approved usage; less passes and is listed so the gain can be approved
+- [x] Every corpus program, example and standard library module has its usage approved, so a
+  change to the compiler that costs programs more is found: with moves switched off, 11 of 73
+  files fail (place_moves.anv's bytes grow from 256,633 to 920,136,769)
