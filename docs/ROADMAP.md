@@ -290,3 +290,13 @@ green and the interpreter and native backend agreeing on every program in `tests
 - [x] What it found: each `{part}` of an interpolation built a whole new string, so one with many
   parts was quadratic. It now allocates its result once (floats_sweep.anv: 120,002 heap bytes
   to 49,842, 2,080 objects to 960)
+
+## M36: Dead values let go (v0.37)
+- [x] A local lets go of its value when nothing can read it again (`Stmt::Drop`, not a step):
+  after the statement that read it last, at the start of a branch that does not read it, after
+  a loop that did; never what `ensures` reads
+- [x] Moves in conditions: the condition of an `if`, what a `match` or `for` is over; what a
+  `match` or `?` was over goes once the payload is out, so the payload is not shared with it
+- [x] A corpus program on both backends with the leak check; native peak is tested from real
+  heap numbers (two big arrays in turn peak at one, in seven shapes of last read); across the
+  corpus peak falls 5%, place_moves.anv's by half (262,240 to 131,229 bytes)

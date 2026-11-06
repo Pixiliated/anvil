@@ -1,4 +1,4 @@
-# Anvil language specification (v0.36)
+# Anvil language specification (v0.37)
 
 Anvil is a small, compiled, general-purpose language designed to be written mostly by AI agents
 and read by humans. Its rules aim at three things: one obvious way to write each thing, code
@@ -179,9 +179,10 @@ Values are values: passing, storing or returning one never lets a change show th
 another name. Underneath, arrays, maps, text and closures are shared until written, and a
 write to a shared one copies it first. The **last read** of a variable does not share: the
 value **moves** to where it goes, so the receiver may hold the only reference and change it
-in place. A read moves when its statement (`let`, an assignment, an expression statement or
-`return`) names the variable once and nothing reads the variable again before it is next
-written, on any path through loops and branches; what an `ensures` clause reads never moves.
+in place. A read moves when its statement (`let`, an assignment, an expression statement,
+`return`, the condition of an `if`, what a `match` or `for` is over) names the variable once and
+nothing reads the variable again before it is next written, on any path through loops and
+branches; what an `ensures` clause reads never moves.
 So a functional update is as cheap as changing the value directly:
 
 ```
@@ -195,6 +196,13 @@ for i in 0..n {
     xs = add(xs: xs, x: i);   // linear: xs is handed over and given back
 }
 ```
+
+A variable also **lets go** of its value as soon as nothing can read it again: after the statement
+that read it last, at the start of a branch that does not read it, after a loop that did. So what
+it holds is not kept until the function ends, and a value a dead variable held is no longer shared
+with it (a copy never read costs nothing). This is not a step, and only `ensures` clauses keep a
+value longer. What a `match` or `?` was over goes too once the payload is out, and what a `for`
+was over after its loop.
 
 The last read of a **place** (a field or an element) moves the same way when nothing else in
 the statement reads that place, a place around it or one inside it, and either the statement

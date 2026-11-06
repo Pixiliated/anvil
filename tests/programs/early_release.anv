@@ -1,0 +1,190 @@
+// What a local holds goes when nothing can read it again, not when the function ends. Every line
+// must match on both backends, values still read must keep their values, and the native run
+// checks that nothing leaks or is released twice.
+struct Bag {
+    items: [i64],
+    label: str,
+}
+
+fn build(n: i64) -> [i64] {
+    var xs: [i64] = [];
+    for i in 0..n {
+        xs.push(i);
+    }
+    return xs;
+}
+
+fn show(xs: [i64]) -> str {
+    var out: str = "";
+    for x in xs {
+        out = out + "{x},";
+    }
+    return out;
+}
+
+// Read twice by its last statement, so that read cannot move it.
+fn ends(xs: [i64]) -> i64 {
+    return xs[0] + xs[xs.len() - 1];
+}
+
+fn lookup(rows: [[i64]], i: i64) -> Option[[i64]] {
+    if i < rows.len() {
+        return Some(rows[i]);
+    }
+    return None;
+}
+
+// `?` holds the Option: the payload must not stay shared with it.
+fn grown(rows: [[i64]], i: i64) -> Option[[i64]] {
+    var row: [i64] = lookup(rows: rows, i: i)?;
+    row.push(99);
+    return Some(row);
+}
+
+fn shown(o: Option[[i64]]) -> str {
+    match o {
+        Some(value) => { return show(value); }
+        None => { return "none"; }
+    }
+}
+
+// Read on one branch only; dropped at the start of the other.
+fn branches(xs: [i64], c: bool) -> i64 {
+    if c {
+        return xs.len();
+    }
+    let other: [i64] = build(3);
+    return other.len();
+}
+
+// Read in the condition only, and in a place.
+fn in_condition(b: Bag) -> i64 {
+    if b.items.len() > 2 && b.label == "big" {
+        return 1;
+    }
+    return 0;
+}
+
+// The right of `&&` may not run, so its value may still be held in either branch.
+fn short_circuit(c: bool, xs: [i64]) -> i64 {
+    if c && xs.len() > 0 {
+        return 1;
+    }
+    return 2;
+}
+
+// An ensures clause reads xs after the body: it stays.
+fn keeps_for_ensures(xs: [i64]) -> i64
+    ensures result == xs.len()
+{
+    let n: i64 = xs.len();
+    return n;
+}
+
+// Dead scrutinee: the payload is the arm's alone, and changes in place.
+fn payload_alone(o: Option[[i64]]) -> str {
+    match o {
+        Some(value) => {
+            var v: [i64] = value;
+            v.push(1);
+            return show(v);
+        }
+        None => { return "none"; }
+    }
+}
+
+fn main() uses io {
+    // After the statement that read it last.
+    let a: [i64] = build(5);
+    print("ends: {ends(a)}");
+
+    // An element out of a dead array is no longer shared with it, so it changes in place.
+    let rows: [[i64]] = [build(2), build(3)];
+    let first: [i64] = rows[0];
+    var changed: [i64] = first;
+    changed.push(7);
+    print("element: {show(changed)}");
+
+    // The same array still read keeps its value.
+    let still: [[i64]] = [build(2)];
+    var copy: [i64] = still[0];
+    copy.push(8);
+    print("still: {show(still[0])} {show(copy)}");
+
+    // A payload out of a match, with the scrutinee dead and alive.
+    print("payload: {payload_alone(Some(build(2)))} {payload_alone(None)}");
+    let kept: Option[[i64]] = Some(build(2));
+    match kept {
+        Some(value) => {
+            var v: [i64] = value;
+            v.push(2);
+            print("payload: {show(v)}");
+        }
+        None => { print("none"); }
+    }
+    print("kept: {shown(kept)}");
+
+    // `?`, found and not.
+    let table: [[i64]] = [build(1), build(2)];
+    print("try: {shown(grown(rows: table, i: 1))} {shown(grown(rows: table, i: 5))} {show(table[1])}");
+
+    print("branches: {branches(xs: build(4), c: true)} {branches(xs: build(4), c: false)}");
+    let big: Bag = Bag { items: build(3), label: "big" };
+    print("condition: {in_condition(big)}");
+    print("short: {short_circuit(c: false, xs: build(1))} {short_circuit(c: true, xs: build(1))}");
+    print("ensures: {keeps_for_ensures(build(4))}");
+
+    // A snapshot goes after its loop; the array it came from can then change alone.
+    var list: [i64] = build(3);
+    var total: i64 = 0;
+    for x in list {
+        total = total + x;
+    }
+    list.push(total);
+    print("snapshot: {show(list)}");
+
+    // Left by break, continue and return; made in the body each round.
+    var seen: i64 = 0;
+    let from: [i64] = build(10);
+    for i in 0..from.len() {
+        let round: [i64] = build(i + 1);
+        if i == 1 {
+            continue;
+        }
+        if round[i] == 4 {
+            seen = seen + round.len() + round[0];
+            break;
+        }
+        seen = seen + 1;
+    }
+    print("loop: {seen}");
+
+    // Read by the while's condition each round: not dropped until it ends.
+    let bound: [i64] = build(3);
+    var n: i64 = 0;
+    while n < bound.len() + bound[0] {
+        n = n + 1;
+    }
+    print("while: {n}");
+
+    // A function value holds what it captured until it is dead too.
+    let captured: [i64] = build(4);
+    let count: fn(i64) -> i64 = fn(k: i64) -> i64 {
+        return captured.len() + k;
+    };
+    print("closure: {count(1)} {count(2)} {captured.len()}");
+
+    // A text interpolated last, and one never read again after a place is read.
+    let t: str = "text";
+    let bag: Bag = Bag { items: build(2), label: t };
+    print("bag: {bag.items.len()}");
+    print("label: {bag.label}");
+}
+
+test "letting go inside a test" {
+    let rows: [[i64]] = [build(2)];
+    var row: [i64] = rows[0];
+    row.push(5);
+    assert(row == [0, 1, 5]);
+    assert(branches(xs: build(2), c: false) == 3);
+}

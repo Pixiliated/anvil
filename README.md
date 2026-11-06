@@ -83,7 +83,7 @@ in full (`anvil spec` prints it).
 
 ## Status
 
-v0.36: programs of one or more files (modules with explicit imports and `pub`), generic
+v0.37: programs of one or more files (modules with explicit imports and `pub`), generic
 functions, structs and enums with built-in constraints, i64, f64 with units, bool, strings with interpolation,
 search and split (`s = s + x` appends in place, so building text is linear), growable arrays and slices (a variable, field or element read for the last time moves, so `xs = f(xs)` and `s.items = f(s.items)` change it in place), maps in key order, structs, enums with
 exhaustive `match`, structural `==`, `Option` and `Result` with `?`, function values and

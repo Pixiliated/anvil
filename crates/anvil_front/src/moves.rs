@@ -12,6 +12,11 @@
 //! fields alone (`s = State(items: add(s.items, x), n: s.n + 1)`). The values `ensures`
 //! clauses read are never moved. Tests are marked like functions. Both backends follow the
 //! marks, so the rule is only here.
+//!
+//! A local that still holds a value when nothing can read it again lets go of it there
+//! (`Stmt::Drop`): after the statement that read it last, at the start of a branch that does not
+//! read it, after a loop that did. So what it held does not wait for the function to end, and a
+//! value also held elsewhere is not shared with a dead local when it is next changed.
 
 use crate::ir::*;
 use std::cell::RefCell;
@@ -49,7 +54,7 @@ pub fn mark(program: &mut Program) {
         bodies.push((Live::new(), &t.locals, &mut t.body));
     }
     for (pinned, locals, body) in bodies {
-        let walk = Walk { pinned, handed: RefCell::new(Vec::new()) };
+        let walk = Walk { locals, pinned, handed: RefCell::new(Vec::new()) };
         walk.block(body, &Live::new(), None, true);
         for (site, local, path, kept) in walk.handed.into_inner() {
             let what = describe(locals, structs, local, &path);
@@ -96,13 +101,44 @@ fn costly(ty: &Ty) -> bool {
     matches!(ty, Ty::Str | Ty::Bytes | Ty::Array(_) | Ty::Map(..) | Ty::Struct(_) | Ty::Enum(_))
 }
 
-/// Every local `e` names, anywhere in it.
+/// Whether a local of type `ty` is worth letting go of: it may hold something on the heap.
+fn holds(ty: &Ty) -> bool {
+    costly(ty) || matches!(ty, Ty::Fn(_))
+}
+
+/// Every local `e` reads or changes, anywhere in it. The value `?` holds is written first.
 fn refs(e: &Expr, out: &mut Live) {
-    if let Some(l) = named_local(e) {
+    if let (Some(l), false) = (named_local(e), matches!(e.kind, ExprKind::Try { .. })) {
         out.insert(l);
     }
     for c in children(e) {
         refs(c, out);
+    }
+}
+
+/// Every local that may hold a value once `e` has been evaluated, as far as `e` goes: those it
+/// names, but for those it is sure to have moved out of.
+fn left_holding(e: &Expr, out: &mut Live) {
+    fn names(e: &Expr, out: &mut Live) {
+        out.extend(named_local(e));
+        for c in children(e) {
+            names(c, out);
+        }
+    }
+    let (mut named, mut gone) = (Live::new(), Live::new());
+    names(e, &mut named);
+    surely_moved(e, &mut gone);
+    out.extend(named.difference(&gone));
+}
+
+/// The locals evaluating `e` is sure to move out of (the right of `&&` and `||` may not run).
+fn surely_moved(e: &Expr, out: &mut Live) {
+    match &e.kind {
+        ExprKind::Move(l) => {
+            out.insert(*l);
+        }
+        ExprKind::And(a, _) | ExprKind::Or(a, _) => surely_moved(a, out),
+        _ => children(e).into_iter().for_each(|c| surely_moved(c, out)),
     }
 }
 
@@ -318,20 +354,48 @@ fn union(a: &Live, b: &Live) -> Live {
     a.union(b).copied().collect()
 }
 
-struct Walk {
+struct Walk<'a> {
+    locals: &'a [Local],
     pinned: Live,
     /// Arguments: (call site, local, place, why it is not moved).
     handed: RefCell<Vec<(String, LocalId, Vec<Seg>, Option<&'static str>)>>,
 }
 
-impl Walk {
-    /// What is live before `stmts`, given what is live after them; with `mark`, marks moves.
-    fn block(&self, stmts: &mut [Stmt], after: &Live, lp: Option<&Loop>, mark: bool) -> Live {
+impl Walk<'_> {
+    /// What is live before `stmts`, given what is live after them; with `mark`, marks moves and
+    /// adds drops.
+    fn block(&self, stmts: &mut Vec<Stmt>, after: &Live, lp: Option<&Loop>, mark: bool) -> Live {
         let mut live = after.clone();
-        for s in stmts.iter_mut().rev() {
-            live = self.stmt(s, &live, lp, mark);
+        if !mark {
+            for s in stmts.iter_mut().rev() {
+                live = self.stmt(s, &live, lp, false);
+            }
+            return live;
         }
+        let mut out = Vec::with_capacity(stmts.len());
+        for mut s in std::mem::take(stmts).into_iter().rev() {
+            let before = self.stmt(&mut s, &live, lp, true);
+            let held = holding_after(&s, &before);
+            out.extend(self.drops(&held, &live).into_iter().rev());
+            out.push(s);
+            live = before;
+        }
+        out.reverse();
+        *stmts = out;
         live
+    }
+
+    /// Drops of those of `held` not in `live`, that are worth one.
+    fn drops(&self, held: &Live, live: &Live) -> Vec<Stmt> {
+        held.difference(live)
+            .filter(|l| !self.pinned.contains(l) && holds(&self.locals[**l].ty))
+            .map(|l| Stmt::Drop(*l))
+            .collect()
+    }
+
+    /// Starts a branch by letting go of those of `held` it does not read (`live` at its start).
+    fn start_with_drops(&self, branch: &mut Vec<Stmt>, held: &Live, live: &Live) {
+        branch.splice(0..0, self.drops(held, live));
     }
 
     /// Marks the moves of one statement that evaluates `exprs`. `target` is the place inside a
@@ -466,22 +530,45 @@ impl Walk {
             }
             Stmt::Break => lp.expect("break outside a loop").brk.clone(),
             Stmt::Continue => lp.expect("continue outside a loop").cont.clone(),
-            Stmt::Reached(_) => after.clone(),
+            Stmt::Reached(_) | Stmt::Drop(_) => after.clone(),
             Stmt::If(c, a, b) => {
-                let mut live = union(&self.block(a, after, lp, mark), &self.block(b, after, lp, mark));
+                let (in_a, in_b) = (self.block(a, after, lp, mark), self.block(b, after, lp, mark));
+                let mut live = union(&in_a, &in_b);
+                if mark {
+                    self.leaf(vec![c], None, None, &live);
+                    let mut held = live.clone();
+                    left_holding(c, &mut held);
+                    self.start_with_drops(a, &held, &in_a);
+                    self.start_with_drops(b, &held, &in_b);
+                }
                 refs(c, &mut live);
                 live
             }
+            // Each arm's bindings are copied out of `held` before its body, and nothing else
+            // reads it.
             Stmt::Match { held, scrutinee, arms } => {
                 let mut live = Live::new();
+                let mut starts = Vec::new();
                 for arm in arms.iter_mut() {
-                    let mut l = self.block(&mut arm.body, after, lp, mark);
+                    let start = self.block(&mut arm.body, after, lp, mark);
+                    let mut l = start.clone();
                     for (_, b) in &arm.bindings {
                         l.remove(b);
                     }
                     live.extend(l);
+                    starts.push(start);
                 }
-                live.insert(*held);
+                if mark {
+                    self.leaf(vec![scrutinee], None, None, &live);
+                    let mut there = live.clone();
+                    there.insert(*held);
+                    left_holding(scrutinee, &mut there);
+                    for (arm, start) in arms.iter_mut().zip(&starts) {
+                        let mut h = there.clone();
+                        h.extend(arm.bindings.iter().map(|(_, b)| *b));
+                        self.start_with_drops(&mut arm.body, &h, start);
+                    }
+                }
                 refs(scrutinee, &mut live);
                 live
             }
@@ -493,12 +580,21 @@ impl Walk {
             // The counter and the snapshot are kept live through the loop, conservatively.
             Stmt::For(i, start, end, body) => {
                 let mut live = self.looped(body, after, after, &[*i], mark);
+                if mark {
+                    self.leaf(vec![start, end], None, None, &live);
+                }
+                live.remove(i);
                 refs(start, &mut live);
                 refs(end, &mut live);
                 live
             }
             Stmt::ForEach { var, held, iter, body } => {
                 let mut live = self.looped(body, after, after, &[*var, *held], mark);
+                if mark {
+                    self.leaf(vec![iter], None, None, &live);
+                }
+                live.remove(var);
+                live.remove(held);
                 refs(iter, &mut live);
                 live
             }
@@ -507,7 +603,7 @@ impl Walk {
 
     /// What is live at the head of a loop whose body is `body`: the least set with
     /// head = base + kept + live before the body (after which the head comes again).
-    fn looped(&self, body: &mut [Stmt], after: &Live, base: &Live, kept: &[LocalId], mark: bool) -> Live {
+    fn looped(&self, body: &mut Vec<Stmt>, after: &Live, base: &Live, kept: &[LocalId], mark: bool) -> Live {
         let mut head = base.clone();
         head.extend(kept);
         loop {
@@ -524,6 +620,50 @@ impl Walk {
         }
         head
     }
+}
+
+/// The locals that may hold a value once `s` has run, given what is live before it; those not
+/// live after it can let go. A branch's are dropped at its start instead, and nothing follows a
+/// jump.
+fn holding_after(s: &Stmt, before: &Live) -> Live {
+    let mut out = Live::new();
+    match s {
+        Stmt::Let(l, e) => {
+            out.insert(*l);
+            left_holding(e, &mut out);
+        }
+        Stmt::Assign(l, path, e, _) => {
+            out.insert(*l);
+            left_holding(e, &mut out);
+            for step in path {
+                if let Step::Index { index, .. } = step {
+                    left_holding(index, &mut out);
+                }
+            }
+        }
+        Stmt::Expr(e) => left_holding(e, &mut out),
+        Stmt::While(c, _) => {
+            out.extend(before);
+            left_holding(c, &mut out);
+        }
+        Stmt::For(_, start, end, _) => {
+            let mut gone = Live::new();
+            surely_moved(start, &mut gone);
+            surely_moved(end, &mut gone);
+            out.extend(before.difference(&gone));
+            left_holding(start, &mut out);
+            left_holding(end, &mut out);
+        }
+        Stmt::ForEach { var, held, iter, .. } => {
+            let mut gone = Live::new();
+            surely_moved(iter, &mut gone);
+            out.extend(before.difference(&gone));
+            out.extend([*var, *held]);
+            left_holding(iter, &mut out);
+        }
+        Stmt::If(..) | Stmt::Match { .. } | Stmt::Return(_) | Stmt::Break | Stmt::Continue | Stmt::Reached(_) | Stmt::Drop(_) => {}
+    }
+    out
 }
 
 #[cfg(test)]
@@ -557,13 +697,26 @@ mod tests {
             for s in stmts {
                 match s {
                     Stmt::Let(_, e) | Stmt::Assign(_, _, e, _) | Stmt::Expr(e) | Stmt::Return(Some(e)) => expr(e, f, out),
-                    Stmt::If(_, a, b) => {
+                    Stmt::If(c, a, b) => {
+                        expr(c, f, out);
                         block(a, f, out);
                         block(b, f, out);
                     }
-                    Stmt::While(_, b) | Stmt::For(_, _, _, b) | Stmt::ForEach { body: b, .. } => block(b, f, out),
-                    Stmt::Match { arms, .. } => arms.iter().for_each(|a| block(&a.body, f, out)),
-                    Stmt::Return(None) | Stmt::Break | Stmt::Continue | Stmt::Reached(_) => {}
+                    Stmt::While(_, b) => block(b, f, out),
+                    Stmt::For(_, start, end, b) => {
+                        expr(start, f, out);
+                        expr(end, f, out);
+                        block(b, f, out);
+                    }
+                    Stmt::ForEach { iter, body: b, .. } => {
+                        expr(iter, f, out);
+                        block(b, f, out);
+                    }
+                    Stmt::Match { scrutinee, arms, .. } => {
+                        expr(scrutinee, f, out);
+                        arms.iter().for_each(|a| block(&a.body, f, out));
+                    }
+                    Stmt::Return(None) | Stmt::Break | Stmt::Continue | Stmt::Reached(_) | Stmt::Drop(_) => {}
                 }
             }
         }
@@ -572,6 +725,102 @@ mod tests {
         let mut out = Vec::new();
         block(&f.body, f, &mut out);
         out
+    }
+
+    /// Function `name`'s statements as a line each, indented by depth: the drops by the local's
+    /// name, anything else by what it is.
+    fn shape(src: &str, name: &str) -> Vec<String> {
+        fn block(stmts: &[Stmt], f: &Func, depth: usize, out: &mut Vec<String>) {
+            for s in stmts {
+                let pad = "  ".repeat(depth);
+                match s {
+                    // Hidden locals are numbered, and `$` is enough here.
+                    Stmt::Drop(l) => {
+                        let name = &f.locals[*l].name;
+                        out.push(format!("{pad}drop {}", if name.starts_with('$') { "$" } else { name }));
+                    }
+                    Stmt::Let(l, _) => out.push(format!("{pad}let {}", f.locals[*l].name)),
+                    Stmt::Assign(l, ..) => out.push(format!("{pad}set {}", f.locals[*l].name)),
+                    Stmt::Expr(_) => out.push(format!("{pad}expr")),
+                    Stmt::Return(_) => out.push(format!("{pad}return")),
+                    Stmt::Break => out.push(format!("{pad}break")),
+                    Stmt::Continue => out.push(format!("{pad}continue")),
+                    Stmt::Reached(_) => {}
+                    Stmt::If(_, a, b) => {
+                        out.push(format!("{pad}if"));
+                        block(a, f, depth + 1, out);
+                        out.push(format!("{pad}else"));
+                        block(b, f, depth + 1, out);
+                    }
+                    Stmt::While(_, b) | Stmt::For(_, _, _, b) | Stmt::ForEach { body: b, .. } => {
+                        out.push(format!("{pad}loop"));
+                        block(b, f, depth + 1, out);
+                    }
+                    Stmt::Match { arms, .. } => {
+                        for a in arms {
+                            out.push(format!("{pad}arm"));
+                            block(&a.body, f, depth + 1, out);
+                        }
+                    }
+                }
+            }
+        }
+        let p = crate::compile(&SourceFile::new("t.anv", src)).unwrap_or_else(|d| panic!("{d:?}"));
+        let f = p.funcs.iter().find(|f| f.name == name).unwrap();
+        let mut out = Vec::new();
+        block(&f.body, f, 0, &mut out);
+        out
+    }
+
+    #[test]
+    fn a_dead_local_lets_go() {
+        // After its last read, when that read cannot move it (named twice), and a value never read.
+        let src = "fn f(xs: [i64]) -> i64 {\n    let a: i64 = xs[0] + xs[1];\n    let _unused: [i64] = [a];\n    return a;\n}\n";
+        assert_eq!(shape(src, "f"), ["let a", "drop xs", "let _unused", "drop _unused", "return"]);
+        // A read of an element moves the array in, which lets go of it there: no drop.
+        let src = "fn f(rows: [[i64]]) -> [i64] {\n    let first: [i64] = rows[0];\n    return first;\n}\n";
+        assert_eq!(shape(src, "f"), ["let first", "return"]);
+        // A move needs no drop.
+        assert_eq!(shape(ADD, "add"), ["let ys", "expr", "return"]);
+    }
+
+    #[test]
+    fn a_branch_lets_go_of_what_it_does_not_read() {
+        let src = "fn f(xs: [i64], c: bool) -> i64 {\n    if c {\n        return xs.len();\n    }\n    return 0;\n}\n";
+        assert_eq!(shape(src, "f"), ["if", "  return", "else", "  drop xs", "return"]);
+    }
+
+    #[test]
+    fn a_condition_moves_what_is_dead_after_it() {
+        let src = "fn f(xs: [i64]) -> i64 {\n    if xs.len() > 0 {\n        return 1;\n    }\n    return 0;\n}\n";
+        assert_eq!(moved(src, "f"), ["xs"]);
+        assert_eq!(shape(src, "f"), ["if", "  return", "else", "return"]);
+        // What a `for` or a `match` is over, likewise.
+        let src = "fn f(xs: [i64]) -> i64 {\n    var t: i64 = 0;\n    for x in xs {\n        t = t + x;\n    }\n    return t;\n}\n";
+        assert_eq!(moved(src, "f"), ["xs", "t", "t"]);
+        let src = "fn f(o: Option[[i64]]) -> i64 {\n    match o {\n        Some(value) => { return value.len(); }\n        None => { return 0; }\n    }\n}\n";
+        assert_eq!(moved(src, "f"), ["o", "value"]);
+    }
+
+    #[test]
+    fn a_loop_lets_go_after_it_and_keeps_what_it_reads() {
+        let src = "fn f(xs: [i64], n: i64) -> i64 {\n    var t: i64 = 0;\n    for _i in 0..n {\n        t = t + xs.len();\n    }\n    return t;\n}\n";
+        assert_eq!(shape(src, "f"), ["let t", "loop", "  set t", "drop xs", "return"]);
+        // The snapshot goes after the loop, and a value made in the body within it.
+        let src = "fn f(xs: [i64]) -> i64 {\n    var t: i64 = 0;\n    for x in xs {\n        let a: [i64] = [x];\n        t = t + a[0] + a[0];\n    }\n    return t;\n}\n";
+        assert_eq!(shape(src, "f"), ["let t", "loop", "  let a", "  set t", "  drop a", "drop $", "return"]);
+    }
+
+    #[test]
+    fn a_match_lets_go_of_the_scrutinee_in_each_arm() {
+        let src = "fn f(o: Option[[i64]]) -> i64 {\n    match o {\n        Some(value) => { return value.len(); }\n        None => { return 0; }\n    }\n}\n";
+        assert_eq!(shape(src, "f"), ["arm", "  drop $", "  return", "arm", "  drop $", "  return"]);
+    }
+
+    #[test]
+    fn what_ensures_reads_is_not_dropped() {
+        let src = "fn f(xs: [i64]) -> i64\n    ensures result == xs.len()\n{\n    let a: i64 = xs.len() + xs.len() - xs.len();\n    return a;\n}\n";
+        assert_eq!(shape(src, "f"), ["let a", "return"]);
     }
 
     const ADD: &str = "fn add(xs: [i64], x: i64) -> [i64] {\n    var ys: [i64] = xs;\n    ys.push(x);\n    return ys;\n}\n";
@@ -586,7 +835,7 @@ mod tests {
         let src = format!(
             "{ADD}\nfn build(n: i64) -> [i64] {{\n    var xs: [i64] = [];\n    for i in 0..n {{\n        xs = add(xs: xs, x: i);\n    }}\n    return xs;\n}}\n"
         );
-        assert_eq!(moved(&src, "build"), ["xs", "xs"]);
+        assert_eq!(moved(&src, "build"), ["n", "xs", "xs"]);
     }
 
     #[test]

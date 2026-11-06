@@ -1066,6 +1066,18 @@ impl<'a, 'b> Gen<'a, 'b> {
             }
             // Coverage is measured in the interpreter.
             Stmt::Reached(_) => {}
+            // Left null, as a move leaves it: the function's exit releases every local.
+            Stmt::Drop(l) => {
+                let vals = self.use_local(*l);
+                let lay = self.layouts[*l].clone();
+                self.release(&lay, &vals);
+                for (k, s) in lay.into_iter().enumerate() {
+                    if s.heap {
+                        let z = self.zero(s);
+                        self.b.def_var(self.vars[*l][k], z);
+                    }
+                }
+            }
         }
     }
 

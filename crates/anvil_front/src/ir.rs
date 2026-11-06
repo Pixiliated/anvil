@@ -345,6 +345,8 @@ pub enum Stmt {
     /// Counts a run of a branch for coverage, at the start of its block; does nothing else, and
     /// is not a step.
     Reached(BranchId),
+    /// Lets go of what a local holds, as nothing reads it again (see `moves`); not a step.
+    Drop(LocalId),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

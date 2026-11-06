@@ -616,3 +616,16 @@ Short records of choices that are not obvious from the code. Newest last.
 - **Not part of usage**: approved usage must be checkable without building anything, on every
   `verify`; heap numbers need a native run, so they stay in `measure` and its tests.
 - **It paid at once**: comparing the two showed interpolation allocating a string per part.
+
+## M36 (v0.37)
+
+- **Peak is a number now, so act on it**: `measure` showed locals holding values long after their
+  last read. Liveness was already computed for moves, so the same walk adds the drops; the rule
+  stays in one place and both backends only follow it.
+- **A statement, not a step**: `Stmt::Drop` costs no step, so `steps` bounds and approved steps
+  cannot change; only bytes copied can, and only downward.
+- **Hidden values count**: what `match`, `?` and `for` hold was kept to the function's end, which
+  also kept payloads shared. They are written before they are read, so they are no longer live
+  before the statement, and go at the first point they can.
+- **Not taken from the snapshot**: `for x in xs` still shares each element with what it is
+  over, so changing `x` copies it, even when `xs` is dead. A later milestone can hand elements out.

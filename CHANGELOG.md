@@ -3,6 +3,12 @@
 Each version is one roadmap milestone (docs/ROADMAP.md); docs/DECISIONS.md says why things are
 the way they are.
 
+## 0.37.0
+- A local lets go of its value when nothing can read it again, instead of when the function ends,
+  in both backends: peak memory falls (place_moves.anv by half), and a value a dead local held
+  is no longer copied when changed.
+- The condition of an `if` and what a `match` or `for` is over can move, as other statements do.
+
 ## 0.36.0
 - `anvil measure [FILE]`: programs run natively, with the heap bytes their objects asked for, the
   most held at once, the objects made and the time, beside the interpreter's counts.

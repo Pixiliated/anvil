@@ -1192,6 +1192,10 @@ impl<'p, 'h> Interp<'p, 'h> {
             }
             return Ok(Flow::Normal);
         }
+        if let Stmt::Drop(l) = s {
+            frame[*l] = Value::Void;
+            return Ok(Flow::Normal);
+        }
         self.step()?;
         match s {
             Stmt::Let(l, e) => {
@@ -1256,6 +1260,8 @@ impl<'p, 'h> Interp<'p, 'h> {
                 for (field, local) in &arm.bindings {
                     frame[*local] = fields[*field].clone();
                 }
+                // Holding on to these through the arm would keep them shared.
+                drop(fields);
                 return self.block(&arm.body, frame);
             }
             Stmt::Return(v) => {
@@ -1267,7 +1273,7 @@ impl<'p, 'h> Interp<'p, 'h> {
             }
             Stmt::Break => return Ok(Flow::Break),
             Stmt::Continue => return Ok(Flow::Continue),
-            Stmt::Reached(_) => unreachable!("handled above"),
+            Stmt::Reached(_) | Stmt::Drop(_) => unreachable!("handled above"),
         }
         Ok(Flow::Normal)
     }

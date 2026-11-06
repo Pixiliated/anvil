@@ -2059,20 +2059,23 @@ fn heap_of(p: &Scratch, src: &str) -> (u64, u64, u64) {
 fn native_memory_is_measured() {
     let p = hello_project("measure");
     const ADD: &str = "fn add(xs: [i64], x: i64) -> [i64] {\n    var ys: [i64] = xs;\n    ys.push(x);\n    return ys;\n}\n\n";
-    let updates = |n: u64, keep: &str| {
-        format!("{ADD}fn main() uses io {{\n    var xs: [i64] = [];\n    for i in 0..{n} {{\n{keep}        xs = add(xs: xs, x: i);\n    }}\n    print(\"{{xs.len()}}\");\n}}\n")
+    let updates = |n: u64, keep: &str, read: &str| {
+        format!("{ADD}fn main() uses io {{\n    var xs: [i64] = [];\n    var total: i64 = 0;\n    for i in 0..{n} {{\n{keep}        xs = add(xs: xs, x: i);\n        total = total + 1{read};\n    }}\n    print(\"{{xs.len()}} {{total}}\");\n}}\n")
     };
 
     // An update handed the only reference does not copy, natively: doubling n doubles the bytes.
-    let (one, ..) = heap_of(&p, &updates(1000, ""));
-    let (two, ..) = heap_of(&p, &updates(2000, ""));
+    let (one, ..) = heap_of(&p, &updates(1000, "", ""));
+    let (two, ..) = heap_of(&p, &updates(2000, "", ""));
     assert!(two <= one * 9 / 4, "moved updates grow faster than n: {one} then {two}");
     // A copy kept each round makes it quadratic: doubling n quadruples them, far above the rest.
-    let keep = "        let _kept: [i64] = xs;\n";
-    let (kept_one, ..) = heap_of(&p, &updates(1000, keep));
-    let (kept_two, ..) = heap_of(&p, &updates(2000, keep));
+    let keep = "        let kept: [i64] = xs;\n";
+    let (kept_one, ..) = heap_of(&p, &updates(1000, keep, " + kept.len()"));
+    let (kept_two, ..) = heap_of(&p, &updates(2000, keep, " + kept.len()"));
     assert!(kept_two >= kept_one * 7 / 2, "kept copies do not grow quadratically: {kept_one} then {kept_two}");
     assert!(kept_one >= one * 20, "kept copies cost too little: {kept_one} against {one}");
+    // A copy nothing reads again lets go at once, so it costs nothing.
+    let (dead, ..) = heap_of(&p, &updates(1000, "        let _dead: [i64] = xs;\n", ""));
+    assert_eq!(dead, one, "a dead copy still costs");
 
     // The same for text in a field.
     let field = |n: u64| {
@@ -2089,6 +2092,37 @@ fn native_memory_is_measured() {
     );
     let (allocated, peak, _) = heap_of(&p, &temps);
     assert!(allocated >= peak * 50, "the temporaries were not given back: {allocated} asked for, {peak} at most");
+
+    // A local goes when nothing reads it again: two big arrays in turn peak at one, wherever the
+    // first was last read, while two read together peak at both.
+    const BUILD: &str = "fn build(n: i64) -> [i64] {\n    var xs: [i64] = [];\n    for i in 0..n {\n        xs.push(i);\n    }\n    return xs;\n}\n\n";
+    let main = |body: &str| format!("{BUILD}fn main() uses io {{\n{body}}}\n");
+    let (_, single, _) = heap_of(&p, &main("    let a: [i64] = build(100000);\n    print(a.len());\n"));
+    let then_b = "    let b: [i64] = build(100000);\n    print(b.len());\n";
+    let (_, both, _) = heap_of(&p, &main(&format!("    let a: [i64] = build(100000);\n{then_b}    print(a.len());\n")));
+    assert!(both >= single * 19 / 10, "two read together should peak at both: {both} against {single}");
+    let at_most_one = |what: &str, body: &str| {
+        let (_, peak, _) = heap_of(&p, &main(&format!("{body}{then_b}")));
+        assert!(peak <= single * 11 / 10, "{what}: {peak} at most, against {single} for one");
+    };
+    at_most_one("after a statement", "    let a: [i64] = build(100000);\n    print(a.len());\n");
+    at_most_one("named twice", "    let a: [i64] = build(100000);\n    print(a[0] + a[1]);\n");
+    at_most_one("in a condition", "    let a: [i64] = build(100000);\n    if a.len() == 0 {\n        print(0);\n    }\n");
+    at_most_one("in a range", "    let a: [i64] = build(100000);\n    for i in 0..a.len() {\n        if i < 0 {\n            print(i);\n        }\n    }\n");
+    at_most_one("after a loop", "    let a: [i64] = build(100000);\n    var t: i64 = 0;\n    for x in a {\n        t = t + x;\n    }\n    print(t);\n");
+    at_most_one(
+        "in another branch",
+        "    let a: [i64] = build(100000);\n    let c: bool = 1 > 2;\n    if c {\n        print(a.len());\n    }\n",
+    );
+    at_most_one(
+        "out of a match",
+        "    let o: Option[[i64]] = Some(build(100000));\n    match o {\n        Some(value) => { print(value.len()); }\n        None => { print(0); }\n    }\n",
+    );
+    // A payload whose scrutinee is dead is not shared with it: changed in place, in both backends.
+    let src = "fn grow(o: Option[[i64]]) -> i64 {\n    match o {\n        Some(value) => {\n            var v: [i64] = value;\n            v.push(1);\n            return v.len();\n        }\n        None => { return 0; }\n    }\n}\n\nfn make() -> Option[[i64]] {\n    return Some([1, 2, 3]);\n}\n\nfn twice() -> Option[i64] {\n    var v: [i64] = make()?;\n    v.push(1);\n    return Some(v.len());\n}\n\nfn main() uses io {\n    print(grow(make()));\n    match twice() {\n        Some(value) => { print(value); }\n        None => { print(0); }\n    }\n}\n";
+    p.write("src/hello.anv", src);
+    let v = p.json(&["measure", "src/hello.anv"]);
+    assert_eq!(v["programs"][0]["copied"], 0, "{v}");
 
     // Exactly: two numbers' text and one result, each with its 24-byte header; the literal is static.
     let exact = "fn main() uses io {\n    let a: i64 = 12;\n    let b: i64 = 345;\n    let s: str = \"{a}-{b}\";\n    print(s);\n}\n";
