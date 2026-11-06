@@ -88,7 +88,7 @@ pub fn examples(src: &SourceFile, file: &ast::File) -> (Vec<TestDecl>, Vec<Diagn
                 uses: Vec::new(),
                 uses_span: None,
                 uses_insert: span.at_end(),
-                body: Block { stmts: vec![Stmt { kind: StmtKind::Expr(call), span }], span },
+                body: Block { stmts: vec![Stmt { kind: StmtKind::Expr(call), span, allows: Vec::new() }], span },
                 span,
             });
         }

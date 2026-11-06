@@ -172,9 +172,8 @@ pub fn golden_approve(root: &Path, file: &str, max_steps: Option<u64>) -> Report
     json["golden"] = json!(path.display().to_string());
     json["change"] = json!(change);
     // A misnamed input means this was just approved without it: say so here, not only in verify.
-    let stem = rel.strip_suffix(".anv").unwrap_or(&rel);
     let lost: Vec<String> =
-        golden::orphans(&project).into_iter().filter(|m| m.contains(&format!("/{stem}."))).collect();
+        golden::orphans(&project).into_iter().filter(|m| m.contains(&format!("/{rel}."))).collect();
     let note: String = lost.iter().map(|m| format!("note: {m}\n")).collect();
     json["unread"] = json!(lost);
     ok(json, format!("approved {rel} ({change}):\n{}{note}", out.to_text()))
@@ -452,6 +451,7 @@ fn undocumented(src: &anvil_front::span::SourceFile, add: &mut impl FnMut(&str, 
             Item::Enum(e) if e.public => ("enum", e.name.name.clone(), e.name.span, &[][..]),
             Item::Interface(i) if i.public => ("interface", i.name.name.clone(), i.name.span, &[][..]),
             Item::Unit(u) if u.public => ("unit", u.name.name.clone(), u.name.span, &[][..]),
+            Item::Const(c) if c.public => ("const", c.name.name.clone(), c.name.span, &[][..]),
             _ => continue,
         };
         let documented = anvil_front::doc::doc_above(&src.text, span.start).is_some();
@@ -613,8 +613,12 @@ fn run_verify(root: &Path, native: bool, max_steps: Option<u64>) -> Result<Verif
         files.push(v);
         coverage.extend(c);
     }
-    untested(&coverage, &mut files, &mut seen);
-    unreached(&coverage, &mut files, &mut seen);
+    // A test that stops early leaves what it would have run looking unrun: fix the tests first.
+    let judged = !files.iter().any(|f| f["tests_failed"].as_i64().unwrap_or(0) > 0);
+    if judged {
+        untested(&coverage, &mut files, &mut seen);
+        unreached(&coverage, &mut files, &mut seen);
+    }
     api_findings(&project, &coverage, &mut files, &mut seen);
     for message in golden::orphans(&project) {
         seen.push(Seen { file: project.golden_dir.clone(), check: "golden".into(), message, at: String::new() });
@@ -626,6 +630,7 @@ fn run_verify(root: &Path, native: bool, max_steps: Option<u64>) -> Result<Verif
     let open = record.findings(true)?;
     let json = json!({
         "ok": seen.is_empty(), "project": project.name, "native": native, "run": run, "files": files,
+        "coverage_judged": judged,
         "findings": { "open": open.len(), "opened": sync.opened, "resolved": sync.resolved },
         "open": open, "record": record.path().display().to_string(),
     });
@@ -649,6 +654,9 @@ pub fn verify(root: &Path, native: bool, max_steps: Option<u64>) -> Report {
         ));
     }
     let o = &v.json["findings"];
+    if v.json["coverage_judged"] == false {
+        text.push_str("coverage is not judged while a test fails: `untested` and `unreached` wait for the tests\n");
+    }
     text.push_str(&format!(
         "{}: {} file(s), {} open finding(s) ({} new, {} resolved)\n",
         v.project.name,

@@ -1,0 +1,182 @@
+// Moves through what chooses: `if` values, `let ... else` and `for` handing elements out, each with
+// what lives on the heap. Native runs check that nothing leaks or is freed twice.
+import lib.limits.{MOST, bounded};
+
+struct Row {
+    tag: str,
+    cells: [str],
+}
+
+fn rows(n: i64) -> [Row] {
+    var out: [Row] = [];
+    for i in 0..n {
+        out.push(Row { tag: "r{i}", cells: ["a{i}", "b{i}"] });
+    }
+    return out;
+}
+
+// A branch takes the value over; when the other runs, it is let go of later.
+fn chosen(c: bool, s: str) -> str {
+    return "<" + (if c { s } else { "other" }) + ">";
+}
+
+// A field taken in one branch only.
+fn cells_or_none(c: bool, r: Row) -> [str] {
+    let out: [str] = if c { r.cells } else { [] };
+    return out;
+}
+
+fn both_read(c: bool, s: str) -> str {
+    let t: str = if c { s } else { "x" };
+    return t + s;
+}
+
+fn nested_choice(a: i64, s: str, t: str) -> str {
+    return if a > 1 { if a > 2 { s } else { t } } else { s + t };
+}
+
+// Leaving a loop early with the array half handed out.
+fn first_with(all: [Row], tag: str) -> [str] {
+    for r in all {
+        if r.tag == tag {
+            return r.cells;
+        }
+    }
+    return [];
+}
+
+fn count_until(all: [Row], tag: str) -> i64 {
+    var n: i64 = 0;
+    for r in all {
+        if r.tag == tag {
+            break;
+        }
+        n = n + r.cells.len();
+    }
+    return n;
+}
+
+fn kept_last(words: [str]) -> str {
+    var last: str = "";
+    for w in words {
+        last = w;
+    }
+    return last;
+}
+
+// The loop variable caught by a function value, which keeps it.
+fn caught(words: [str]) -> [fn(str) -> str] {
+    var out: [fn(str) -> str] = [];
+    for w in words {
+        out.push(fn(x: str) -> str {
+            return w + x;
+        });
+    }
+    return out;
+}
+
+fn from_workers(n: i64) -> i64 {
+    var total: i64 = 0;
+    let texts: [i64] = [n, n + 1];
+    for t in texts.parallel_map(fn(x: i64) -> str {
+        return "v{x}";
+    }) {
+        var s: str = t;
+        s = s + "!";
+        total = total + s.len();
+    }
+    return total;
+}
+
+fn unwrapped(items: [Option[str]]) -> str {
+    var out: str = "";
+    for o in items {
+        var s: str = o else {
+            continue;
+        };
+        s = s + ".";
+        out = out + s;
+    }
+    return out;
+}
+
+fn parsed(words: [str]) -> Result[[i64], str] {
+    var out: [i64] = [];
+    for w in words {
+        let n: i64 = number(w) else why {
+            return Err(why + "!");
+        };
+        out.push(n);
+    }
+    return Ok(out);
+}
+
+fn number(w: str) -> Result[i64, str] {
+    let n: i64 = w.parse_i64() else {
+        return Err("bad " + w);
+    };
+    return Ok(n);
+}
+
+fn compared(s: str, t: str) -> bool {
+    assert(s + t == s + t);
+    assert(s.len() + t.len() >= 0);
+    assert(s != t + "?");
+    return true;
+}
+
+fn main() uses io {
+    print(chosen(c: true, s: "a"));
+    print(chosen(c: false, s: "a"));
+    print(cells_or_none(c: true, r: rows(1)[0]).len());
+    print(cells_or_none(c: false, r: rows(1)[0]).len());
+    print(both_read(c: true, s: "s"));
+    print(both_read(c: false, s: "s"));
+    print(nested_choice(a: 3, s: "s", t: "t"));
+    print(nested_choice(a: 2, s: "s", t: "t"));
+    print(nested_choice(a: 1, s: "s", t: "t"));
+    print(first_with(all: rows(3), tag: "r1")[0]);
+    print(first_with(all: rows(3), tag: "none").len());
+    print(count_until(all: rows(3), tag: "r2"));
+    print(kept_last(["x", "y"]));
+    let second: fn(str) -> str = caught(["p", "q"])[1];
+    print(second("r"));
+    print(from_workers(9));
+    print(unwrapped([Some("a"), None, Some("b")]));
+    match parsed(["1", "2"]) {
+        Ok(ns) => { print(ns.len()); }
+        Err(why) => { print(why); }
+    }
+    match parsed(["1", "x", "3"]) {
+        Ok(ns) => { print(ns.len()); }
+        Err(why) => { print(why); }
+    }
+    print(compared(s: "a", t: "b"));
+    print(bounded(500));
+    print(bounded("text"));
+    print(MOST);
+}
+
+test "all of it, natively too" {
+    assert(chosen(c: true, s: "a") == "<a>");
+    assert(chosen(c: false, s: "a") == "<other>");
+    assert(cells_or_none(c: true, r: rows(1)[0]).len() == 2);
+    assert(cells_or_none(c: false, r: rows(1)[0]).len() == 0);
+    assert(both_read(c: true, s: "s") == "ss");
+    assert(both_read(c: false, s: "s") == "xs");
+    assert(nested_choice(a: 3, s: "s", t: "t") == "s");
+    assert(nested_choice(a: 2, s: "s", t: "t") == "t");
+    assert(nested_choice(a: 1, s: "s", t: "t") == "st");
+    assert(first_with(all: rows(2), tag: "r1")[1] == "b1");
+    assert(first_with(all: rows(1), tag: "no").len() == 0);
+    assert(count_until(all: rows(2), tag: "no") == 4);
+    assert(count_until(all: rows(2), tag: "r0") == 0);
+    assert(kept_last([]) == "");
+    let first: fn(str) -> str = caught(["p"])[0];
+    assert(first("r") == "pr");
+    assert(from_workers(1) == 6);
+    assert(unwrapped([None]) == "");
+    assert(parsed(["x"]) == Err("bad x!"));
+    assert(parsed(["1"]) == Ok([1]));
+    assert(compared(s: "", t: ""));
+}

@@ -108,6 +108,7 @@ pub const METHODS: &[(&str, &str, &str)] = &[
     ("i64", "wrapping_add", "wrapping_add(other: i64) -> i64"),
     ("i64", "wrapping_sub", "wrapping_sub(other: i64) -> i64"),
     ("i64", "wrapping_mul", "wrapping_mul(other: i64) -> i64"),
+    ("i64", "bit_len", "bit_len() -> i64"),
     ("bytes", "len", "len() -> i64"),
     ("bytes", "to_str", "to_str() -> Option[str]"),
     ("bytes", "hex", "hex() -> str"),
@@ -164,6 +165,7 @@ pub struct Module<'a> {
 /// What a checked module declares itself (never what it imports), and which of it is pub.
 #[derive(Clone, Default)]
 struct Exports {
+    consts: HashMap<String, Const>,
     funcs: HashMap<String, FuncId>,
     structs: HashMap<String, StructId>,
     enums: HashMap<String, EnumId>,
@@ -172,6 +174,13 @@ struct Exports {
     generic_types: HashMap<String, usize>,
     interfaces: HashMap<String, usize>,
     public: HashSet<String>,
+}
+
+/// A constant: its value, which each use of it is, and where it is declared.
+#[derive(Clone)]
+pub(crate) struct Const {
+    pub value: Expr,
+    pub loc: Loc,
 }
 
 /// A place in one of the program's files: `file` indexes the files `analyze_with` returns.
@@ -283,6 +292,13 @@ pub struct Checker<'a> {
     variant_field_spans: HashMap<(EnumId, usize, usize), Loc>,
     unit_spans: HashMap<String, Loc>,
     units: HashMap<String, Unit>,
+    consts: HashMap<String, Const>,
+    /// The constants this module's code reads.
+    used_consts: HashSet<String>,
+    /// Keep the line of each statement (`Stmt::Line`), for `profile`: the lines, and their indices.
+    keep_lines: bool,
+    lines: Vec<String>,
+    line_ids: HashMap<(usize, usize), usize>,
     structs: Vec<StructDef>,
     struct_index: HashMap<String, StructId>,
     enums: Vec<EnumDef>,
@@ -372,12 +388,12 @@ pub fn check(src: &SourceFile, file: &ast::File) -> Result<Program, Vec<Diagnost
 /// check a file with imports.
 pub fn analyze(src: &SourceFile, file: &ast::File) -> Analysis {
     let m = Module { src, file, name: String::new(), imports: Vec::new(), c_files: HashMap::new(), examples: &[] };
-    analyze_modules(&[m], &[0])
+    analyze_modules(&[m], &[0], false)
 }
 
 /// Checks the modules of a program in `order` (each after the modules it imports, the root
 /// last) and joins them into one program; diagnostics carry the index of their module's file.
-pub fn analyze_modules<'a>(modules: &[Module<'a>], order: &[usize]) -> Analysis {
+pub fn analyze_modules<'a>(modules: &[Module<'a>], order: &[usize], keep_lines: bool) -> Analysis {
     let srcs: Vec<&'a SourceFile> = modules.iter().map(|m| m.src).collect();
     let mut c = Checker {
         src: modules[0].src,
@@ -417,6 +433,11 @@ pub fn analyze_modules<'a>(modules: &[Module<'a>], order: &[usize]) -> Analysis 
         variant_field_spans: HashMap::new(),
         unit_spans: HashMap::new(),
         units: HashMap::new(),
+        consts: HashMap::new(),
+        used_consts: HashSet::new(),
+        keep_lines,
+        lines: Vec::new(),
+        line_ids: HashMap::new(),
         structs: Vec::new(),
         struct_index: HashMap::new(),
         enums: Vec::new(),
@@ -491,6 +512,7 @@ pub fn analyze_modules<'a>(modules: &[Module<'a>], order: &[usize]) -> Analysis 
         c_files: c.c_files.clone(),
         branches: c.branches.clone(),
         handed: Default::default(),
+        lines: c.lines.clone(),
     };
     if c.diags.is_empty() {
         crate::moves::mark(&mut program);
@@ -628,6 +650,8 @@ impl<'a> Checker<'a> {
         self.units.clear();
         self.type_spans.clear();
         self.unit_spans.clear();
+        self.consts.clear();
+        self.used_consts.clear();
         self.imported.clear();
         self.touched.borrow_mut().clear();
         self.failed_imports.clear();
@@ -642,6 +666,7 @@ impl<'a> Checker<'a> {
         let file: &'a ast::File = me.file;
         let mut import_decls = Vec::new();
         let mut unit_decls = Vec::new();
+        let mut const_decls = Vec::new();
         let mut struct_decls = Vec::new();
         let mut enum_decls = Vec::new();
         let mut fn_decls = Vec::new();
@@ -653,6 +678,7 @@ impl<'a> Checker<'a> {
                 ast::Item::Import(i) => import_decls.push(i),
                 ast::Item::Interface(i) => interface_decls.push(i),
                 ast::Item::Unit(u) => unit_decls.push(u),
+                ast::Item::Const(c) => const_decls.push(c),
                 ast::Item::Struct(s) if !s.type_params.is_empty() => generic_decls.push(GenericKind::Struct(s)),
                 ast::Item::Enum(e) if !e.type_params.is_empty() => generic_decls.push(GenericKind::Enum(e)),
                 ast::Item::Fn(f) if f.external.is_some() && !f.type_params.is_empty() => {
@@ -696,6 +722,7 @@ impl<'a> Checker<'a> {
         }
         let sig_base = self.sigs.len();
         self.declare_fns(&fn_decls);
+        self.declare_consts(&const_decls);
         self.resolve_interfaces(&interface_decls);
         let own_generics: Vec<usize> = (first_generic..self.generics.len()).collect();
         for &g in &own_generics {
@@ -754,9 +781,18 @@ impl<'a> Checker<'a> {
         // Instances asked for by this module's bodies, checked where their generics live.
         self.scopes[self.module] = Some(self.save_scope());
         funcs.extend(self.run_pending(srcs));
+        if self.module == 0 {
+            for d in &const_decls {
+                let name = &d.name.name;
+                if !d.public && !name.starts_with('_') && !self.used_consts.contains(name) && self.consts.contains_key(name) {
+                    self.err(Diagnostic::new("E0340", d.name.span, format!("`{name}` is never used")));
+                }
+            }
+        }
 
         let mut ex = Exports::default();
         let own = |name: &String| !self.imported.contains_key(name);
+        ex.consts = self.consts.iter().filter(|(n, _)| own(n)).map(|(n, v)| (n.clone(), v.clone())).collect();
         ex.funcs = self.func_index.iter().filter(|(n, _)| own(n)).map(|(n, v)| (n.clone(), *v)).collect();
         ex.structs = self.struct_index.iter().filter(|(n, _)| own(n)).map(|(n, v)| (n.clone(), *v)).collect();
         ex.enums = self.enum_index.iter().filter(|(n, _)| own(n)).map(|(n, v)| (n.clone(), *v)).collect();
@@ -767,6 +803,7 @@ impl<'a> Checker<'a> {
         for item in &file.items {
             let name = match item {
                 ast::Item::Unit(d) if d.public => &d.name.name,
+                ast::Item::Const(d) if d.public => &d.name.name,
                 ast::Item::Struct(d) if d.public => &d.name.name,
                 ast::Item::Enum(d) if d.public => &d.name.name,
                 ast::Item::Fn(d) if d.public && d.receiver.is_none() => &d.name.name,
@@ -800,6 +837,10 @@ impl<'a> Checker<'a> {
                 continue;
             }
             let mut found = false;
+            if let Some(c) = ex.consts.get(name) {
+                self.consts.insert(name.clone(), c.clone());
+                found = true;
+            }
             if let Some(id) = ex.funcs.get(name) {
                 self.func_index.insert(name.clone(), *id);
                 found = true;
@@ -851,7 +892,12 @@ impl<'a> Checker<'a> {
             let decl = match (ex.funcs.get(name), ex.generic_fns.get(name).or(ex.generic_types.get(name))) {
                 (Some(&id), _) => Some(Loc { file: self.sigs[id].module, span: self.sigs[id].span }),
                 (_, Some(&g)) => Some(self.generic_loc(g)),
-                _ => ex.interfaces.get(name).map(|&i| self.interface_loc(i)).or(type_span.or(unit_span)),
+                _ => ex
+                    .interfaces
+                    .get(name)
+                    .map(|&i| self.interface_loc(i))
+                    .or(type_span.or(unit_span))
+                    .or(ex.consts.get(name).map(|c| c.loc)),
             };
             self.note_use(n.span, decl);
             if !ex.public.contains(name) {
@@ -969,7 +1015,7 @@ impl<'a> Checker<'a> {
     }
 
     fn check_new_name(&mut self, name: &ast::Ident, what: &str, seen: &mut HashMap<String, Span>) -> bool {
-        if matches!(what, "unit" | "type" | "function") {
+        if matches!(what, "unit" | "type" | "function" | "constant") {
             if let Some((prev, _)) = self.imported.get(&name.name) {
                 let prev = *prev;
                 self.err(
@@ -1537,21 +1583,240 @@ impl<'a> Checker<'a> {
     /// `body` (the block at `at`) with a marker first that counts its runs, except in a test or in
     /// a generic's abstract body, whose IR is dropped. An empty block is no branch: it has nothing
     /// to test (`None => {}` where no value is missing).
+    /// Works out the module's constants, which can name each other in any order.
+    fn declare_consts(&mut self, decls: &[&'a ast::ConstDecl]) {
+        let mut seen = HashMap::new();
+        let mut own: HashMap<&str, &'a ast::ConstDecl> = HashMap::new();
+        for d in decls {
+            let name = d.name.name.as_str();
+            let taken = self.func_index.contains_key(name)
+                || self.generic_fns.contains_key(name)
+                || self.struct_index.contains_key(name)
+                || self.enum_index.contains_key(name)
+                || self.generic_types.contains_key(name)
+                || BUILTINS.contains(&name)
+                || CONSTRUCTORS.contains(&name);
+            if taken {
+                self.err(Diagnostic::new("E0201", d.name.span, format!("constant `{name}` has the name of a function or a type")));
+                self.failed_imports.insert(name.to_string());
+            } else if self.check_new_name(&d.name, "constant", &mut seen) {
+                own.insert(name, d);
+            }
+        }
+        for d in decls {
+            if own.get(d.name.name.as_str()).is_some_and(|first| std::ptr::eq(*first, *d)) {
+                self.const_value(d, &own, &mut Vec::new());
+            }
+        }
+    }
+
+    /// The value of constant `d`, worked out the first time it is asked for; `doing` holds those
+    /// being worked out. A constant that fails counts as a failed import: its error is enough.
+    fn const_value(
+        &mut self,
+        d: &'a ast::ConstDecl,
+        own: &HashMap<&str, &'a ast::ConstDecl>,
+        doing: &mut Vec<String>,
+    ) -> Option<Expr> {
+        let name = &d.name.name;
+        if let Some(c) = self.consts.get(name) {
+            return Some(c.value.clone());
+        }
+        if self.failed_imports.contains(name) {
+            return None;
+        }
+        if doing.contains(name) {
+            self.failed_imports.insert(name.clone());
+            return self.not_const(d.name.span, format!("constant `{name}` depends on itself"));
+        }
+        doing.push(name.clone());
+        let want = self.resolve_type(&d.ty);
+        let value = self.const_fold(&d.value, own, doing);
+        doing.pop();
+        if !matches!(want, Ty::I64 | Ty::F64(_) | Ty::Bool | Ty::Str | Ty::Error) {
+            let t = self.show(&want);
+            self.failed_imports.insert(name.clone());
+            return self.not_const(d.ty.span, format!("a constant is an i64, f64, bool or str, not {t}"));
+        }
+        let fits = value.as_ref().is_some_and(|x| {
+            self.require_ty(&d.value, x, &want);
+            x.ty == want
+        });
+        if !fits {
+            self.failed_imports.insert(name.clone());
+            return None;
+        }
+        let text = self.text(d.span);
+        self.def(d.name.span, name.clone(), "const", text);
+        let loc = self.here(d.name.span);
+        self.consts.insert(name.clone(), Const { value: value.clone()?, loc });
+        value
+    }
+
+    fn not_const(&mut self, span: Span, message: String) -> Option<Expr> {
+        self.err(Diagnostic::new("E0351", span, message));
+        None
+    }
+
+    /// The literal `e` comes to, as an expression every use can be.
+    fn const_fold(
+        &mut self,
+        e: &ast::Expr,
+        own: &HashMap<&str, &'a ast::ConstDecl>,
+        doing: &mut Vec<String>,
+    ) -> Option<Expr> {
+        let lit = |kind, ty| Some(Expr { kind, ty });
+        match &e.kind {
+            AK::Int(v) => lit(ExprKind::Int(*v), Ty::I64),
+            AK::Float(v, unit) => {
+                let u = match unit {
+                    None => Unit::dimensionless(),
+                    Some(u) => self.unit_expr(u)?,
+                };
+                lit(ExprKind::Float(*v), Ty::F64(u))
+            }
+            AK::Bool(v) => lit(ExprKind::Bool(*v), Ty::Bool),
+            AK::Str(s) => lit(ExprKind::Str(s.clone()), Ty::Str),
+            AK::Paren(inner) => self.const_fold(inner, own, doing),
+            AK::Name(id) => {
+                self.touch(&id.name);
+                self.used_consts.insert(id.name.clone());
+                if let Some(d) = own.get(id.name.as_str()).copied() {
+                    let def = self.here(d.name.span);
+                    self.note_use(id.span, Some(def));
+                    return self.const_value(d, own, doing);
+                }
+                if let Some(c) = self.consts.get(&id.name).cloned() {
+                    self.note_use(id.span, Some(c.loc));
+                    return Some(c.value);
+                }
+                if self.failed_imports.contains(&id.name) {
+                    return None;
+                }
+                self.not_const(id.span, format!("`{}` is not a constant", id.name))
+            }
+            AK::Unary(op, x) => {
+                let x = self.const_fold(x, own, doing)?;
+                let ty = x.ty.clone();
+                match (op, &x.kind) {
+                    (UnOp::Neg, ExprKind::Int(v)) => match v.checked_neg() {
+                        Some(v) => lit(ExprKind::Int(v), ty),
+                        None => self.not_const(e.span, "this constant overflows i64".to_string()),
+                    },
+                    (UnOp::Neg, ExprKind::Float(v)) => lit(ExprKind::Float(-v), ty),
+                    (UnOp::Not, ExprKind::Bool(v)) => lit(ExprKind::Bool(!v), ty),
+                    (UnOp::BitNot, ExprKind::Int(v)) => lit(ExprKind::Int(!v), ty),
+                    _ => self.not_const(e.span, "this operator does not apply to that value".to_string()),
+                }
+            }
+            AK::Binary(op, l, r) => {
+                let (a, b) = (self.const_fold(l, own, doing), self.const_fold(r, own, doing));
+                let (a, b) = (a?, b?);
+                match fold_binary(*op, &a, &b) {
+                    Ok(x) => Some(x),
+                    Err(why) => self.not_const(e.span, why),
+                }
+            }
+            _ => self.not_const(e.span, "a constant is made of literals, other constants and operators".to_string()),
+        }
+    }
+
     fn marked(&mut self, b: &Body, at: Span, kind: BranchKind, mut body: Vec<Stmt>) -> Vec<Stmt> {
-        let Some(owner) = b.owner else { return body };
-        if self.abstract_body || body.is_empty() {
+        if body.is_empty() {
             return body;
         }
         // A branch that panics says it should not run: a test could not pass through it anyway.
         if let Some(Stmt::Expr(Expr { kind: ExprKind::Builtin(Builtin::Panic { .. }, _), .. })) = body.last() {
             return body;
         }
-        let id = *self.branch_ids.entry((self.module, at.start)).or_insert_with(|| {
+        if let Some(id) = self.branch_id(b, at, kind) {
+            body.insert(0, Stmt::Reached(id));
+        }
+        body
+    }
+
+    /// The id of the branch at `at`, whose runs count for the `unreached` lint.
+    fn branch_id(&mut self, b: &Body, at: Span, kind: BranchKind) -> Option<BranchId> {
+        let owner = b.owner?;
+        if self.abstract_body {
+            return None;
+        }
+        Some(*self.branch_ids.entry((self.module, at.start)).or_insert_with(|| {
             self.branches.push(Branch { module: self.module, at, owner, kind });
             self.branches.len() - 1
-        });
-        body.insert(0, Stmt::Reached(id));
-        body
+        }))
+    }
+
+    /// `let x: T = e else why { ... };`: the arm of the value binds `x`, the other leaves.
+    fn let_else(&mut self, b: &mut Body, s: &ast::Stmt, other: &ast::LetElse) -> Option<Stmt> {
+        let StmtKind::Let { mutable, kw_span, name, ty, init, .. } = &s.kind else { unreachable!("a let") };
+        let t = self.resolve_type(ty);
+        let e = self.expr(b, init);
+        let meta = |span, kw_span, mutable| LocalMeta {
+            span,
+            kw_span,
+            mutable,
+            is_param: false,
+            is_loop_var: false,
+            used: false,
+            assigned: false,
+            rename_fix: None,
+        };
+        let inner = match &e.ty {
+            Ty::Enum(id) if self.enums[*id].name.starts_with("Option[") || self.enums[*id].name.starts_with("Result[") => {
+                Some(*id)
+            }
+            Ty::Error => None,
+            other_ty => {
+                let shown = self.show(other_ty);
+                self.err(Diagnostic::new("E0352", init.span, format!("`let ... else` takes an Option or a Result, not {shown}")));
+                None
+            }
+        };
+        let Some(enum_id) = inner else {
+            // Its error is enough: uses of the name say nothing more.
+            self.failed_imports.insert(name.name.clone());
+            return None;
+        };
+        let def = self.enums[enum_id].clone();
+        let is_result = def.name.starts_with("Result[");
+        let value_ty = def.variants[0].fields[0].1.clone();
+        if value_ty != t && t != Ty::Error {
+            let (holds, declared) = (self.show(&value_ty), self.show(&t));
+            self.err(Diagnostic::new("E0300", init.span, format!("this holds {holds}, but `{}` is declared {declared}", name.name)));
+        }
+        b.scopes.push(HashMap::new());
+        let mut bindings = Vec::new();
+        if let Some(why) = &other.binding {
+            if is_result {
+                let err_ty = def.variants[RESULT_ERR].fields[0].1.clone();
+                let m = meta(why.span, None, false);
+                bindings.push((0, self.declare_local(b, why, err_ty, m)));
+            } else {
+                self.err(Diagnostic::new("E0352", why.span, "an Option's None holds nothing to name"));
+            }
+        }
+        let (at, end) = (other.body.span, other.body.span.end);
+        let body = self.block(b, &other.body);
+        let leaves = |st: &[ast::Stmt]| always_returns(st) || st.iter().any(|x| matches!(x.kind, StmtKind::Break | StmtKind::Continue));
+        if !leaves(&other.body.stmts) {
+            self.err(Diagnostic::new(
+                "E0352",
+                at,
+                "the `else` of a `let` must leave: return, break, continue, exit or panic",
+            ));
+        }
+        let variant = if is_result { "Err" } else { "None" };
+        let body = self.marked(b, at, BranchKind::Arm(variant.to_string()), body);
+        self.close_scope(b, end);
+        let held = self.hidden(b, e.ty.clone());
+        let m = meta(name.span, Some(*kw_span), *mutable);
+        let id = self.declare_local(b, name, t, m);
+        let arms = vec![
+            Arm { variant: 0, also: Vec::new(), bindings: vec![(0, id)], body: Vec::new() },
+            Arm { variant: 1, also: Vec::new(), bindings, body },
+        ];
+        Some(Stmt::Match { held, scrutinee: e, arms })
     }
 
     fn declare_local(&mut self, b: &mut Body, name: &ast::Ident, ty: Ty, meta: LocalMeta) -> LocalId {
@@ -1571,6 +1836,8 @@ impl<'a> Checker<'a> {
                 )
                 .note("first declared here", Some(prev)),
             );
+        } else if self.consts.contains_key(&name.name) {
+            self.err(Diagnostic::new("E0202", name.span, format!("`{}` is the name of a constant", name.name)));
         } else if self.func_index.contains_key(&name.name) || self.generic_fns.contains_key(&name.name) {
             self.err(Diagnostic::new("E0202", name.span, format!("`{}` is the name of a function", name.name)));
         } else if self.struct_index.contains_key(&name.name)
@@ -2195,6 +2462,16 @@ impl<'a> Checker<'a> {
                 terminated = Some(s.span);
             }
             if let Some(st) = self.stmt(b, s) {
+                if self.keep_lines {
+                    let line = self.src.line_col(s.span.start).0;
+                    let at = format!("{}:{line}", self.src.name);
+                    let lines = &mut self.lines;
+                    let id = *self.line_ids.entry((self.module, line)).or_insert_with(|| {
+                        lines.push(at);
+                        lines.len() - 1
+                    });
+                    out.push(Stmt::Line(id));
+                }
                 out.push(st);
             }
         }
@@ -2204,7 +2481,8 @@ impl<'a> Checker<'a> {
 
     fn stmt(&mut self, b: &mut Body, s: &ast::Stmt) -> Option<Stmt> {
         Some(match &s.kind {
-            StmtKind::Let { mutable, kw_span, name, ty, init } => {
+            StmtKind::Let { otherwise: Some(other), .. } => return self.let_else(b, s, other),
+            StmtKind::Let { mutable, kw_span, name, ty, init, otherwise: None } => {
                 let t = self.resolve_type(ty);
                 let e = self.value(b, init, &t);
                 let meta = LocalMeta {
@@ -2318,6 +2596,12 @@ impl<'a> Checker<'a> {
                         );
                         if let Ty::Map(..) = other {
                             d = d.note("loop over its keys or values: for k in m.keys() { }", None);
+                        }
+                        if *other == Ty::Bytes {
+                            d = d.note("loop by index: for i in 0..b.len() { }, or over b.to_array()", None);
+                        }
+                        if *other == Ty::Str {
+                            d = d.note("loop over its characters: for c in s.chars() { }", None);
                         }
                         self.err(d);
                         Ty::Error
@@ -2562,21 +2846,8 @@ impl<'a> Checker<'a> {
                 self.err(d);
                 return Vec::new();
             }
+            // Named alone, it binds nothing, as in an arm with several variants.
             (None, false) => {
-                let list: Vec<String> = v.fields.iter().map(|(f, _)| format!("{f}: _")).collect();
-                self.err(
-                    Diagnostic::new(
-                        "E0402",
-                        arm.variant.span,
-                        format!("`{vname}` has fields; list them in the pattern"),
-                    )
-                    .fix1(
-                        FixKind::ChangesMeaning,
-                        "list the fields, ignoring each",
-                        arm.variant.span.at_end(),
-                        format!("({})", list.join(", ")),
-                    ),
-                );
                 return Vec::new();
             }
             (Some(fs), false) => fs,
@@ -2890,7 +3161,9 @@ impl<'a> Checker<'a> {
             return;
         }
         let mut d = Diagnostic::new("E0200", id.span, format!("unknown name `{}`", id.name));
-        if self.func_index.contains_key(&id.name) || BUILTINS.contains(&id.name.as_str()) {
+        if self.consts.contains_key(&id.name) {
+            d = d.note(format!("`{}` is a constant, which cannot be assigned", id.name), None);
+        } else if self.func_index.contains_key(&id.name) || BUILTINS.contains(&id.name.as_str()) {
             d = d.note(format!("`{}` is a function; call it with ( )", id.name), None);
         } else if self.enum_index.contains_key(&id.name) {
             d = d.note(format!("`{0}` is an enum; name a variant: {0}.Variant", id.name), None);
@@ -3022,6 +3295,25 @@ impl<'a> Checker<'a> {
             AK::Bool(v) => (ExprKind::Bool(*v), Ty::Bool),
             AK::Str(s) => (ExprKind::Str(s.clone()), Ty::Str),
             AK::Paren(inner) => return self.expr_hint(b, inner, hint),
+            AK::If(c, yes, no) => {
+                let cond = self.expect(b, c, &Ty::Bool);
+                let then = self.expr_hint(b, yes, hint);
+                let otherwise = self.expect(b, no, &then.ty);
+                if then.ty == Ty::Void {
+                    self.err(Diagnostic::new("E0300", yes.span, "an `if` that gives a value needs one from each branch"));
+                }
+                let then_branch = self.branch_id(b, yes.span, BranchKind::Then);
+                let else_branch = self.branch_id(b, no.span, BranchKind::Else);
+                let ty = then.ty.clone();
+                let kind = ExprKind::Cond {
+                    cond: Box::new(cond),
+                    then: Box::new(then),
+                    otherwise: Box::new(otherwise),
+                    then_branch,
+                    else_branch,
+                };
+                (kind, ty)
+            }
             AK::Name(id) if id.name == "None" => return self.builtin_ctor(b, e, id, None, hint),
             AK::Name(id) => match self.lookup_local(b, id) {
                 Some(l) => {
@@ -3031,6 +3323,11 @@ impl<'a> Checker<'a> {
                 }
                 None => {
                     self.touch(&id.name);
+                    if let Some(c) = self.consts.get(&id.name).cloned() {
+                        self.used_consts.insert(id.name.clone());
+                        self.note_use(id.span, Some(c.loc));
+                        return c.value;
+                    }
                     if let Some(&fid) = self.func_index.get(&id.name) {
                         return self.fn_value(id, fid);
                     }
@@ -3672,10 +3969,11 @@ impl<'a> Checker<'a> {
         if b.uses.has(e) {
             return;
         }
+        let who = if b.owner.is_some() { "this function" } else { "this test" };
         let whose = if b.uses.is_pure() {
-            "this function is pure".to_string()
+            format!("{who} is pure")
         } else {
-            format!("this function does not declare uses {}", e.name())
+            format!("{who} does not declare uses {}", e.name())
         };
         // The effect goes where the formatter puts it: a clause lists io, fs, clock, random.
         let rank = |n: &str| EFFECTS.iter().position(|x| *x == n).unwrap_or(EFFECTS.len());
@@ -4025,6 +4323,13 @@ impl<'a> Checker<'a> {
                     return bad(self, "bool");
                 }
                 let message = format!("assertion failed at {site}: {}", self.text(arg.span));
+                // A comparison of what `print` can write shows both sides when it fails.
+                if let ExprKind::Cmp(op, l, r) = &x.kind {
+                    if matches!(l.ty, Ty::I64 | Ty::F64(_) | Ty::Bool | Ty::Str) {
+                        let sides = vec![(**l).clone(), (**r).clone()];
+                        return Expr { kind: ExprKind::Builtin(Builtin::AssertCmp { message, op: *op }, sides), ty: Ty::Void };
+                    }
+                }
                 Expr { kind: ExprKind::Builtin(Builtin::Assert { message }, vec![x]), ty: Ty::Void }
             }
             "sqrt" => match &t {
@@ -4455,7 +4760,7 @@ impl<'a> Checker<'a> {
         }
         let want_args = match m {
             "pop" | "len" | "keys" | "values" | "trim" | "parse_i64" | "parse_f64" | "to_bytes" | "to_str" | "hex"
-            | "to_array" | "to_upper" | "to_lower" | "chars" | "sorted" | "reversed" => Some(0),
+            | "to_array" | "to_upper" | "to_lower" | "chars" | "sorted" | "reversed" | "bit_len" => Some(0),
             "push" | "remove" | "has" | "get" | "contains" | "find" | "starts_with" | "ends_with" | "split" | "xor"
             | "unsigned_shr" | "wrapping_add" | "wrapping_sub" | "wrapping_mul" | "join" | "fixed"
             | "parallel_map" => Some(1),
@@ -4552,6 +4857,7 @@ impl<'a> Checker<'a> {
             ("wrapping_add", Ty::I64) => (Builtin::WrappingAdd, Ty::I64),
             ("wrapping_sub", Ty::I64) => (Builtin::WrappingSub, Ty::I64),
             ("wrapping_mul", Ty::I64) => (Builtin::WrappingMul, Ty::I64),
+            ("bit_len", Ty::I64) => (Builtin::BitLen, Ty::I64),
             ("to_bytes", Ty::Str) => (Builtin::StrToBytes, Ty::Bytes),
             ("to_str", Ty::Bytes) => (Builtin::BytesToStr, self.option_of(Ty::Str)),
             ("hex", Ty::Bytes) => (Builtin::BytesHex, Ty::Str),
@@ -4730,6 +5036,73 @@ fn is_place(e: &ast::Expr) -> bool {
         AK::Name(_) => true,
         AK::Field(b, _) | AK::Index(b, _) | AK::Paren(b) => is_place(b),
         _ => false,
+    }
+}
+
+/// `a op b` for two literals of a constant, as running it would give.
+fn fold_binary(op: BinOp, a: &Expr, b: &Expr) -> Result<Expr, String> {
+    fn compare<T: PartialOrd + ?Sized>(op: BinOp, a: &T, b: &T) -> bool {
+        match op {
+            BinOp::Eq => a == b,
+            BinOp::Ne => a != b,
+            BinOp::Lt => a < b,
+            BinOp::Le => a <= b,
+            BinOp::Gt => a > b,
+            _ => a >= b,
+        }
+    }
+    let boolean = |v| Ok(Expr { kind: ExprKind::Bool(v), ty: Ty::Bool });
+    let mismatch = || format!("`{}` cannot join these values in a constant", op.text());
+    match (&a.kind, &b.kind) {
+        (ExprKind::Int(x), ExprKind::Int(y)) => {
+            let (x, y) = (*x, *y);
+            if op.is_comparison() {
+                return boolean(compare(op, &x, &y));
+            }
+            let shift = (0..=63).contains(&y);
+            let out = match op {
+                BinOp::Add => x.checked_add(y),
+                BinOp::Sub => x.checked_sub(y),
+                BinOp::Mul => x.checked_mul(y),
+                BinOp::Div => x.checked_div(y),
+                BinOp::Rem => x.checked_rem(y),
+                BinOp::BitAnd => Some(x & y),
+                BinOp::BitOr => Some(x | y),
+                BinOp::Shl => shift.then(|| ((x as u64) << y) as i64),
+                BinOp::Shr => shift.then(|| x >> y),
+                _ => return Err(mismatch()),
+            };
+            match out {
+                Some(v) => Ok(Expr { kind: ExprKind::Int(v), ty: Ty::I64 }),
+                None => Err("this constant overflows i64, divides by zero or shifts by other than 0..63".to_string()),
+            }
+        }
+        (ExprKind::Float(x), ExprKind::Float(y)) => {
+            let (Ty::F64(ux), Ty::F64(uy)) = (&a.ty, &b.ty) else { unreachable!("a float of {:?}", a.ty) };
+            let (v, u) = match op {
+                BinOp::Mul => (x * y, ux.mul(uy)),
+                BinOp::Div => (x / y, ux.div(uy)),
+                _ if ux != uy => return Err(mismatch()),
+                BinOp::Add => (x + y, ux.clone()),
+                BinOp::Sub => (x - y, ux.clone()),
+                _ if op.is_comparison() => return boolean(compare(op, x, y)),
+                _ => return Err(mismatch()),
+            };
+            Ok(Expr { kind: ExprKind::Float(v), ty: Ty::F64(u) })
+        }
+        (ExprKind::Bool(x), ExprKind::Bool(y)) => match op {
+            BinOp::And => boolean(*x && *y),
+            BinOp::Or => boolean(*x || *y),
+            BinOp::Eq => boolean(x == y),
+            BinOp::Ne => boolean(x != y),
+            _ => Err(mismatch()),
+        },
+        (ExprKind::Str(x), ExprKind::Str(y)) => match op {
+            BinOp::Add => Ok(Expr { kind: ExprKind::Str(format!("{x}{y}")), ty: Ty::Str }),
+            _ if op.is_comparison() => boolean(compare(op, x.as_str(), y.as_str())),
+            _ => Err(mismatch()),
+        },
+        _ => Err(mismatch()),
     }
 }
 

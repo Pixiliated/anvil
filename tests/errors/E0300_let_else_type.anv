@@ -1,0 +1,7 @@
+// expect: E0300
+fn main() -> i64 {
+    let n: str = "1".parse_i64() else {
+        return 1;
+    };
+    return n.len();
+}

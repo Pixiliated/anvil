@@ -162,7 +162,7 @@ fn dispatch(p: &Parsed) -> Result<Report, String> {
         "mutate" => anvil_ops::mutate(root, file, text("only"), steps),
         "api" => anvil_ops::api(root, pos(0)),
         "api approve" => anvil_ops::api_approve(root, file),
-        "measure" => anvil_ops::measure(root, pos(0), steps, &input(false)),
+        "measure" => anvil_ops::measure(root, pos(0), steps, &input(false), p.options.contains_key("native-only")),
         "usage" => anvil_ops::usage(root, pos(0), steps),
         "usage approve" => anvil_ops::usage_approve(root, pos(0), steps),
         "golden check" => anvil_ops::golden_check(root, pos(0), native, steps),
@@ -197,7 +197,8 @@ fn main() -> ExitCode {
         println!("anvil {}", anvil_ops::version());
         return ExitCode::SUCCESS;
     }
-    if words == ["--help"] || words == ["-h"] || words == ["help"] {
+    let asked = |w: &String| w == "--help" || w == "-h";
+    if words == ["help"] || words.iter().take_while(|w| *w != "--").any(asked) {
         println!("{}", usage());
         return ExitCode::SUCCESS;
     }

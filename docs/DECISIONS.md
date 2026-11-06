@@ -658,3 +658,29 @@ Short records of choices that are not obvious from the code. Newest last.
   no longer names one; a program that runs out on both now has one golden.
 - **Left out**: constants, `ln` and `exp` (not the same bits on every platform), sampling profiles
   and a faster interpreter. Listed in M38 or waiting for a second report.
+
+## M38 (v0.39)
+
+- **Constants are their values**: each use is the literal, worked out when checked, so nothing runs
+  before `main`, no order of initialisation exists, and an overflow is a compile error. Arrays are left
+  out: as values they would allocate at each use, and as anything else they would be a new kind of thing.
+- **`for` hands elements out only when alone**: reading the count at run time keeps value semantics
+  without an analysis, and the loop variable is now dead at the end of a round, so its last read moves.
+- **`let ... else` must leave**: a value has to exist after it, and a default is what `if` is for. It
+  is a `match` underneath, so moves, coverage and both backends needed nothing new. No pattern on the
+  left: the type is stated as in every `let`, and the only question is whether there is a value.
+- **`if` as a value holds one expression a branch**: statements inside would bring blocks with results.
+  It is a branch to the `unreached` lint, or the lint would lose what it had when the choice was a `var`.
+- **An assert shows what `print` can write**: arrays and structs would need a printer in the runtime
+  for every type, as the interpreter has; left for when it is asked for again.
+- **Bare arms ignore fields**: `A | B =>` already did, so `A =>` being an error was only a rule to learn.
+- **Coverage waits for the tests**: a failing test stops early, so what it would have run looks unrun.
+  Thirty false findings are worse than none while the tests are red.
+- **Logarithmic needs its own proof**: slack alone took appending, which doubles its room, for
+  logarithmic, as a large multiple of the bits rides just above what doubles in steps. So doubling the
+  size has to add, not multiply, and a constant bound above what 64 bits can need is not outgrown.
+- **Golden text says `panic:` per line**: panics can now run over lines, and a native run's panic is
+  read from the last line that starts one. A `panic("a\nb")` could not be approved before this.
+- **Left out**: tuples (a struct says more, and no agent lost more than typing), `import as` and raw
+  strings holding a backtick (one attempt each). Listed in M39 or waiting for a third report.
+

@@ -567,6 +567,7 @@ fn completion_kind(kind: &str) -> u32 {
         "enum" => 13,
         "type" => 7,
         "unit" => 11,
+        "const" => 21,
         _ => 14,
     }
 }
@@ -576,7 +577,7 @@ fn symbol_kind(kind: &str) -> u32 {
         "import" => 2,
         "struct" => 23,
         "enum" => 10,
-        "unit" => 14,
+        "unit" | "const" => 14,
         _ => 12,
     }
 }

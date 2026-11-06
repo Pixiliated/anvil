@@ -241,6 +241,9 @@ pub struct Program {
     /// By call site (`file:line:col`): the arguments read there whose copies cost anything,
     /// and whether each moves; `profile` names them where a copy came from that call.
     pub handed: std::collections::BTreeMap<String, Vec<Handed>>,
+    /// `file:line` of each source line a statement is on, when compiled with its lines
+    /// (`compile_lines`); empty otherwise.
+    pub lines: Vec<String>,
 }
 
 /// An argument read from a variable or a place in one (see `moves`).
@@ -328,7 +331,8 @@ pub enum Stmt {
     While(Expr, Vec<Stmt>),
     /// `for i in start..end`, end exclusive, both evaluated once.
     For(LocalId, Expr, Expr, Vec<Stmt>),
-    /// `for x in array`: iterates a snapshot held in the hidden local `held`.
+    /// `for x in array`: iterates a snapshot held in the hidden local `held`. A snapshot nothing
+    /// else holds hands each element out, leaving its place empty.
     ForEach {
         var: LocalId,
         held: LocalId,
@@ -349,6 +353,9 @@ pub enum Stmt {
     Reached(BranchId),
     /// Lets go of what a local holds, as nothing reads it again (see `moves`); not a step.
     Drop(LocalId),
+    /// The next statement is on this line (an index in `Program::lines`), which `profile` counts
+    /// by; does nothing else, and is not a step.
+    Line(usize),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -397,6 +404,12 @@ pub enum Builtin {
     PrintRaw,
     Assert {
         message: String,
+    },
+    /// `assert(a == b)` on numbers, booleans or text; args are the two sides, shown when it fails
+    /// (see `failed_sides`).
+    AssertCmp {
+        message: String,
+        op: CmpOp,
     },
     /// Stops the program with the message and the site.
     Panic {
@@ -501,6 +514,9 @@ pub enum Builtin {
     },
     /// `xs.reversed()`
     ArrReversed,
+    /// `x.bit_len()`: the bits it takes to write an i64 taken as unsigned, so 0 for 0 and 64 for
+    /// a negative.
+    BitLen,
     /// Like Print, to stderr.
     EPrint,
     /// Ends the program with the code; panics naming `site` outside 0..=255, or in a test.
@@ -524,6 +540,14 @@ pub struct Expr {
 
 #[derive(Clone, Debug)]
 pub enum ExprKind {
+    /// `if c { a } else { b }`; each branch counts a run of its own for coverage, when it has an id.
+    Cond {
+        cond: Box<Expr>,
+        then: Box<Expr>,
+        otherwise: Box<Expr>,
+        then_branch: Option<BranchId>,
+        else_branch: Option<BranchId>,
+    },
     Int(i64),
     Float(f64),
     Bool(bool),
@@ -730,6 +754,11 @@ macro_rules! children_fn {
                     for x in es {
                         out.push(x);
                     }
+                }
+                ExprKind::Cond { cond, then, otherwise, .. } => {
+                    out.push(& $($m)? **cond);
+                    out.push(& $($m)? **then);
+                    out.push(& $($m)? **otherwise);
                 }
                 ExprKind::Bits { l: a, r: b, .. }
                 | ExprKind::IArith { l: a, r: b, .. }
@@ -1025,6 +1054,58 @@ impl Random {
 
 /// The virtual clock of tests and goldens: the n-th read (from 0) gives n milliseconds.
 pub const VIRTUAL_TICK_NS: i64 = 1_000_000;
+
+/// What a failed `assert(a == b)` says: the assertion and each side, as `print` writes it; text is
+/// quoted, and when it is long, cut to where the sides first differ. The C runtime words it the
+/// same (`anvil_panic_sides`).
+pub fn failed_sides(message: &str, left: &str, right: &str, text: bool) -> String {
+    /// Text up to this long is shown whole; longer, this much before the first difference and this
+    /// much in all.
+    const WHOLE: usize = 300;
+    const BEFORE: usize = 40;
+    const SHOWN: usize = 200;
+    fn quoted(s: &str) -> String {
+        let mut out = String::from("\"");
+        for c in s.chars() {
+            match c {
+                '"' => out.push_str("\\\""),
+                '\\' => out.push_str("\\\\"),
+                '\n' => out.push_str("\\n"),
+                '\r' => out.push_str("\\r"),
+                '\t' => out.push_str("\\t"),
+                c => out.push(c),
+            }
+        }
+        out.push('"');
+        out
+    }
+    if !text {
+        return format!("{message}\n  left:  {left}\n  right: {right}");
+    }
+    if left.len().max(right.len()) <= WHOLE {
+        return format!("{message}\n  left:  {}\n  right: {}", quoted(left), quoted(right));
+    }
+    let same = left.bytes().zip(right.bytes()).take_while(|(a, b)| a == b).count();
+    let part = |s: &str| {
+        let mut from = same.saturating_sub(BEFORE).min(s.len());
+        while !s.is_char_boundary(from) {
+            from -= 1;
+        }
+        let mut to = (from + SHOWN).min(s.len());
+        while !s.is_char_boundary(to) {
+            to -= 1;
+        }
+        let (open, close) = (if from > 0 { "..." } else { "" }, if to < s.len() { "..." } else { "" });
+        format!("{open}{}{close}", quoted(&s[from..to]))
+    };
+    format!(
+        "{message}\n  left:  {}\n  right: {}\n  first difference at byte {same}, of {} and {} bytes",
+        part(left),
+        part(right),
+        left.len(),
+        right.len()
+    )
+}
 
 pub fn missing_key_message(site: &str) -> String {
     format!("remove of a key the map does not have at {site}")

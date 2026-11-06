@@ -465,7 +465,7 @@ fn in_scope(a: &Analysis, at: usize) -> Vec<Item> {
             "param" | "local" => {
                 d.file == 0 && d.span.end <= at && d.scope.is_some_and(|s| s.start <= at && at <= s.end)
             }
-            "fn" | "struct" | "enum" | "type" | "unit" => d.file == 0 || imported(d),
+            "fn" | "struct" | "enum" | "type" | "unit" | "const" => d.file == 0 || imported(d),
             _ => false,
         };
         if visible {

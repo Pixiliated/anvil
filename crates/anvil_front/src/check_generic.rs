@@ -94,6 +94,7 @@ pub(super) struct Scope {
     pub units: HashMap<String, crate::units::Unit>,
     pub type_spans: HashMap<String, Loc>,
     pub unit_spans: HashMap<String, Loc>,
+    pub consts: HashMap<String, super::Const>,
     pub generic_fns: HashMap<String, usize>,
     pub generic_types: HashMap<String, usize>,
     pub imported: HashMap<String, (Span, usize)>,
@@ -933,6 +934,7 @@ impl<'a> Checker<'a> {
             units: self.units.clone(),
             type_spans: self.type_spans.clone(),
             unit_spans: self.unit_spans.clone(),
+            consts: self.consts.clone(),
             generic_fns: self.generic_fns.clone(),
             generic_types: self.generic_types.clone(),
             imported: self.imported.clone(),
@@ -947,6 +949,7 @@ impl<'a> Checker<'a> {
         self.units = s.units;
         self.type_spans = s.type_spans;
         self.unit_spans = s.unit_spans;
+        self.consts = s.consts;
         self.generic_fns = s.generic_fns;
         self.generic_types = s.generic_types;
         self.imported = s.imported;

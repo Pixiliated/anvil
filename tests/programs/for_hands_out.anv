@@ -1,0 +1,147 @@
+// `for x in xs` over an array nothing else holds hands each element out, so changing it copies
+// nothing; an array also held elsewhere keeps its elements, and is seen unchanged.
+
+struct Bag {
+    name: str,
+    count: i64,
+    items: [i64],
+}
+
+enum Note {
+    Text(body: str),
+    Numbers(values: [i64]),
+    Empty,
+}
+
+fn grown(bags: [Bag]) -> [Bag] {
+    var out: [Bag] = [];
+    for b in bags {
+        var bag: Bag = b;
+        bag.items.push(bag.count);
+        bag.name = bag.name + "!";
+        out.push(bag);
+    }
+    return out;
+}
+
+fn made(n: i64) -> [Bag] {
+    var out: [Bag] = [];
+    for i in 0..n {
+        out.push(Bag { name: "bag{i}", count: i, items: [i, i + 1] });
+    }
+    return out;
+}
+
+// The rows are read again after the loop, so each row is shared with them.
+fn lengths_after(rows: [[i64]]) -> i64 {
+    var total: i64 = 0;
+    for r in rows {
+        var row: [i64] = r;
+        row.push(1);
+        total = total + row.len();
+    }
+    return total * 100 + rows[0].len();
+}
+
+// Leaving early lets go of the elements not reached.
+fn first_long(words: [str]) -> str {
+    for w in words {
+        if w.len() > 3 {
+            return w;
+        }
+    }
+    return "";
+}
+
+fn until_stop(words: [str]) -> str {
+    var out: str = "";
+    for w in words {
+        if w == "skip" {
+            continue;
+        }
+        if w == "stop" {
+            break;
+        }
+        out = out + w;
+    }
+    return out;
+}
+
+// The loop variable is read in one branch only, and in a nested loop in another.
+fn notes(all: [Note]) -> i64 {
+    var total: i64 = 0;
+    for n in all {
+        match n {
+            Text(body) => { total = total + body.len(); }
+            Numbers(values) => {
+                for v in values {
+                    total = total + v;
+                }
+            }
+            Empty => {}
+        }
+    }
+    return total;
+}
+
+fn nested(rows: [[str]]) -> str {
+    var out: str = "";
+    for row in rows {
+        for cell in row {
+            out = out + cell;
+        }
+        out = out + "|";
+    }
+    return out;
+}
+
+fn the_same_twice(words: [str]) -> str {
+    var out: str = "";
+    for w in words {
+        out = out + w;
+    }
+    for w in words {
+        out = out + w;
+    }
+    return out;
+}
+
+fn main() uses io {
+    for b in grown(made(3)) {
+        print("{b.name} {b.count} {b.items.len()} {b.items[2]}");
+    }
+    print(lengths_after([[1, 2], [3]]));
+    print(first_long(["a", "bb", "cccc", "dddddd"]));
+    print(first_long(["a"]));
+    print(until_stop(["a", "skip", "b", "stop", "c"]));
+    print(notes([Note.Text("abc"), Note.Empty, Note.Numbers([4, 5])]));
+    print(nested([["a", "b"], [], ["c"]]));
+    print(the_same_twice(["x", "y"]));
+}
+
+test "an array also held elsewhere keeps its elements" {
+    let words: [str] = ["a", "b"];
+    var seen: str = "";
+    for w in words {
+        seen = seen + w;
+    }
+    assert(seen == "ab");
+    assert(words[0] == "a" && words[1] == "b");
+}
+
+test "what the loop hands out can be changed without copying" {
+    let out: [Bag] = grown(made(2));
+    assert(out[1].items == [1, 2, 1]);
+    assert(out[0].name == "bag0!");
+}
+
+test "the rest" {
+    assert(lengths_after([[1]]) == 201);
+    assert(first_long(["abcd"]) == "abcd");
+    assert(first_long([]) == "");
+    assert(until_stop(["skip", "x", "stop", "y"]) == "x");
+    assert(notes([Note.Numbers([1])]) == 1);
+    assert(notes([Note.Text("ab"), Note.Empty]) == 2);
+    assert(nested([["z"]]) == "z|");
+    assert(the_same_twice(["q"]) == "qq");
+}

@@ -470,6 +470,69 @@ void anvil_panic_at(const AnvStr *message, const AnvStr *site) {
     panic_bytes(buf, (int64_t)n);
 }
 
+/* What a failed assert(a == b) says, worded as ir::failed_sides words it. */
+static char *put_bytes(char *to, const char *from, size_t n) {
+    memcpy(to, from, n);
+    return to + n;
+}
+
+static char *put_text(char *to, const char *s) { return put_bytes(to, s, strlen(s)); }
+
+static char *put_quoted(char *to, const char *s, int64_t n) {
+    *to++ = '"';
+    for (int64_t i = 0; i < n; i++) {
+        switch (s[i]) {
+        case '"': to = put_text(to, "\\\""); break;
+        case '\\': to = put_text(to, "\\\\"); break;
+        case '\n': to = put_text(to, "\\n"); break;
+        case '\r': to = put_text(to, "\\r"); break;
+        case '\t': to = put_text(to, "\\t"); break;
+        default: *to++ = s[i];
+        }
+    }
+    *to++ = '"';
+    return to;
+}
+
+static char *put_part(char *to, const AnvStr *s, int64_t same) {
+    int64_t from = same > 40 ? same - 40 : 0;
+    if (from > s->len) from = s->len;
+    while (from > 0 && from < s->len && ((unsigned char)s->bytes[from] & 0xC0) == 0x80) from--;
+    int64_t end = from + 200 < s->len ? from + 200 : s->len;
+    while (end > from && end < s->len && ((unsigned char)s->bytes[end] & 0xC0) == 0x80) end--;
+    if (from > 0) to = put_text(to, "...");
+    to = put_quoted(to, s->bytes + from, end - from);
+    if (end < s->len) to = put_text(to, "...");
+    return to;
+}
+
+void anvil_panic_sides(const AnvStr *message, const AnvStr *left, const AnvStr *right, int64_t text) {
+    size_t room = (size_t)message->len + 2 * (size_t)left->len + 2 * (size_t)right->len + 200;
+    char *buf = xmalloc(room);
+    char *to = put_bytes(buf, message->bytes, (size_t)message->len);
+    to = put_text(to, "\n  left:  ");
+    if (!text) {
+        to = put_bytes(to, left->bytes, (size_t)left->len);
+        to = put_text(to, "\n  right: ");
+        to = put_bytes(to, right->bytes, (size_t)right->len);
+    } else if (left->len <= 300 && right->len <= 300) {
+        to = put_quoted(to, left->bytes, left->len);
+        to = put_text(to, "\n  right: ");
+        to = put_quoted(to, right->bytes, right->len);
+    } else {
+        int64_t same = 0;
+        while (same < left->len && same < right->len && left->bytes[same] == right->bytes[same]) same++;
+        to = put_part(to, left, same);
+        to = put_text(to, "\n  right: ");
+        to = put_part(to, right, same);
+        char tail[96];
+        int n = snprintf(tail, sizeof tail, "\n  first difference at byte %lld, of %lld and %lld bytes", (long long)same,
+                         (long long)left->len, (long long)right->len);
+        to = put_bytes(to, tail, (size_t)n);
+    }
+    panic_bytes(buf, (int64_t)(to - buf));
+}
+
 /* ---- running out of stack: a panic like any other, where the system would end the program
  * with no word (the text is the interpreter's). It runs on what is kept for it: a stack of its
  * own on POSIX, the room SetThreadStackGuarantee keeps on Windows. */

@@ -1,8 +1,8 @@
 //! `anvil cost FILE`: how the work and the memory of each pure function grow. Each one is called
 //! on generated arguments of growing size (arrays and text up to 40 long), its steps and the
-//! bytes it allocates counted exactly; each is fitted as constant, linear or quadratic in one
-//! parameter's size, and the tightest `steps` and `allocs` clauses that hold for every call are
-//! suggested, so a bound is measured, not guessed.
+//! bytes it allocates counted exactly; each is fitted as constant, logarithmic, linear or quadratic
+//! in one size (of a parameter, or of a field of a struct parameter), and the tightest `steps` and
+//! `allocs` clauses that hold for every call are suggested, so a bound is measured, not guessed.
 
 use crate::{compile, Report};
 use anvil_front::ir::{Check, Program, Ty};
@@ -13,17 +13,41 @@ use std::path::Path;
 /// Calls measured per function.
 const CASES: u64 = 200;
 
-/// What one parameter's size is called in a bound, and its size in one call.
-fn size_of(name: &str, ty: &Ty, v: &Value) -> Option<(String, i64)> {
+/// The sizes a bound can name in one parameter (`xs.len()`, `n`, `h.keys.len()`), with what each
+/// is in one call. Which there are depends only on the type, so every call lists the same ones.
+fn sizes_of(name: &str, ty: &Ty, v: &Value, program: &Program, out: &mut Vec<(String, i64)>) {
     let n = match (ty, v) {
         (Ty::Str, Value::Str(s)) => s.len() as i64,
         (Ty::Bytes, Value::Bytes(b)) => b.len() as i64,
         (Ty::Array(_), Value::Array(a)) => a.len() as i64,
         (Ty::Map(..), Value::Map(m)) => m.len() as i64,
-        (Ty::I64, Value::I64(i)) => return Some((name.to_string(), *i)),
-        _ => return None,
+        (Ty::I64, Value::I64(i)) => return out.push((name.to_string(), *i)),
+        (Ty::Struct(id), Value::Struct(fields)) => {
+            for ((field, t), f) in program.structs[*id].fields.iter().zip(fields.iter()) {
+                sizes_of(&format!("{name}.{field}"), t, f, program, out);
+            }
+            return;
+        }
+        _ => return,
     };
-    Some((format!("{name}.len()"), n))
+    out.push((format!("{name}.len()"), n));
+}
+
+/// The bits it takes to write `x`, as `bit_len` gives them.
+fn bits(x: u64) -> u64 {
+    (64 - x.leading_zeros()) as u64
+}
+
+/// Whether doubling a size adds to `values` rather than multiplying them: at the largest size, at
+/// most half as much again as anywhere up to half that size. Slack alone cannot tell: a big enough
+/// multiple of the bits rides above what doubles in steps. The extremes of generated integers say
+/// nothing about growth, so they are left out.
+fn doubling_adds(sizes: &[u64], values: &[u64]) -> bool {
+    let points = || sizes.iter().zip(values).filter(|(x, _)| **x <= 1 << 20);
+    let Some(&largest) = points().map(|(x, _)| x).max() else { return false };
+    let at_largest = points().filter(|(x, _)| **x == largest).map(|(_, v)| *v).max().unwrap_or(0);
+    let up_to_half = points().filter(|(x, _)| **x <= largest / 2).map(|(_, v)| *v).max().unwrap_or(0);
+    largest >= 16 && up_to_half > 0 && at_largest.saturating_mul(2) <= up_to_half.saturating_mul(3)
 }
 
 /// One resource measured over a function's calls: steps or bytes allocated.
@@ -108,6 +132,7 @@ impl Model {
         let x = match self.form {
             "constant" => return format!("{keyword} {}", self.b),
             "linear" => self.term.clone(),
+            "logarithmic" => format!("{}.bit_len()", self.term),
             // x * (x + 1) is even, so the division is exact; a multiplies first.
             _ if self.triangular => {
                 let t = &self.term;
@@ -133,12 +158,13 @@ impl Model {
     }
 
     fn order(&self) -> usize {
-        ["constant", "linear", "quadratic"].iter().position(|g| *g == self.form).unwrap()
+        ["constant", "logarithmic", "linear", "quadratic"].iter().position(|g| *g == self.form).unwrap()
     }
 }
 
-/// The simplest of constant, linear or quadratic in one size that fits `values` about as tightly
-/// as the best (within 5%, or two units a call).
+/// The simplest of constant, logarithmic, linear or quadratic in one size that fits `values` about
+/// as tightly as the best (within 5%, or two units a call; logarithmic only within 5%, since over
+/// sizes this small two units a call would take in much that is linear).
 fn model(sizes: &[Vec<(String, i64)>], values: &[u64]) -> Model {
     let most = values.iter().copied().max().unwrap_or(0);
     let constant_slack: u64 = values.iter().map(|s| most - s).fold(0, u64::saturating_add);
@@ -151,12 +177,16 @@ fn model(sizes: &[Vec<(String, i64)>], values: &[u64]) -> Model {
         let negative = sizes.iter().any(|s| s[k].1 < 0);
         let term = if negative { format!("abs({term})") } else { term.clone() };
         let xs: Vec<u64> = sizes.iter().map(|s| s[k].1.unsigned_abs()).collect();
-        let shapes: [(&str, bool, fn(u64) -> u64); 3] = [
+        let shapes: [(&str, bool, fn(u64) -> u64); 4] = [
+            ("logarithmic", false, bits),
             ("linear", false, |x| x),
             ("quadratic", false, |x| x.saturating_mul(x)),
             ("quadratic", true, |x| x.saturating_mul(x.saturating_add(1)) / 2),
         ];
         for (form, triangular, shape) in shapes {
+            if form == "logarithmic" && !doubling_adds(&xs, values) {
+                continue;
+            }
             let points: Vec<(u64, u64)> = xs.iter().zip(values).map(|(&x, &s)| (shape(x), s)).collect();
             let (a, b, slack) = fit(&points);
             if a > 0 {
@@ -167,7 +197,9 @@ fn model(sizes: &[Vec<(String, i64)>], values: &[u64]) -> Model {
     let best = models.iter().map(|m| m.slack).min().unwrap_or(0);
     let tolerance = best.saturating_add(best / 20).saturating_add(2 * CASES);
     models.sort_by_key(|m| (m.order(), m.slack));
-    models.into_iter().find(|m| m.slack <= tolerance).expect("the constant model exists")
+    let close = best.saturating_add(best / 20);
+    let fits = |m: &Model| m.slack <= if m.form == "logarithmic" { close } else { tolerance };
+    models.into_iter().find(fits).expect("the tightest model fits")
 }
 
 /// How loose a fit is: its slack as a share of all that was measured, in percent.
@@ -195,7 +227,11 @@ pub(crate) fn outgrows(m: &Measured) -> Vec<(&'static str, &'static str, String,
         }
         let bound_values: Vec<u64> = r.bounds.iter().map(|b| b.unwrap()).collect();
         let bound = model(&m.sizes, &bound_values);
-        if bound.order() < used.order() {
+        // An i64 has 64 bits, so what grows with its bits has a most, which a constant can be above.
+        let capped = used.form == "logarithmic"
+            && bound.form == "constant"
+            && used.a.saturating_mul(64).saturating_add(used.b) <= bound.b;
+        if bound.order() < used.order() && !capped {
             out.push((r.clause, r.unit, used.growth(), bound.growth()));
         }
     }
@@ -207,7 +243,7 @@ pub fn cost(root: &Path, file: &str, only: Option<&str>) -> Report {
         Ok(p) => p,
         Err(r) => return r,
     };
-    let only: Option<Vec<String>> = only.map(|o| o.split(',').map(|s| s.trim().to_string()).collect());
+    let only: Option<Vec<String>> = only.map(names_in);
     let mut ffi = match crate::c_functions(&program) {
         Ok(f) => f,
         Err(e) => return Report::error(e),
@@ -219,7 +255,7 @@ pub fn cost(root: &Path, file: &str, only: Option<&str>) -> Report {
     if let Some(names) = &only {
         let known: Vec<&str> =
             measured.iter().map(|m| m.name.as_str()).chain(skipped.iter().map(|(n, _)| n.as_str())).collect();
-        if let Some(missing) = names.iter().find(|n| !known.contains(&n.as_str())) {
+        if let Some(missing) = names.iter().find(|n| !known.iter().any(|k| named(n, k))) {
             return Report::usage(format!("{file} has no function `{missing}` to measure"));
         }
     }
@@ -336,7 +372,7 @@ fn measure_all(
         if f.module != 0 || f.captures.is_some() || f.external.is_some() || program.main == Some(id) {
             continue;
         }
-        if only.is_some_and(|o| !o.contains(&f.name)) {
+        if only.is_some_and(|o| !o.iter().any(|n| named(n, &f.name))) {
             continue;
         }
         let why = if !f.effects.is_pure() {
@@ -355,6 +391,29 @@ fn measure_all(
         measured.push(measure_one(program, id, ffi, root));
     }
     (measured, skipped)
+}
+
+/// The names in a comma-separated list; the commas of `push[i64, str]` do not part names.
+fn names_in(list: &str) -> Vec<String> {
+    let (mut out, mut name, mut depth) = (Vec::new(), String::new(), 0);
+    for c in list.chars() {
+        match c {
+            ',' if depth == 0 => out.push(std::mem::take(&mut name)),
+            _ => {
+                depth += (c == '[') as i32 - (c == ']') as i32;
+                name.push(c);
+            }
+        }
+    }
+    out.push(name);
+    out.into_iter().map(|n| n.trim().to_string()).collect()
+}
+
+/// Whether `asked` names function `name`: exactly, or every instance of a generic by its own name.
+/// Spaces inside an instance's brackets do not matter.
+fn named(asked: &str, name: &str) -> bool {
+    let tight = |s: &str| s.replace(' ', "");
+    tight(asked) == tight(name) || name.split('[').next() == Some(asked)
 }
 
 /// A bound clause as written: `steps 2 * xs.len() + 3`.
@@ -379,12 +438,10 @@ pub(crate) fn measure_one(program: &Program, id: usize, ffi: &mut Option<crate::
     let host = crate::checked_host(ffi, root, &[], None, &mut err, &[]);
     let limit = Some(crate::testing::CONTRACT_STEPS);
     anvil_interp::measure(program, id, CASES, limit, host, |inputs, usage| {
-        let sizes: Vec<(String, i64)> = f
-            .params
-            .iter()
-            .zip(inputs)
-            .filter_map(|(p, v)| size_of(&f.locals[*p].name, &f.locals[*p].ty, v))
-            .collect();
+        let mut sizes = Vec::new();
+        for (p, v) in f.params.iter().zip(inputs) {
+            sizes_of(&f.locals[*p].name, &f.locals[*p].ty, v, program, &mut sizes);
+        }
         m.sizes.push(sizes);
         m.resources[0].values.push(usage.steps);
         m.resources[0].bounds.push(usage.steps_bound);

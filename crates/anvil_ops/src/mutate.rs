@@ -1,10 +1,10 @@
 //! `anvil mutate FILE`: does anything notice when the code is wrong? Each mutant changes one
-//! thing in one function of FILE (an operator, a literal, a call statement), and is run against
+//! thing in one function or constant of FILE (an operator, a literal, a call statement), and is run against
 //! the tests and goldens of FILE and of every project file that imports it that enter the mutated
 //! function; the others go as they did. A mutant nothing notices "survives": a test is missing,
 //! or asserts too little. Some survivors change nothing a
-//! program can see (`a < b` for `a <= b` in a min); `allow mutants "why"` before the function says
-//! so, and is reported as stale when nothing in that function survives.
+//! program can see (`a < b` for `a <= b` in a min); `allow mutants "why"` before the function or
+//! one statement says so, and is reported as stale when nothing in it survives.
 
 use crate::golden::{self, Input, Output};
 use crate::project::Project;
@@ -28,9 +28,12 @@ struct Mutant {
     from: String,
     to: String,
     function: String,
-    /// Where its function is: from the name to the end of the body.
+    /// Where its function is: from the name to the end of the body. `EVERYWHERE` for a constant,
+    /// which any run may read.
     decl: (usize, usize),
 }
+
+const EVERYWHERE: (usize, usize) = (0, usize::MAX);
 
 /// The operator each one is mutated to: the one a slip of the hand or of thought gives.
 fn swap(op: BinOp) -> Option<BinOp> {
@@ -62,6 +65,8 @@ struct Sites<'a> {
     function: String,
     decl: (usize, usize),
     out: Vec<Mutant>,
+    /// The statements with an `allow mutants`, as the spans of what they excuse.
+    excused: Vec<(usize, usize)>,
 }
 
 impl Sites<'_> {
@@ -77,8 +82,16 @@ impl Sites<'_> {
     }
 
     fn stmt(&mut self, s: &ast::Stmt) {
+        if !s.allows.is_empty() {
+            self.excused.push((s.span.start, s.span.end));
+        }
         match &s.kind {
-            StmtKind::Let { init, .. } => self.expr(init),
+            StmtKind::Let { init, otherwise, .. } => {
+                self.expr(init);
+                if let Some(other) = otherwise {
+                    self.block(&other.body);
+                }
+            }
             StmtKind::Assign { target, value } => {
                 self.expr(target);
                 self.expr(value);
@@ -146,6 +159,11 @@ impl Sites<'_> {
             }
             ExprKind::Float(..) | ExprKind::Str(_) | ExprKind::Name(_) | ExprKind::Result => {}
             ExprKind::Field(x, _) | ExprKind::Try(x) | ExprKind::Paren(x) => self.expr(x),
+            ExprKind::If(c, a, b) => {
+                self.expr(c);
+                self.expr(a);
+                self.expr(b);
+            }
             ExprKind::Call { args, .. } => {
                 for a in args {
                     self.expr(&a.value);
@@ -217,12 +235,27 @@ impl Sites<'_> {
     }
 }
 
-/// The mutants of the file's functions (of those in `only`), and the functions that allow
-/// mutants to survive, with the offset of their names.
-fn mutants(src: &SourceFile, file: &ast::File, only: Option<&[String]>) -> (Vec<Mutant>, Vec<(String, usize)>) {
-    let mut sites = Sites { text: &src.text, function: String::new(), decl: (0, 0), out: Vec::new() };
+/// The mutants of a file, and what excuses some of them.
+struct Found {
+    list: Vec<Mutant>,
+    /// The functions that allow mutants to survive, with the offset of their names.
+    allowed: Vec<(String, usize)>,
+    /// The statements that do.
+    excused: Vec<(usize, usize)>,
+}
+
+/// The mutants of the file's functions and constants (of those in `only`).
+fn mutants(src: &SourceFile, file: &ast::File, only: Option<&[String]>) -> Found {
+    let mut sites = Sites { text: &src.text, function: String::new(), decl: (0, 0), out: Vec::new(), excused: Vec::new() };
     let mut allowed = Vec::new();
     for item in &file.items {
+        if let Item::Const(c) = item {
+            if only.is_none_or(|o| o.contains(&c.name.name)) {
+                sites.function = c.name.name.clone();
+                sites.decl = EVERYWHERE;
+                sites.expr(&c.value);
+            }
+        }
         let Item::Fn(d) = item else { continue };
         if d.external.is_some() {
             continue;
@@ -242,7 +275,7 @@ fn mutants(src: &SourceFile, file: &ast::File, only: Option<&[String]>) -> (Vec<
         sites.block(&d.body);
     }
     sites.out.sort_by_key(|m| (m.start, m.end));
-    (sites.out, allowed)
+    Found { list: sites.out, allowed, excused: sites.excused }
 }
 
 /// One run of a program, as it went unchanged: a test, or its golden (`test` is None).
@@ -256,7 +289,7 @@ struct Run {
 
 impl Run {
     fn sees(&self, file: &str, decl: (usize, usize)) -> bool {
-        self.reached.iter().any(|(f, at)| f == file && decl.0 <= *at && *at < decl.1)
+        decl == EVERYWHERE || self.reached.iter().any(|(f, at)| f == file && decl.0 <= *at && *at < decl.1)
     }
 
     /// What a mutant may take here: ten times as many steps, so one that loops is noticed.
@@ -433,9 +466,9 @@ pub fn mutate(root: &Path, file: &str, only: Option<&str>, max_steps: Option<u64
         Err(d) => return crate::diagnostics(std::slice::from_ref(&src), &d),
     };
     let only: Option<Vec<String>> = only.map(|o| o.split(',').map(|s| s.trim().to_string()).collect());
-    let (list, allowed) = mutants(&src, &ast, only.as_deref());
+    let Found { list, allowed, excused } = mutants(&src, &ast, only.as_deref());
     if let Some(names) = &only {
-        let known: Vec<String> = mutants(&src, &ast, None).0.into_iter().map(|m| m.function).collect();
+        let known: Vec<String> = mutants(&src, &ast, None).list.into_iter().map(|m| m.function).collect();
         if let Some(missing) = names.iter().find(|n| !known.contains(n)) {
             return Report::usage(format!("{file} has no function `{missing}` with anything to mutate"));
         }
@@ -499,8 +532,9 @@ pub fn mutate(root: &Path, file: &str, only: Option<&str>, max_steps: Option<u64
     let verdicts = finished.into_inner().expect("a mutant's worker crashed").0;
     let mut results = Vec::new();
     let mut text = String::new();
-    let (mut killed, mut survived, mut invalid, mut excused) = (0, 0, 0, 0);
+    let (mut killed, mut survived, mut invalid, mut allowed_to_survive) = (0, 0, 0, 0);
     let mut survivors_in: HashMap<&str, usize> = HashMap::new();
+    let mut useful = vec![false; excused.len()];
     for (m, v) in list.iter().zip(verdicts) {
         let v = match v.expect("every mutant ran") {
             Ok(v) => v,
@@ -512,15 +546,22 @@ pub fn mutate(root: &Path, file: &str, only: Option<&str>, max_steps: Option<u64
         });
         let mut status = v.status;
         if status == "survived" {
-            *survivors_in.entry(m.function.as_str()).or_default() += 1;
-            if allowed.iter().any(|(f, _)| *f == m.function) {
+            let on_it: Vec<usize> =
+                (0..excused.len()).filter(|k| excused[*k].0 <= m.start && m.end <= excused[*k].1).collect();
+            on_it.iter().for_each(|k| useful[*k] = true);
+            if !on_it.is_empty() {
                 status = "allowed";
+            } else {
+                *survivors_in.entry(m.function.as_str()).or_default() += 1;
+                if allowed.iter().any(|(f, _)| *f == m.function) {
+                    status = "allowed";
+                }
             }
         }
         match status {
             "killed" => killed += 1,
             "invalid" => invalid += 1,
-            "allowed" => excused += 1,
+            "allowed" => allowed_to_survive += 1,
             _ => {
                 survived += 1;
                 text.push_str(&format!(
@@ -546,10 +587,15 @@ pub fn mutate(root: &Path, file: &str, only: Option<&str>, max_steps: Option<u64
             stale.push(json!({ "function": f, "at": format!("{l}:{c}") }));
         }
     }
-    let valid = killed + survived + excused;
+    for (span, _) in excused.iter().zip(&useful).filter(|(_, u)| !**u) {
+        let (l, c) = src.line_col(span.0);
+        text.push_str(&format!("{file}:{l}:{c} stale: every mutant of this statement is killed, so its `allow mutants` is stale: remove it\n"));
+        stale.push(json!({ "function": "", "at": format!("{l}:{c}") }));
+    }
+    let valid = killed + survived + allowed_to_survive;
     let score = if valid == 0 { 100 } else { killed * 100 / valid };
     text.push_str(&format!(
-        "{file}: {} mutant(s): {killed} killed, {survived} survived, {excused} allowed to survive, {invalid} did not \
+        "{file}: {} mutant(s): {killed} killed, {survived} survived, {allowed_to_survive} allowed to survive, {invalid} did not \
          compile; {score}% killed (run against {})\n",
         list.len(),
         names.join(", ")
@@ -557,7 +603,7 @@ pub fn mutate(root: &Path, file: &str, only: Option<&str>, max_steps: Option<u64
     let passed = survived == 0 && stale.is_empty();
     let json = json!({
         "ok": passed, "file": file, "mutants": results, "killed": killed, "survived": survived,
-        "allowed": excused, "invalid": invalid, "score": score, "against": names, "stale_allows": stale,
+        "allowed": allowed_to_survive, "invalid": invalid, "score": score, "against": names, "stale_allows": stale,
     });
     let exit = if passed { EXIT_OK } else { EXIT_FAILED };
     Report { json, stdout: text, stderr: String::new(), exit, failed: !passed }

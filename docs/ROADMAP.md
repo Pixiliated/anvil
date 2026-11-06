@@ -323,8 +323,23 @@ green and the interpreter and native backend agreeing on every program in `tests
   `std` functions and at the line missing its `;`; `--help` is not an error
 
 ## M38: Proving ground, second round (v0.39)
-- [ ] Fresh agents on new kinds of program, against the same log format, to see what the changes
-  saved and what is next
-- [ ] What the first round asked for and did not get: `for x in xs` handing elements out; `profile`
-  by line, and naming the statement that kept a second reference; `cost` on struct fields, one
-  generic instance, and log n; constants; `measure` without the interpreter's run
+- [x] Three fresh agents, given only the v0.38 binary, wrote a Markdown converter, a chess move
+  generator and a SQL engine over CSV, each to a clean `verify --native`, with no compiler bug found
+- [x] What the first round asked for: `for x in xs` hands out the elements of an array nothing else
+  holds; constants; `profile` by line, and naming the call further up that kept a reference; `cost`
+  on struct fields, one generic instance and logarithms (`bit_len`); `measure --native-only`
+- [x] A failed `assert` on numbers, booleans or text shows both sides, on both backends (the most
+  costly thing in two of the three logs)
+- [x] `let x: T = e else { ... };` and `if c { a } else { b }` as a value, so a choice or an unwrap
+  needs no placeholder `var`; a variant named alone in an arm ignores its fields; character literals
+- [x] `allow mutants` on one statement; constants are mutated; failing tests hold back the coverage
+  lints; errors saying the same thing are counted, not repeated; `usage` shows numbers before the
+  first approval; a golden input at the wrong depth is named when approving; the spec shows how a
+  test declares effects
+
+## M39: Speed of the loop (v0.40)
+- [ ] The interpreter, which every test, golden, `verify` and mutant runs on, is about 40 times
+  slower than native code: find out what it would take to cut that, and do the cheap part
+- [ ] What round two asked for and did not get: a failed `assert` showing arrays and structs; sharing
+  test helpers without publishing them; `find` from an offset and `char_at`; describing a valid struct
+  to the contract lint, so it need not be switched off; several goldens per program; tuples

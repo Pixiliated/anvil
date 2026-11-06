@@ -1,7 +1,9 @@
 //! `anvil measure`: programs built and run natively, as their goldens run them, with what their
 //! objects asked of the heap as the runtime counts it (bytes asked for, the most held at once,
 //! objects made), beside the interpreter's steps and modelled bytes. Heap numbers are the same on
-//! every run, since one worker runs at a time; the time is reported, and never compared.
+//! every run, since one worker runs at a time; the time is reported, and never compared. With
+//! `native_only` the interpreter does not run: nothing to wait for on a big input, and nothing
+//! compared.
 
 use crate::golden::{self, Input};
 use crate::project::Project;
@@ -52,6 +54,7 @@ fn measure_file(
     file: &str,
     max_steps: Option<u64>,
     input: &ProgramInput,
+    native_only: bool,
 ) -> Result<Option<Value>, String> {
     let src = Files::disk(&project.root).load(file).map_err(|r| r.json["error"].as_str().unwrap_or("").to_string())?;
     let program = match anvil_front::compile_with(&src, &crate::loader(&project.root)) {
@@ -67,6 +70,13 @@ fn measure_file(
     } else {
         golden::read_input(project, file)?
     };
+    if native_only {
+        let (_, heap, ms) = run(&program, project, file, &input)?;
+        return Ok(Some(json!({
+            "file": file, "steps": null, "bytes": null, "copied": null,
+            "native": { "allocated": heap.allocated, "peak": heap.peak, "objects": heap.objects, "ms": ms, "differs": null },
+        })));
+    }
     let (want, counts) = golden::interpret(program.clone(), max_steps, &project.root, &input)?;
     let (got, heap, ms) = run(&program, project, file, &input)?;
     let same = golden::difference(&want, &got);
@@ -80,7 +90,7 @@ fn measure_file(
 }
 
 /// Every project file with a main (or one file), run natively and measured.
-pub fn measure(root: &Path, file: Option<&str>, max_steps: Option<u64>, input: &ProgramInput) -> Report {
+pub fn measure(root: &Path, file: Option<&str>, max_steps: Option<u64>, input: &ProgramInput, native_only: bool) -> Report {
     if file.is_none() && input.given() {
         return Report::usage("arguments and --input are for one file; name it");
     }
@@ -94,7 +104,7 @@ pub fn measure(root: &Path, file: Option<&str>, max_steps: Option<u64>, input: &
     };
     let mut rows = Vec::new();
     for f in &files {
-        match measure_file(&project, f, max_steps, input) {
+        match measure_file(&project, f, max_steps, input, native_only) {
             Ok(Some(row)) => rows.push(row),
             Ok(None) if file.is_some() => return Report::usage(format!("{f} has no main to measure")),
             Ok(None) => {}
@@ -106,14 +116,15 @@ pub fn measure(root: &Path, file: Option<&str>, max_steps: Option<u64>, input: &
         "steps", "model bytes", "copied", "heap bytes", "peak bytes", "objects", "ms"
     );
     let n = |v: &Value| v.as_u64().unwrap_or(0);
+    let counted = |v: &Value| v.as_u64().map_or("-".to_string(), |x| x.to_string());
     let mut bad = 0;
     for r in &rows {
         let h = &r["native"];
         text.push_str(&format!(
             "{:>10} {:>12} {:>10} {:>12} {:>12} {:>9} {:>7}  {}\n",
-            n(&r["steps"]),
-            n(&r["bytes"]),
-            n(&r["copied"]),
+            counted(&r["steps"]),
+            counted(&r["bytes"]),
+            counted(&r["copied"]),
             n(&h["allocated"]),
             n(&h["peak"]),
             n(&h["objects"]),

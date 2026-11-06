@@ -1,0 +1,9 @@
+// A failed assert on text shows both sides quoted.
+fn made() -> str {
+    return "line \"one\"\n\ttab \\ é";
+}
+
+fn main() {
+    assert(made().len() > 0);
+    assert(made() == "line one");
+}

@@ -1,0 +1,11 @@
+// expect: E0202
+const N: i64 = 1;
+
+fn g() -> i64 {
+    return N;
+}
+
+fn main() -> i64 {
+    let N: i64 = g();
+    return N;
+}

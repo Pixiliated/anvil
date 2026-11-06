@@ -3,6 +3,19 @@
 Each version is one roadmap milestone (docs/ROADMAP.md); docs/DECISIONS.md says why things are
 the way they are.
 
+## 0.39.0
+- Three more fresh agents wrote real programs with v0.38; this release is what they and the first
+  round asked for. They found no compiler bugs.
+- Language: `const`, `let x: T = e else { ... };`, `if c { a } else { b }` as a value, character
+  literals, `x.bit_len()`, a variant named alone in an arm. `const` is now a reserved word.
+- A failed `assert` on numbers, booleans or text shows both sides. Panic text can run over lines.
+- `for x in xs` hands out the elements of an array nothing else holds, so changing them copies nothing.
+- `profile` counts by line and names the call further up that kept a reference. `cost` sees struct
+  fields, one generic instance and logarithms. `measure --native-only` leaves the interpreter out.
+- `mutate` mutates constants, and `allow mutants` can excuse one statement.
+- `verify` holds back the coverage lints while a test fails. Errors saying the same thing are counted.
+  `usage` shows numbers before the first approval. A misplaced golden input is named when approving.
+
 ## 0.38.0
 - Three fresh agents wrote real programs with v0.37; this release is what they found.
 - Fixed: a crash on a byte-order mark or a wide character outside a string, a false stale `allow

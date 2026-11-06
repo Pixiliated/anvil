@@ -1,0 +1,17 @@
+// expect: E0100
+enum E {
+    A(x: i64),
+    B(x: i64),
+}
+
+fn f(e: E) -> i64 {
+    match e {
+        A(x) | B(x) => {
+            return x;
+        }
+    }
+}
+
+fn main() -> i64 {
+    return f(E.A(1));
+}

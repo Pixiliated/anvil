@@ -1,4 +1,4 @@
-# Anvil language specification (v0.38)
+# Anvil language specification (v0.39)
 
 Anvil is a small, compiled, general-purpose language designed to be written mostly by AI agents
 and read by humans. Its rules aim at three things: one obvious way to write each thing, code
@@ -17,6 +17,7 @@ come first; the other top-level items follow in any order:
 import shapes.{area, Shape};  // names from shapes.anv next to this file
 unit m;                       // base unit
 unit N = kg*m/s^2;            // unit alias
+const MOST: i64 = 512;        // a constant (see Bindings)
 struct Body { mass: f64[kg], pos: f64[m], }
 enum Shape { Circle(radius: f64[m]), Empty, }
 fn name(param: Type, ...) -> Ret uses io noalloc requires cond ensures cond { body }
@@ -29,7 +30,7 @@ allow untested "reason"       // before a fn: switches one lint off for it (see 
 ```
 
 Comments start with `//` and run to the end of the line (see Doc comments below). Identifiers are ASCII letters, digits
-and `_`, not starting with a digit. Keywords: `allow fn import let pub var if else while for in
+and `_`, not starting with a digit. Keywords: `allow const fn import let pub var if else while for in
 match return break continue struct enum unit test requires ensures uses noalloc extern interface
 self true false result`. The names
 `Some`, `None`, `Ok` and `Err` are reserved for the built-in enums.
@@ -175,6 +176,16 @@ variable or parameter that is never read is an error unless its name starts with
 Assignment (only `var` bindings): `name = value;`, `name.field = value;`,
 `name[i] = value;`, and any chain of these: `shapes[2].points[0].x = 1.0;`.
 
+### Constants
+
+`const NAME: Type = value;` at the top level names a value of type `i64`, `f64`, `bool` or `str`.
+The value is made of literals, other constants (in any order) and operators, and is worked out when
+the program is checked, so it cannot overflow, divide by zero or depend on itself (E0351). Each use
+of the name is that value, in any function, contract or test. `pub const` is imported like any other
+item. A constant that nothing reads is an error (E0340), and no local may take its name (E0202).
+A value that needs a call, or an array or a map, is a function that returns it. `anvil mutate`
+mutates constants as it does the literals in functions, against every run.
+
 ### Moves
 
 Values are values: passing, storing or returning one never lets a change show through
@@ -187,6 +198,8 @@ nothing reads the variable again before it is next written, on any path through 
 branches; what an `ensures` clause reads never moves. An argument of a call that is moved or taken
 by fields is evaluated after the call's other arguments, so they may read it:
 `xs = add(xs: xs, x: xs.len())` hands `xs` over.
+An element of an array nothing else holds is handed to the variable of a `for` over it, so
+`for x in xs` with `xs` read for the last time gives each `x` as the only reference.
 So a functional update is as cheap as changing the value directly:
 
 ```
@@ -383,10 +396,13 @@ generated arguments (the `contract` lint, under Projects).
 **`anvil cost FILE`** measures bounds instead of guessing them, for steps and for bytes alike. Each pure function of the file
 is called on 200 generated argument lists of growing size (arrays, maps and text up to 40
 long, integers up to 400 and the edges of i64), and every call's steps are counted. The counts
-are fitted as constant, or linear or quadratic in one parameter's size (`xs.len()`, or an
-integer parameter `n`, or `abs(n)` when it may be negative), quadratic including `n * (n + 1) /
-2`, the sum of copying everything so far once a round: the simplest form that fits about as
-tightly as the best. Bounds are reported, not held to, while measuring, so a bound that does
+are fitted as constant, or logarithmic, linear or quadratic in one size (`xs.len()`, an integer
+parameter `n`, `abs(n)` when it may be negative, or the same of a field of a struct parameter:
+`h.keys.len()`), logarithmic being `n.bit_len()` and quadratic including `n * (n + 1) / 2`, the sum
+of copying everything so far once a round: the simplest form that fits about as tightly as the
+best. Calls that `requires` excludes are tried again with arrays of one length and small numbers.
+`--only` takes a function's name, which for a generic means each of its instances, or one instance
+(`--only 'push[i64, str]'`). Bounds are reported, not held to, while measuring, so a bound that does
 not hold is shown with how far it is exceeded. It prints the growth, the most steps at each size, and the tightest
 `steps` clause that holds for every call measured, ready to paste; a loose fit says the steps
 depend on more than one size or grow faster than quadratic. For a function with a bound, it
@@ -453,6 +469,15 @@ Conditions must be `bool`. Nothing may follow `return`, `break` or `continue` in
 
 `for x in array` runs over the array as it was when the loop started; changing the array
 inside the loop does not change which elements the loop visits.
+
+**`let x: T = e else { ... };`** (or `var`) unwraps: `e` is an `Option[T]` or a `Result[T, E]`, `x`
+is the value in it, and otherwise the block runs, which must leave by `return`, `break`, `continue`,
+`exit` or `panic` (E0352). `else why { ... }` names a Result's error in the block:
+
+```
+let at: i64 = text.find(":") else { return None; };
+let n: i64 = parse(word) else why { return Err("line {line}: {why}"); };
+```
 
 ## Arrays
 
@@ -706,7 +731,8 @@ match s {
   written `Enum.Variant`.
 - `match` is a statement. It lists **every variant exactly once**; there is no catch-all arm,
   so adding a variant makes every match that forgets it an error. One arm can name several:
-  `Red | Green => { ... }`, with their fields ignored and nothing bound.
+  `Red | Green => { ... }`, with their fields ignored and nothing bound. A variant named alone,
+  `Circle => { ... }`, ignores its fields likewise.
 - A pattern lists every field of its variant in declaration order. `field` binds it under its
   own name, `field: name` binds it under another name, `field: _` ignores it. The only field of
   a variant takes any name: `Some(x)`, `Err(_)`.
@@ -756,6 +782,13 @@ Rust.
   units, and `x ^ 2` would be read both ways.
 - **Wrapping arithmetic**, for hashes and generators: `a.wrapping_add(b)`, `a.wrapping_sub(b)`
   and `a.wrapping_mul(b)` wrap around at the ends of i64 instead of panicking.
+- `a.bit_len()` is the number of bits it takes to write `a` taken as unsigned: 0 for 0, 8 for 255,
+  64 for a negative. It is what a logarithmic `steps` bound is written with.
+- `if c { a } else { b }` is a value, of the type both branches have, each branch one expression;
+  only the chosen branch runs, and it counts as a branch for the `unreached` lint. `else if` chains.
+  At the start of a statement `if` is the statement.
+- A **character literal** is the number of one ASCII character, an i64: `'*'` is 42, `'\n'` is 10.
+  The escapes are `\n \r \t \\ \'`. Compare it with the elements of `bytes`.
 - Struct literal: `Body { mass: 1.0[kg], pos: 0.0[m] }`, every field once, in declaration
   order.
 - Built-in types have built-in methods: `len()` on `str`, `bytes`, arrays and maps; `push(x)`
@@ -779,7 +812,7 @@ target's bounds are checked.
 | `exit(code)` | ends the program with the code (0..=255, else a panic); nothing after it runs, so it ends a function's path like `return`; in a test it is a failure; needs `uses io` |
 | `env(name)` | `Option[str]`: the environment variable; names starting `ANVIL_` are the runtime's and read as `None`; needs `uses io` |
 | `list_dir(path)` | `Result[[str], FileError]`: the names in the directory, sorted bytewise; needs `uses fs` |
-| `assert(cond)` | panics if `cond` is false |
+| `assert(cond)` | panics if `cond` is false. A comparison of numbers, booleans or text also shows both sides, text quoted and, when long, cut to where the sides first differ |
 | `sqrt(x)` | square root of an `f64`, halving the unit |
 | `abs(x)` | absolute value of `i64` (panics on `i64` minimum) or `f64` |
 | `to_f64(i)` | `i64` to dimensionless `f64` |
@@ -858,7 +891,7 @@ seeded (see Effects) and nothing else comes from the environment.
 ## Tests
 
 `test "name" { ... }` blocks run with `anvil test file.anv`. A test passes if it finishes and
-fails if it panics (`assert`, a contract, overflow, a bad index). Tests may declare effects; each
+fails if it panics (`assert`, a contract, overflow, a bad index). Tests may declare effects, after the name: `test "reads a file" uses fs { }`; each
 starts with the random sequence at seed 0, the virtual clock at 0, no arguments, an empty stdin
 and no files written (see Input and files).
 
@@ -898,8 +931,8 @@ anvil fuzz    [--seed N] [--count N]   random programs on both backends (see bel
 anvil trace   file.anv [--test NAME] [--only F,G] [--limit N] [--input FILE] [-- ARGS...]
                                        a run as a timeline: calls, returns, prints
 anvil profile file.anv [--test NAME] [--input FILE] [-- ARGS...]
-                                       calls, steps and bytes per function; where values
-                                       were copied, and why they were shared
+                                       calls, steps and bytes per function and per line;
+                                       where values were copied, and why they were shared
 anvil cost file.anv [--only NAMES]     how each pure function's steps and bytes grow, and
                                        the steps and allocs bounds that fit
 anvil outline file.anv                 items and signatures, without reading the whole file
@@ -955,7 +988,10 @@ would avoid (see Moves). It then lists where those copies were made, costliest f
 site's line, function, bytes and times, and the calls that handed the shared values in, with
 each argument read there from a variable or a place and why it was not moved (the statement
 names it again, it is read again later, ...) or that it was (then something else holds the
-value). `--json` has them all under `copies`. Both count steps, never time, so they give the same answer everywhere; a panic or
+value). When the call moved all it was handed, it also names the nearest call further up that did
+not: that is what kept a second reference. A profile also lists the costliest lines, by the steps
+and bytes of their own statements, callees not counted; `--json` has every line under `lines`. Both
+count steps, never time, so they give the same answer everywhere; a panic or
 the step limit ends the run and is reported, not treated as a failure of the command.
 
 ### Projects
@@ -1001,7 +1037,8 @@ anvil watch [--native] [--runs N]           verify, and again after every change
 A **golden** (`golden/<file>.out`) is a program's approved output: its exit code, its panic
 message if any, the lines it wrote with eprint (`stderr: ...`), and every byte it printed. A
 program that reads arguments, the environment or stdin is given them by `golden/<file>.in`
-(`golden/main.anv.in` for `main.anv`; `verify` reports a file there that belongs to no program),
+(the file's path from the project root, so `golden/src/main.anv.in` for `src/main.anv`; `verify` and
+`golden approve` report a file there that belongs to no program, and where it should be),
 written by hand: a line `arg: VALUE` per argument and `env: NAME=value` per variable, then
 `---`, then the stdin byte for byte. Without one, it runs with none of them. `golden check --native` also builds each program and
 requires the executable to match and to free every object. Only `golden approve` writes one,
@@ -1043,7 +1080,8 @@ bytes and copied bytes. The model counts what a program makes, so the runtime's 
 each object has a header (24 bytes for text, 48 for an array) and arrays double, and numbers
 interpolated into text are temporaries. Heap numbers are the same on every run and every 64-bit
 platform; the time is reported and never compared. A native run that differs from the
-interpreter fails.
+interpreter fails. `--native-only` leaves the interpreter out, for an input too big to wait for: no
+steps, and nothing compared.
 
 **Lints** are checks `verify` makes beyond type errors. Each counts what the project's tests
 and golden-checked `main`s run, in the interpreter, across every project file (a module is
@@ -1106,9 +1144,9 @@ a run runs out of steps or an importer no longer compiles (the JSON's `by` says 
 asserts too little. Any survivor fails the command.
 
 Some survivors change nothing a program can see, like `<` for `<=` in a `min`, where both pick
-the same value when the two are equal. `allow mutants "reason"` before the function excuses
-its survivors (reported as `allowed`), and is stale, which also fails, when none of its
-mutants survive. Mutation testing is not part of `verify`: it runs every test once per mutant.
+the same value when the two are equal. `allow mutants "reason"` before the function, or before one
+statement in it, excuses the survivors there (reported as `allowed`), and is stale, which also fails,
+when none of those mutants survive. Mutation testing is not part of `verify`: it runs every test once per mutant.
 The standard library's modules, which ship in the binary, are measured by their own tests.
 
 `anvil-mcp` serves the same commands, except `watch` and `lsp`, as MCP tools over stdio (`type-at` is

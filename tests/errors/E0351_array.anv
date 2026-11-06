@@ -1,0 +1,7 @@
+// expect: E0351
+const XS: [i64] = 1;
+
+fn main() {
+    let n: [i64] = XS;
+    assert(n.len() == 1);
+}

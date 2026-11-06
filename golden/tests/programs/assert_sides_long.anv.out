@@ -1,0 +1,6 @@
+exit: 101
+panic: assertion failed at tests/programs/assert_sides_long.anv:12:5: long("left") == long("right")
+panic:   left:  ..."ééééééééééééééééééééleftéééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééé"...
+panic:   right: ..."éééééééééééééééééééérightééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééé"...
+panic:   first difference at byte 240, of 484 and 485 bytes
+---

@@ -241,7 +241,7 @@ pub const COMMANDS: &[Command] = &[
     Command {
         name: "measure",
         positionals: &["file?", "args*"],
-        options: &[STEPS, INPUT],
+        options: &[STEPS, INPUT, ("native-only", "", "do not run the interpreter too: no steps, nothing compared")],
         summary: "run programs natively: heap bytes asked for, the most held at once, objects and time, beside the interpreter's counts",
     },
     Command {
@@ -423,15 +423,39 @@ pub(crate) fn loader(root: &Path) -> impl Fn(&str) -> Result<String, String> + '
     Files::disk(root).loader()
 }
 
+/// How many errors saying the same thing are written out; `--json` has them all.
+const SAME_ERRORS: usize = 2;
+
+/// Errors as text: one cause can give dozens that say the same thing, so past the first of them
+/// only their count.
+fn rendered(sources: &[SourceFile], diags: &[Diagnostic]) -> String {
+    let mut text = String::new();
+    let mut said: Vec<(&str, &str, usize)> = Vec::new();
+    for d in diags {
+        let at = match said.iter().position(|(c, m, _)| *c == d.code && *m == d.message) {
+            Some(at) => at,
+            None => {
+                said.push((d.code, d.message.as_str(), 0));
+                said.len() - 1
+            }
+        };
+        said[at].2 += 1;
+        if said[at].2 <= SAME_ERRORS {
+            text.push_str(&diag::render(&sources[d.file], d));
+            text.push('\n');
+        }
+    }
+    for (code, message, n) in said.iter().filter(|(_, _, n)| *n > SAME_ERRORS) {
+        text.push_str(&format!("... and {} more error[{code}]: {message}\n", n - SAME_ERRORS));
+    }
+    text
+}
+
 /// Compile errors as a failed report; `sources` are the program's files, which each
 /// diagnostic's `file` indexes.
 pub(crate) fn diagnostics(sources: &[SourceFile], diags: &[Diagnostic]) -> Report {
     let ds: Vec<_> = diags.iter().map(|d| diag::to_json(&sources[d.file], d)).collect();
-    let mut text = String::new();
-    for d in diags {
-        text.push_str(&diag::render(&sources[d.file], d));
-        text.push('\n');
-    }
+    let mut text = rendered(sources, diags);
     text.push_str(&format!("{} error(s)\n", diags.len()));
     Report::failed(json!({ "ok": false, "diagnostics": ds }), text, EXIT_FAILED)
 }
@@ -441,6 +465,15 @@ fn compile(root: &Path, file: &str) -> Result<(SourceFile, Program), Report> {
     let src = load(root, file)?;
     match anvil_front::compile_with(&src, &loader(root)) {
         (_, Ok(p)) => Ok((src, p)),
+        (sources, Err(d)) => Err(diagnostics(&sources, &d)),
+    }
+}
+
+/// `compile`, keeping the lines of statements for `profile`.
+fn compile_lines(root: &Path, file: &str) -> Result<Program, Report> {
+    let src = load(root, file)?;
+    match anvil_front::compile_lines(&src, &loader(root)) {
+        (_, Ok(p)) => Ok(p),
         (sources, Err(d)) => Err(diagnostics(&sources, &d)),
     }
 }
@@ -629,10 +662,7 @@ pub fn fix(root: &Path, file: &str) -> Report {
             if ok {
                 return Report::ok(json, text);
             }
-            for d in &a.diags {
-                text.push_str(&diag::render(&sources[d.file], d));
-                text.push('\n');
-            }
+            text.push_str(&rendered(&sources, &a.diags));
             text.push_str(&format!("{} error(s) left; they need a decision, not a mechanical fix\n", a.diags.len()));
             return Report::failed(json, text, EXIT_FAILED);
         }
@@ -683,6 +713,7 @@ pub fn outline_in(files: Files, file: &str) -> Report {
             Item::Enum(e) => Some(e.name.span),
             Item::Interface(i) => Some(i.name.span),
             Item::Unit(u) => Some(u.name.span),
+            Item::Const(c) => Some(c.name.span),
             Item::Import(_) | Item::Test(_) => None,
         };
         // The doc's first line, in the text; all of it in the JSON.
@@ -749,6 +780,10 @@ pub fn outline_in(files: Files, file: &str) -> Report {
             Item::Unit(u) => {
                 human.push_str(&format!("{:>4}  {}\n", line(u.span), text(u.span)));
                 json!({ "kind": "unit", "name": u.name.name, "pub": u.public, "line": line(u.span), "text": text(u.span) })
+            }
+            Item::Const(c) => {
+                human.push_str(&format!("{:>4}  {}\n", line(c.span), text(c.span)));
+                json!({ "kind": "const", "name": c.name.name, "pub": c.public, "line": line(c.span), "text": text(c.span) })
             }
             Item::Test(t) => {
                 human.push_str(&format!("{:>4}  test \"{}\"\n", line(t.span), t.name));

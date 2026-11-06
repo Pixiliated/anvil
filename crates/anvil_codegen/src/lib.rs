@@ -103,6 +103,7 @@ const RUNTIME: &[(&str, &[Type], &[Type])] = &[
     ("anvil_print_line", &[I, I], &[]),
     ("anvil_print_raw", &[I], &[]),
     ("anvil_panic_at", &[I, I], &[]),
+    ("anvil_panic_sides", &[I, I, I, I], &[]),
     ("anvil_read_stdin", &[], &[I]),
     ("anvil_print_i64", &[I, I], &[]),
     ("anvil_print_bool", &[I, I], &[]),
@@ -168,6 +169,7 @@ const RUNTIME: &[(&str, &[Type], &[Type])] = &[
 const ENTRY: &str = "anvil_program";
 
 /// Object layout shared with anvil_rt.c.
+const OBJ_RC: i32 = 0;
 const OBJ_LEN: i32 = 16;
 const ARR_DATA: i32 = 40;
 const SLOT: i64 = 8;
@@ -661,6 +663,7 @@ fn mutates(e: &Expr) -> bool {
         | ExprKind::And(l, r)
         | ExprKind::Or(l, r)
         | ExprKind::StrConcat(l, r, _) => mutates(l) || mutates(r),
+        ExprKind::Cond { cond, then, otherwise, .. } => mutates(cond) || mutates(then) || mutates(otherwise),
         ExprKind::Call(_, es, _)
         | ExprKind::StructLit(_, es)
         | ExprKind::ArrayLit(es)
@@ -1024,7 +1027,29 @@ impl<'a, 'b> Gen<'a, 'b> {
                     let addr = g.b.ins().iadd(data, offset);
                     let lay = g.layout(&elem);
                     let vals = g.load(addr, &lay);
-                    g.retain(&lay, &vals);
+                    // An array nothing else holds hands its elements out, so they stay unshared.
+                    if lay.iter().any(|s| s.heap) {
+                        let rc = g.b.ins().load(I, g.trusted, arr, OBJ_RC);
+                        let alone = g.b.ins().icmp_imm_s(IntCC::Equal, rc, 1);
+                        let (take, share, go) = (g.b.create_block(), g.b.create_block(), g.b.create_block());
+                        g.b.ins().brif(alone, take, &[], share, &[]);
+                        g.b.switch_to_block(take);
+                        g.b.seal_block(take);
+                        let mut left = vals.clone();
+                        for (k, s) in lay.iter().enumerate() {
+                            if s.heap {
+                                left[k] = g.zero(*s);
+                            }
+                        }
+                        g.store(addr, &left);
+                        g.b.ins().jump(go, &[]);
+                        g.b.switch_to_block(share);
+                        g.b.seal_block(share);
+                        g.retain(&lay, &vals);
+                        g.b.ins().jump(go, &[]);
+                        g.b.switch_to_block(go);
+                        g.b.seal_block(go);
+                    }
                     g.store_local(var, 0, &vals);
                 });
             }
@@ -1088,8 +1113,8 @@ impl<'a, 'b> Gen<'a, 'b> {
                 self.b.ins().jump(cont, &[]);
                 self.dead_block();
             }
-            // Coverage is measured in the interpreter.
-            Stmt::Reached(_) => {}
+            // Coverage and lines are measured in the interpreter.
+            Stmt::Reached(_) | Stmt::Line(_) => {}
             // Left null, as a move leaves it: the function's exit releases every local.
             Stmt::Drop(l) => {
                 let vals = self.use_local(*l);
@@ -1651,41 +1676,28 @@ impl<'a, 'b> Gen<'a, 'b> {
             ExprKind::Cmp(op, l, r) => {
                 let a = self.expr(l)[0];
                 let c = self.expr(r)[0];
-                let icc = match op {
-                    CmpOp::Eq => IntCC::Equal,
-                    CmpOp::Ne => IntCC::NotEqual,
-                    CmpOp::Lt => IntCC::SignedLessThan,
-                    CmpOp::Le => IntCC::SignedLessThanOrEqual,
-                    CmpOp::Gt => IntCC::SignedGreaterThan,
-                    CmpOp::Ge => IntCC::SignedGreaterThanOrEqual,
-                };
-                let v = match l.ty {
-                    Ty::F64(_) => {
-                        let cc = match op {
-                            CmpOp::Eq => FloatCC::Equal,
-                            CmpOp::Ne => FloatCC::NotEqual,
-                            CmpOp::Lt => FloatCC::LessThan,
-                            CmpOp::Le => FloatCC::LessThanOrEqual,
-                            CmpOp::Gt => FloatCC::GreaterThan,
-                            CmpOp::Ge => FloatCC::GreaterThanOrEqual,
-                        };
-                        self.b.ins().fcmp(cc, a, c)
-                    }
-                    Ty::Bytes => {
-                        let same = self.call_rt("anvil_str_eq", &[a, c]).unwrap();
-                        self.call_rt("anvil_release", &[a]);
-                        self.call_rt("anvil_release", &[c]);
-                        self.b.ins().icmp_imm_s(icc, same, 1)
-                    }
-                    Ty::Str => {
-                        let order = self.call_rt("anvil_str_cmp", &[a, c]).unwrap();
-                        self.call_rt("anvil_release", &[a]);
-                        self.call_rt("anvil_release", &[c]);
-                        self.b.ins().icmp_imm_s(icc, order, 0)
-                    }
-                    _ => self.b.ins().icmp(icc, a, c),
-                };
+                let v = self.scalar_cmp(*op, &l.ty, a, c);
+                if matches!(l.ty, Ty::Bytes | Ty::Str) {
+                    self.call_rt("anvil_release", &[a]);
+                    self.call_rt("anvil_release", &[c]);
+                }
                 vec![v]
+            }
+            ExprKind::Cond { cond, then, otherwise, .. } => {
+                let c = self.expr(cond)[0];
+                let (yes, no, merge) = (self.b.create_block(), self.b.create_block(), self.b.create_block());
+                let lay = self.layout(&e.ty);
+                let out: Vec<Value> = lay.iter().map(|s| self.b.append_block_param(merge, s.ty)).collect();
+                self.b.ins().brif(c, yes, &[], no, &[]);
+                for (block, branch) in [(yes, then), (no, otherwise)] {
+                    self.b.switch_to_block(block);
+                    self.b.seal_block(block);
+                    let v = self.expr(branch);
+                    self.b.ins().jump(merge, &args(&v));
+                }
+                self.b.switch_to_block(merge);
+                self.b.seal_block(merge);
+                out
             }
             ExprKind::And(l, r) | ExprKind::Or(l, r) => {
                 let is_and = matches!(e.kind, ExprKind::And(..));
@@ -2002,17 +2014,56 @@ impl<'a, 'b> Gen<'a, 'b> {
     }
 
     /// An owned str holding the text of `e` (as print shows it).
+    /// `a op c` on a number, a boolean, bytes or text, which it leaves as they are.
+    fn scalar_cmp(&mut self, op: CmpOp, ty: &Ty, a: Value, c: Value) -> Value {
+        let icc = match op {
+            CmpOp::Eq => IntCC::Equal,
+            CmpOp::Ne => IntCC::NotEqual,
+            CmpOp::Lt => IntCC::SignedLessThan,
+            CmpOp::Le => IntCC::SignedLessThanOrEqual,
+            CmpOp::Gt => IntCC::SignedGreaterThan,
+            CmpOp::Ge => IntCC::SignedGreaterThanOrEqual,
+        };
+        match ty {
+            Ty::F64(_) => {
+                let cc = match op {
+                    CmpOp::Eq => FloatCC::Equal,
+                    CmpOp::Ne => FloatCC::NotEqual,
+                    CmpOp::Lt => FloatCC::LessThan,
+                    CmpOp::Le => FloatCC::LessThanOrEqual,
+                    CmpOp::Gt => FloatCC::GreaterThan,
+                    CmpOp::Ge => FloatCC::GreaterThanOrEqual,
+                };
+                self.b.ins().fcmp(cc, a, c)
+            }
+            Ty::Bytes => {
+                let same = self.call_rt("anvil_str_eq", &[a, c]).unwrap();
+                self.b.ins().icmp_imm_s(icc, same, 1)
+            }
+            Ty::Str => {
+                let order = self.call_rt("anvil_str_cmp", &[a, c]).unwrap();
+                self.b.ins().icmp_imm_s(icc, order, 0)
+            }
+            _ => self.b.ins().icmp(icc, a, c),
+        }
+    }
+
     fn text(&mut self, e: &Expr) -> Value {
         let v = self.expr(e);
-        match &e.ty {
+        self.text_of(&e.ty, &v)
+    }
+
+    /// `v` of type `ty` as `print` writes it: owned text, `v` itself for text.
+    fn text_of(&mut self, ty: &Ty, v: &[Value]) -> Value {
+        match ty {
             Ty::Str => v[0],
-            Ty::I64 => self.call_rt("anvil_str_from_i64", &v).unwrap(),
+            Ty::I64 => self.call_rt("anvil_str_from_i64", v).unwrap(),
             Ty::Bool => {
                 let wide = self.b.ins().uextend(I, v[0]);
                 self.call_rt("anvil_str_from_bool", &[wide]).unwrap()
             }
             Ty::F64(u) => {
-                let digits = self.call_rt("anvil_str_from_f64", &v).unwrap();
+                let digits = self.call_rt("anvil_str_from_f64", v).unwrap();
                 if u.is_dimensionless() {
                     return digits;
                 }
@@ -2251,6 +2302,35 @@ impl<'a, 'b> Gen<'a, 'b> {
                     _ => self.b.ins().imul(a, c),
                 }];
             }
+            Builtin::AssertCmp { message, op } => {
+                let ty = &bargs[0].ty;
+                let a = self.expr(&bargs[0])[0];
+                let c = self.expr(&bargs[1])[0];
+                let holds = self.scalar_cmp(*op, ty, a, c);
+                let (fail, cont) = (self.b.create_block(), self.b.create_block());
+                self.b.set_cold_block(fail);
+                self.b.ins().brif(holds, cont, &[], fail, &[]);
+                self.b.switch_to_block(fail);
+                self.b.seal_block(fail);
+                let (left, right) = (self.text_of(ty, &[a]), self.text_of(ty, &[c]));
+                let m = self.str_obj(message);
+                let is_text = self.b.ins().iconst(I, (*ty == Ty::Str) as i64);
+                self.call_rt("anvil_panic_sides", &[m, left, right, is_text]);
+                self.b.ins().trap(TrapCode::user(1).unwrap());
+                self.b.switch_to_block(cont);
+                self.b.seal_block(cont);
+                if *ty == Ty::Str {
+                    self.call_rt("anvil_release", &[a]);
+                    self.call_rt("anvil_release", &[c]);
+                }
+                return Vec::new();
+            }
+            Builtin::BitLen => {
+                let a = self.expr(&bargs[0])[0];
+                let zeros = self.b.ins().clz(a);
+                let all = self.b.ins().iconst(I, 64);
+                return vec![self.b.ins().isub(all, zeros)];
+            }
             Builtin::BytesOf { site } => {
                 let xs = self.expr(&bargs[0])[0];
                 let s = self.str_obj(site);
@@ -2390,6 +2470,8 @@ impl<'a, 'b> Gen<'a, 'b> {
             | Builtin::WrappingAdd
             | Builtin::WrappingSub
             | Builtin::WrappingMul
+            | Builtin::BitLen
+            | Builtin::AssertCmp { .. }
             | Builtin::BytesOf { .. }
             | Builtin::ReadBytes
             | Builtin::WriteBytes

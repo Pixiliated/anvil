@@ -37,6 +37,7 @@ pub fn parse(toks: Vec<Token>) -> (File, Vec<Diagnostic>) {
                         | Tok::Struct
                         | Tok::Enum
                         | Tok::Unit
+                        | Tok::Const
                         | Tok::Test
                         | Tok::Allow
                         | Tok::Import
@@ -128,6 +129,7 @@ impl Parser {
                 let start = self.bump().span;
                 let mut item = match self.peek() {
                     Tok::Unit => self.unit_decl().map(Item::Unit)?,
+                    Tok::Const => self.const_decl().map(Item::Const)?,
                     Tok::Struct => self.struct_decl().map(Item::Struct)?,
                     Tok::Enum => self.enum_decl().map(Item::Enum)?,
                     Tok::Fn => self.fn_decl(Vec::new(), false).map(|f| Item::Fn(Box::new(f)))?,
@@ -135,13 +137,14 @@ impl Parser {
                     Tok::Interface => self.interface_decl().map(Item::Interface)?,
                     _ => {
                         return Err(
-                            self.unexpected("`fn`, `extern`, `struct`, `enum`, `interface` or `unit` after `pub`")
+                            self.unexpected("`fn`, `extern`, `struct`, `enum`, `interface`, `unit` or `const` after `pub`")
                         )
                     }
                 };
                 match &mut item {
                     Item::Interface(d) => (d.public, d.span) = (true, start.to(d.span)),
                     Item::Unit(d) => (d.public, d.span) = (true, start.to(d.span)),
+                    Item::Const(d) => (d.public, d.span) = (true, start.to(d.span)),
                     Item::Struct(d) => (d.public, d.span) = (true, start.to(d.span)),
                     Item::Enum(d) => (d.public, d.span) = (true, start.to(d.span)),
                     Item::Fn(d) => (d.public, d.span) = (true, start.to(d.span)),
@@ -150,6 +153,7 @@ impl Parser {
                 Ok(item)
             }
             Tok::Unit => self.unit_decl().map(Item::Unit),
+            Tok::Const => self.const_decl().map(Item::Const),
             Tok::Struct => self.struct_decl().map(Item::Struct),
             Tok::Enum => self.enum_decl().map(Item::Enum),
             Tok::Fn => self.fn_decl(Vec::new(), false).map(|f| Item::Fn(Box::new(f))),
@@ -211,6 +215,17 @@ impl Parser {
         }
         let end = self.expect(Tok::Semi)?;
         Ok(ImportDecl { path, names, span: start.to(end) })
+    }
+
+    fn const_decl(&mut self) -> PResult<ConstDecl> {
+        let start = self.bump().span;
+        let name = self.ident("constant name")?;
+        self.expect(Tok::Colon)?;
+        let ty = self.type_expr()?;
+        self.expect(Tok::Assign)?;
+        let value = self.expr()?;
+        let end = self.expect(Tok::Semi)?;
+        Ok(ConstDecl { public: false, name, ty, value, span: start.to(end) })
     }
 
     fn unit_decl(&mut self) -> PResult<UnitDecl> {
@@ -721,6 +736,22 @@ impl Parser {
     }
 
     fn stmt(&mut self) -> PResult<Stmt> {
+        let mut allows = Vec::new();
+        while self.peek() == &Tok::Allow {
+            let a = self.allow_decl()?;
+            if a.lint.name != "mutants" {
+                let d = Diagnostic::new("E0100", a.lint.span, format!("`allow {}` goes before a function", a.lint.name))
+                    .note("only `allow mutants` can excuse a single statement", None);
+                return Err(d);
+            }
+            allows.push(a);
+        }
+        let mut s = self.bare_stmt()?;
+        s.allows = allows;
+        Ok(s)
+    }
+
+    fn bare_stmt(&mut self) -> PResult<Stmt> {
         let start = self.span();
         let kind = match self.peek() {
             Tok::Let | Tok::Var => {
@@ -736,8 +767,14 @@ impl Parser {
                 let ty = self.type_expr()?;
                 self.expect(Tok::Assign)?;
                 let init = self.expr()?;
+                let otherwise = if self.eat(&Tok::Else) {
+                    let binding = if self.peek() == &Tok::LBrace { None } else { Some(self.ident("a name or `{`")?) };
+                    Some(LetElse { binding, body: self.block()? })
+                } else {
+                    None
+                };
                 self.expect(Tok::Semi)?;
-                StmtKind::Let { mutable, kw_span, name, ty, init }
+                StmtKind::Let { mutable, kw_span, name, ty, init, otherwise }
             }
             Tok::If => return self.if_stmt(),
             Tok::While => {
@@ -802,7 +839,7 @@ impl Parser {
                 }
             }
         };
-        Ok(Stmt { kind, span: start.to(self.prev_span()) })
+        Ok(Stmt { kind, span: start.to(self.prev_span()), allows: Vec::new() })
     }
 
     fn arm(&mut self) -> PResult<Arm> {
@@ -827,6 +864,10 @@ impl Parser {
         let mut also = Vec::new();
         while self.eat(&Tok::Pipe) {
             also.push(self.ident("a variant name")?);
+            if self.peek() == &Tok::LParen {
+                let several = "an arm with several variants binds nothing: write `A | B =>`";
+                return Err(self.unexpected("`|` or `=>`").note(several, None));
+            }
         }
         if self.peek() != &Tok::FatArrow {
             return Err(self
@@ -837,6 +878,31 @@ impl Parser {
         let body = self.block()?;
         let span = variant.span.to(body.span);
         Ok(Arm { variant, also, fields, fields_span, body, span })
+    }
+
+    /// `if c { a } else { b }`, or `else if`, as a value.
+    fn if_value(&mut self) -> PResult<ExprKind> {
+        self.bump();
+        let cond = self.expr_no_struct()?;
+        self.expect(Tok::LBrace)?;
+        let then = self.expr()?;
+        self.expect(Tok::RBrace)?;
+        if self.peek() != &Tok::Else {
+            let note = "an `if` that gives a value has an `else`, and each branch is one expression";
+            return Err(self.unexpected("`else`").note(note, None));
+        }
+        self.bump();
+        let start = self.span();
+        let otherwise = if self.peek() == &Tok::If {
+            let kind = self.if_value()?;
+            Expr { kind, span: start.to(self.prev_span()) }
+        } else {
+            self.expect(Tok::LBrace)?;
+            let e = self.expr()?;
+            self.expect(Tok::RBrace)?;
+            e
+        };
+        Ok(ExprKind::If(Box::new(cond), Box::new(then), Box::new(otherwise)))
     }
 
     fn if_stmt(&mut self) -> PResult<Stmt> {
@@ -852,7 +918,7 @@ impl Parser {
         } else {
             None
         };
-        Ok(Stmt { kind: StmtKind::If { cond, then, else_ }, span: start.to(self.prev_span()) })
+        Ok(Stmt { kind: StmtKind::If { cond, then, else_ }, span: start.to(self.prev_span()), allows: Vec::new() })
     }
 
     // ---- expressions ----
@@ -1194,6 +1260,7 @@ impl Parser {
                 ExprKind::Name(Ident { name: "self".into(), span })
             }
             Tok::Fn => ExprKind::Lambda(Box::new(self.lambda()?)),
+            Tok::If => self.if_value()?,
             Tok::LParen => {
                 self.bump();
                 let e = self.expr()?;

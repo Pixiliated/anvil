@@ -28,6 +28,7 @@ pub enum Tok {
     Continue,
     Struct,
     Unit,
+    Const,
     Test,
     Requires,
     Ensures,
@@ -107,6 +108,7 @@ impl Tok {
             Tok::Continue => "continue",
             Tok::Struct => "struct",
             Tok::Unit => "unit",
+            Tok::Const => "const",
             Tok::Test => "test",
             Tok::Allow => "allow",
             Tok::Import => "import",
@@ -193,6 +195,7 @@ pub const KEYWORDS: &[&str] = &[
     "continue",
     "struct",
     "unit",
+    "const",
     "test",
     "requires",
     "ensures",
@@ -226,6 +229,7 @@ pub(crate) fn keyword(s: &str) -> Option<Tok> {
         "continue" => Tok::Continue,
         "struct" => Tok::Struct,
         "unit" => Tok::Unit,
+        "const" => Tok::Const,
         "test" => Tok::Test,
         "requires" => Tok::Requires,
         "ensures" => Tok::Ensures,
@@ -288,6 +292,10 @@ pub(crate) fn lex_range(text: &str, start: usize, end: usize) -> Result<Vec<Toke
         }
         if c == b'`' {
             out.push(lex_raw(text, &mut i)?);
+            continue;
+        }
+        if c == b'\'' {
+            out.push(lex_char(text, &mut i)?);
             continue;
         }
         let two = if i + 1 < end { text.get(i..i + 2).unwrap_or("") } else { "" };
@@ -360,6 +368,8 @@ pub fn comments(text: &str) -> Vec<Span> {
                 i = string_end(bytes, i).unwrap_or_else(|| text[i..].find('\n').map_or(bytes.len(), |n| i + n));
             }
             b'`' => i = text[i + 1..].find('`').map_or(bytes.len(), |n| i + n + 2),
+            // `'"'` opens no string; a broken literal stops the lexer before this is asked.
+            b'\'' => i += if bytes.get(i + 1) == Some(&b'\\') { 4 } else { 3 },
             b'/' if bytes.get(i + 1) == Some(&b'/') => {
                 let mut end = text[i..].find('\n').map_or(bytes.len(), |n| i + n);
                 if end > i && bytes[end - 1] == b'\r' {
@@ -511,6 +521,31 @@ fn lex_string(text: &str, i: &mut usize) -> Result<Token, Diagnostic> {
 
 /// `` `text` ``: exactly the characters between the backticks, line breaks included (a CRLF as a
 /// line feed, so the value does not depend on how the file was saved).
+/// `'*'`: the number of one ASCII character, as an i64.
+fn lex_char(text: &str, i: &mut usize) -> Result<Token, Diagnostic> {
+    let start = *i;
+    let rest = &text[start + 1..];
+    let bad = |message: String| Err(Diagnostic::new("E0002", Span::new(start, start + 1), message));
+    let (value, len) = match rest.chars().next() {
+        Some('\\') => match rest[1..].chars().next() {
+            Some('n') => (10, 2),
+            Some('r') => (13, 2),
+            Some('t') => (9, 2),
+            Some('\\') => (92, 2),
+            Some('\'') => (39, 2),
+            _ => return bad("unknown escape in a character literal; valid escapes are \\n \\r \\t \\\\ \\'".to_string()),
+        },
+        Some(c) if c.is_ascii() && c != '\'' && c != '\n' => (c as i64, 1),
+        Some(c) if !c.is_ascii() => return bad(format!("`{c}` is not ASCII; a character literal is one byte")),
+        _ => return bad("a character literal holds one character".to_string()),
+    };
+    if rest.as_bytes().get(len) != Some(&b'\'') {
+        return bad("a character literal holds one character; text is written in double quotes".to_string());
+    }
+    *i = start + len + 2;
+    Ok(Token { tok: Tok::Int(value), span: Span::new(start, *i) })
+}
+
 fn lex_raw(text: &str, i: &mut usize) -> Result<Token, Diagnostic> {
     let start = *i;
     let Some(n) = text[start + 1..].find('`') else {

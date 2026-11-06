@@ -1,0 +1,13 @@
+// A failed assert on numbers shows both sides as `print` writes them.
+unit m;
+
+fn twice(x: f64[m]) -> f64[m] {
+    return x + x;
+}
+
+fn main() {
+    assert(1 + 1 == 2);
+    assert(true != false);
+    assert(twice(1.5[m]) < 3.5[m]);
+    assert(twice(1.5[m]) > 3.5[m]);
+}

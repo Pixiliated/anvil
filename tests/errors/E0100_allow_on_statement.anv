@@ -1,0 +1,5 @@
+// expect: E0100
+fn main() -> i64 {
+    allow untested "only mutants go here"
+    return 1;
+}

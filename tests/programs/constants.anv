@@ -1,0 +1,76 @@
+// Constants: literals, operators and other constants, worked out when the program is checked, in
+// any order; each use is the value.
+import lib.limits.{MOST, TITLE};
+
+unit m;
+unit s;
+
+const TWICE: i64 = MOST * 2 + OFFSET;
+const OFFSET: i64 = 1 << 4;
+const MASK: i64 = ~0xff & 0xffff;
+const SMALL: bool = TWICE < 1000 && !(OFFSET == 0);
+const HEADING: str = TITLE + ": " + "limits";
+const GRAVITY: f64[m/s^2] = 9.5[m/s^2] + 0.25[m/s^2];
+const FALL: f64[m] = GRAVITY * 2.0[s] * 2.0[s] / 2.0;
+const NEGATIVE: i64 = -(TWICE % 7);
+
+fn capped(n: i64) -> i64
+    requires n >= 0
+    ensures result <= MOST
+{
+    if n > MOST {
+        return MOST;
+    }
+    return n;
+}
+
+fn table(n: i64) -> [i64] {
+    var out: [i64] = [];
+    for i in 0..n {
+        out.push(i * OFFSET);
+    }
+    return out;
+}
+
+// Constants read inside a generic and a function literal.
+fn tagged[T: text](x: T) -> str {
+    return "{HEADING} {x}";
+}
+
+fn main() uses io {
+    print(TWICE);
+    print(OFFSET);
+    print(MASK);
+    print(SMALL);
+    print(HEADING);
+    print(GRAVITY);
+    print(FALL);
+    print(NEGATIVE);
+    print(capped(5000));
+    print(table(3).len());
+    print(tagged(1));
+    let f: fn(i64) -> i64 = fn(x: i64) -> i64 {
+        return x + OFFSET;
+    };
+    print(f(1));
+    print("{TITLE}/{MOST}");
+    print(MOST.bit_len());
+}
+
+test "constants read as their values" {
+    assert(TWICE == 216);
+    assert(capped(101) == MOST);
+    assert(capped(1) == 1);
+    assert(table(2) == [0, 16]);
+    assert(tagged("x") == "numbers: limits x");
+    assert(MASK == 0xff00);
+}
+
+test "bit_len counts the bits to write a number" {
+    assert((0).bit_len() == 0);
+    assert((1).bit_len() == 1);
+    assert((2).bit_len() == 2);
+    assert((255).bit_len() == 8);
+    assert((256).bit_len() == 9);
+    assert((-1).bit_len() == 64);
+}

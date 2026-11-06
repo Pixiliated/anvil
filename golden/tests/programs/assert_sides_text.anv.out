@@ -1,0 +1,5 @@
+exit: 101
+panic: assertion failed at tests/programs/assert_sides_text.anv:8:5: made() == "line one"
+panic:   left:  "line \"one\"\n\ttab \\ é"
+panic:   right: "line one"
+---

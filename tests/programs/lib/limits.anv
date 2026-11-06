@@ -1,0 +1,20 @@
+// Constants another file imports.
+
+// The most anything is allowed to count.
+pub const MOST: i64 = 100;
+
+// What the numbers are called.
+pub const TITLE: str = "numbers";
+
+// Private, and read by a generic checked for whoever instantiates it.
+const SHOWN: str = "at most ";
+
+// What is said about a value.
+pub fn bounded[T: text](x: T) -> str {
+    return "{SHOWN}{MOST}: {x}";
+}
+
+test "a generic reads what is private to its file" {
+    assert(bounded(1) == "at most 100: 1");
+    assert(TITLE == "numbers");
+}

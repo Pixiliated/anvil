@@ -58,6 +58,16 @@ pub fn compile_with(src: &SourceFile, load: Load) -> (Vec<SourceFile>, Result<ir
     }
 }
 
+/// `compile_with`, with the lines of statements kept for `profile` to count by. Nothing else
+/// about the program changes.
+pub fn compile_lines(src: &SourceFile, load: Load) -> (Vec<SourceFile>, Result<ir::Program, Vec<Diagnostic>>) {
+    let (sources, a) = analyze_lines(src, load, true);
+    match a.program {
+        Some(p) => (sources, Ok(p)),
+        None => (sources, Err(a.diags)),
+    }
+}
+
 /// Parses `src`; the syntax tree, or the syntax errors (a lexical error stops at once; the
 /// parser reports the first error of each item).
 pub fn parse(src: &SourceFile) -> Result<ast::File, Vec<Diagnostic>> {
@@ -77,6 +87,10 @@ pub fn analyze(src: &SourceFile) -> check::Analysis {
 /// stop before checking, so they come back alone with empty facts. Facts are the root's only. A
 /// program that checks cleanly must also be in canonical layout (E0110, see `fmt`).
 pub fn analyze_with(src: &SourceFile, load: Load) -> (Vec<SourceFile>, check::Analysis) {
+    analyze_lines(src, load, false)
+}
+
+fn analyze_lines(src: &SourceFile, load: Load, lines: bool) -> (Vec<SourceFile>, check::Analysis) {
     let mut l = Loading {
         load,
         root: src.name.clone(),
@@ -132,7 +146,7 @@ pub fn analyze_with(src: &SourceFile, load: Load) -> (Vec<SourceFile>, check::An
             examples: &examples[i],
         })
         .collect();
-    let a = check::analyze_modules(&modules, &l.order);
+    let a = check::analyze_modules(&modules, &l.order, lines);
     drop(modules);
     (l.sources, a)
 }

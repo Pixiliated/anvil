@@ -1,0 +1,4 @@
+main: 127 steps, 456 bytes, 24 copied
+test "an array also held elsewhere keeps its elements": 9 steps, 18 bytes, 0 copied
+test "what the loop hands out can be changed without copying": 23 steps, 122 bytes, 0 copied
+test "the rest": 67 steps, 133 bytes, 8 copied

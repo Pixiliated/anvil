@@ -244,7 +244,7 @@ fn failing_test_blocks_are_reported() {
     let failed = v["tests"].as_array().unwrap().iter().find(|t| t["ok"] == false).unwrap();
     assert_eq!(failed["name"], "deliberately wrong");
     assert_eq!(failed["output"], "about to fail\n");
-    assert_eq!(failed["panic"], "assertion failed at tests/test_blocks.anv:16:5: double(2) == 5");
+    assert_eq!(failed["panic"], "assertion failed at tests/test_blocks.anv:16:5: double(2) == 5\n  left:  4\n  right: 5");
 }
 
 #[test]
@@ -502,7 +502,9 @@ impl Scratch {
         Scratch(dir)
     }
     fn write(&self, rel: &str, text: &str) {
-        std::fs::write(self.0.join(rel), text).unwrap();
+        let path = self.0.join(rel);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, text).unwrap();
     }
     fn anvil(&self, args: &[&str]) -> Output {
         anvil_in(&self.0, args)
@@ -2283,6 +2285,8 @@ fn help_is_not_an_error() {
         let out = anvil(&[word]);
         assert_eq!(out.status.code(), Some(0), "{word}");
         assert!(String::from_utf8_lossy(&out.stdout).starts_with("usage: anvil"), "{word}");
+        let after = anvil(&["fuzz", word]);
+        assert!(word == "help" || after.status.code() == Some(0), "fuzz {word}");
     }
 }
 
@@ -2358,4 +2362,357 @@ test "small, and last" {
     let v = json_of(&p.anvil(&["mutate", "src/maths.anv", "--json"]));
     let m = v["mutants"].as_array().unwrap().iter().find(|m| m["from"] == "||").unwrap();
     assert_eq!(m["status"], "survived", "{v}");
+}
+
+#[test]
+fn a_for_loop_over_an_array_nothing_else_holds_copies_nothing() {
+    let v = json_of(&anvil(&["profile", "tests/programs/for_hands_out.anv", "--test", "what the loop hands out can be changed without copying", "--json"]));
+    assert_eq!(v["copied"], 0, "{v}");
+    // The rows are read again after the loop: each is copied when changed.
+    let v = json_of(&anvil(&["profile", "tests/programs/for_hands_out.anv", "--json"]));
+    let sites: Vec<&str> = v["copies"].as_array().unwrap().iter().map(|c| c["line"].as_str().unwrap()).collect();
+    assert_eq!(sites, ["row.push(1);"], "{v}");
+}
+
+#[test]
+fn profile_counts_by_line_without_changing_the_run() {
+    let p = hello_project("lines");
+    p.write(
+        "src/lines.anv",
+        r#"fn work(n: i64) -> i64 {
+    var total: i64 = 0;
+    for i in 0..n {
+        total = total + i;
+    }
+    return total;
+}
+
+fn main() uses io {
+    let a: i64 = work(1000);
+    print(a);
+    print("{a}{a}");
+}
+"#,
+    );
+    let v = json_of(&p.anvil(&["profile", "src/lines.anv", "--json"]));
+    let lines = v["lines"].as_array().unwrap();
+    let at = |n: &str| lines.iter().find(|l| l["at"] == n).unwrap().clone();
+    assert_eq!(at("src/lines.anv:4")["text"], "total = total + i;");
+    assert_eq!(at("src/lines.anv:4")["steps"], 1000);
+    // The loop's own rounds are on its line, not the last line of its body.
+    assert_eq!(lines[0]["at"], "src/lines.anv:3", "{v}");
+    assert_eq!(lines[0]["steps"], 1001, "{v}");
+    // A call's work is on the callee's lines; the rest of the caller's line is its own.
+    assert_eq!(at("src/lines.anv:10")["steps"], 1);
+    assert!(at("src/lines.anv:12")["bytes"].as_u64().unwrap() > 0, "{v}");
+    // Every step is on a line, and the run took as many as ever.
+    let sum: u64 = lines.iter().map(|l| l["steps"].as_u64().unwrap()).sum();
+    assert_eq!(v["steps"], sum, "{v}");
+    let plain = json_of(&p.anvil(&["measure", "src/lines.anv", "--json"]));
+    assert_eq!(plain["programs"][0]["steps"], v["steps"], "{plain}");
+    assert_eq!(plain["programs"][0]["bytes"], v["bytes"], "{plain}");
+    assert!(String::from_utf8_lossy(&p.anvil(&["profile", "src/lines.anv"]).stdout).contains("the costliest lines"));
+}
+
+#[test]
+fn a_copy_names_the_call_further_up_that_kept_a_reference() {
+    let p = hello_project("kept");
+    p.write(
+        "src/kept.anv",
+        r#"fn add(xs: [i64]) -> [i64] {
+    var out: [i64] = xs;
+    out.push(1);
+    return out;
+}
+
+fn pass(xs: [i64]) -> [i64] {
+    return add(xs);
+}
+
+fn main() uses io {
+    let xs: [i64] = [1, 2, 3];
+    let ys: [i64] = pass(xs);
+    print(xs.len() + ys.len());
+}
+"#,
+    );
+    let v = json_of(&p.anvil(&["profile", "src/kept.anv", "--json"]));
+    let c = &v["copies"][0];
+    assert_eq!(c["line"], "out.push(1);", "{v}");
+    // `add` and `pass` were each handed theirs to keep; main kept its own.
+    assert_eq!(c["from"][0]["args"][0]["moved"], true, "{v}");
+    assert_eq!(c["kept_up"][0]["line"], "let ys: [i64] = pass(xs);", "{v}");
+    assert_eq!(c["kept_up"][0]["args"][0]["kept"], "it is read again later", "{v}");
+    let text = String::from_utf8_lossy(&p.anvil(&["profile", "src/kept.anv"]).stdout).to_string();
+    assert!(text.contains("further up"), "{text}");
+    assert!(text.contains("`xs` keeps a reference there"), "{text}");
+}
+
+#[test]
+fn cost_sees_struct_fields_generic_instances_and_logarithms() {
+    let p = hello_project("costs");
+    p.write(
+        "src/costs.anv",
+        r#"struct Stack {
+    items: [i64],
+    tags: [i64],
+}
+
+fn total(s: Stack) -> i64
+    requires s.items.len() == s.tags.len()
+{
+    var sum: i64 = 0;
+    for i in 0..s.items.len() {
+        sum = sum.wrapping_add(s.items[i].wrapping_mul(s.tags[i]));
+    }
+    return sum;
+}
+
+fn halvings(n: i64) -> i64
+    requires n >= 0
+{
+    var left: i64 = n;
+    var count: i64 = 0;
+    while left > 0 {
+        left = left / 2;
+        count = count + 1;
+    }
+    return count;
+}
+
+fn first[T, U](xs: [T], _y: U) -> i64 {
+    return xs.len();
+}
+
+test "all" {
+    assert(total(Stack { items: [2], tags: [3] }) == 6);
+    assert(halvings(8) == 4);
+    assert(first(xs: [1], _y: "a") == 1);
+    assert(first(xs: ["a"], _y: 1) == 1);
+}
+"#,
+    );
+    let v = json_of(&p.anvil(&["cost", "src/costs.anv", "--only", "total,halvings", "--json"]));
+    let f = |name: &str| v["functions"].as_array().unwrap().iter().find(|f| f["function"] == name).unwrap().clone();
+    let total = f("total");
+    assert_eq!(total["steps"]["growth"], "linear", "{total}");
+    assert!(total["steps"]["size"].as_str().unwrap().starts_with("s."), "{total}");
+    assert!(total["measured"].as_u64().unwrap() >= 150, "{total}");
+    let halvings = f("halvings");
+    assert_eq!(halvings["steps"]["growth"], "logarithmic", "{halvings}");
+    assert!(halvings["steps"]["suggested"].as_str().unwrap().contains("n.bit_len()"), "{halvings}");
+    // By the generic's name, every instance; by the instance's, one, commas and all.
+    let all = json_of(&p.anvil(&["cost", "src/costs.anv", "--only", "first", "--json"]));
+    assert_eq!(all["functions"].as_array().unwrap().len(), 2, "{all}");
+    let one = json_of(&p.anvil(&["cost", "src/costs.anv", "--only", "first[i64, str],halvings", "--json"]));
+    assert_eq!(one["functions"].as_array().unwrap().len(), 2, "{one}");
+    assert!(one["functions"].as_array().unwrap().iter().any(|f| f["function"] == "first[i64, str]"), "{one}");
+}
+
+#[test]
+fn a_suggested_logarithmic_bound_holds() {
+    let p = hello_project("logbound");
+    p.write(
+        "src/log.anv",
+        r#"fn halvings(n: i64) -> i64
+    requires n >= 0
+    steps 3 * n.bit_len() + 4
+{
+    var left: i64 = n;
+    var count: i64 = 0;
+    while left > 0 {
+        left = left / 2;
+        count = count + 1;
+    }
+    return count;
+}
+
+test "halves" {
+    assert(halvings(8) == 4);
+}
+"#,
+    );
+    let v = json_of(&p.anvil(&["cost", "src/log.anv", "--json"]));
+    assert_eq!(v["functions"][0]["steps"]["bound_holds"], true, "{v}");
+    assert_eq!(v["functions"][0]["steps"]["outgrows_bound"], false, "{v}");
+}
+
+#[test]
+fn measure_can_leave_the_interpreter_out() {
+    let p = hello_project("nativeonly");
+    let v = json_of(&p.anvil(&["measure", "src/hello.anv", "--native-only", "--json"]));
+    let row = &v["programs"][0];
+    assert_eq!(row["steps"], serde_json::Value::Null, "{v}");
+    assert!(row["native"]["allocated"].as_u64().is_some(), "{v}");
+    let text = String::from_utf8_lossy(&p.anvil(&["measure", "src/hello.anv", "--native-only"]).stdout).to_string();
+    assert!(text.contains(" - "), "{text}");
+}
+
+#[test]
+fn constants_are_part_of_outlines_and_apis() {
+    let v = json_of(&anvil(&["outline", "tests/programs/lib/limits.anv", "--json"]));
+    let items = v["items"].as_array().unwrap();
+    assert!(items.iter().any(|i| i["kind"] == "const" && i["name"] == "MOST" && i["pub"] == true), "{v}");
+    let api = String::from_utf8_lossy(&anvil(&["api", "tests/programs/lib/limits.anv"]).stdout).to_string();
+    assert!(api.contains("const MOST: i64 = 100"), "{api}");
+    let refs = json_of(&anvil(&["refs", "tests/programs/constants.anv", "MOST", "--json"]));
+    assert!(!refs["declarations"][0]["uses"].as_array().unwrap().is_empty(), "{refs}");
+}
+
+#[test]
+fn a_constant_is_mutated_like_the_literal_it_replaces() {
+    let p = hello_project("mutconst");
+    p.write(
+        "src/maths.anv",
+        r#"const LIMIT: i64 = 10;
+const UNSEEN: i64 = LIMIT * 2;
+
+fn limit() -> i64 {
+    return LIMIT;
+}
+
+fn unseen() -> bool {
+    return UNSEEN > 0;
+}
+
+test "it" {
+    assert(limit() == 10);
+    assert(unseen());
+}
+"#,
+    );
+    let v = json_of(&p.anvil(&["mutate", "src/maths.anv", "--json"]));
+    let mutants = v["mutants"].as_array().unwrap();
+    let of = |f: &str, from: &str| mutants.iter().find(|m| m["function"] == f && m["from"] == from).unwrap_or_else(|| panic!("{v}"))["status"].clone();
+    assert_eq!(of("LIMIT", "10"), "killed", "{v}");
+    assert_eq!(of("UNSEEN", "*"), "survived", "{v}");
+}
+
+#[test]
+fn a_failed_assert_shows_both_sides_on_both_backends() {
+    let v = json_of(&anvil(&["golden", "check", "tests/programs/assert_sides_number.anv", "--native", "--json"]));
+    assert_eq!(v["ok"], true, "{v}");
+    let text = std::fs::read_to_string("golden/tests/programs/assert_sides_number.anv.out")
+        .or_else(|_| std::fs::read_to_string("../../golden/tests/programs/assert_sides_number.anv.out"))
+        .unwrap();
+    assert!(text.contains("  left:  3.0 m"), "{text}");
+    assert!(text.contains("  right: 3.5 m"), "{text}");
+    // And a test says it too.
+    let p = hello_project("sides");
+    p.write(
+        "src/sides.anv",
+        r#"fn f() -> str {
+    return "a";
+}
+
+test "differs" {
+    assert(f() == "b");
+}
+"#,
+    );
+    let out = String::from_utf8_lossy(&p.anvil(&["test", "src/sides.anv"]).stdout).to_string();
+    assert!(out.contains("left:  \"a\""), "{out}");
+    assert!(out.contains("right: \"b\""), "{out}");
+}
+
+#[test]
+fn a_statement_can_allow_its_mutants() {
+    let p = hello_project("stmtallow");
+    p.write(
+        "src/maths.anv",
+        r#"fn f(a: i64) -> i64 {
+    var out: i64 = 0;
+    allow mutants "the start is overwritten before it is read"
+    out = 0;
+    out = a + 1;
+    return out;
+}
+
+test "it" {
+    assert(f(1) == 2);
+}
+"#,
+    );
+    let v = json_of(&p.anvil(&["mutate", "src/maths.anv", "--json"]));
+    let m = v["mutants"].as_array().unwrap();
+    let at = |line: &str| m.iter().filter(|x| x["at"].as_str().unwrap().starts_with(line)).map(|x| x["status"].clone()).collect::<Vec<_>>();
+    assert!(at("4:").iter().all(|s| s == "allowed"), "{v}");
+    assert!(!at("4:").is_empty(), "{v}");
+    assert!(at("2:").iter().all(|s| s == "survived"), "{v}");
+    assert_eq!(v["stale_allows"].as_array().unwrap().len(), 0, "{v}");
+    // The formatter keeps it, and once nothing survives there it is stale.
+    assert!(p.anvil(&["fmt", "src/maths.anv"]).status.success());
+    p.write(
+        "src/kept.anv",
+        r#"fn g(a: i64) -> i64 {
+    allow mutants "nothing survives here"
+    return a + 1;
+}
+
+test "it" {
+    assert(g(1) == 2);
+}
+"#,
+    );
+    let v = json_of(&p.anvil(&["mutate", "src/kept.anv", "--json"]));
+    assert_eq!(v["stale_allows"].as_array().unwrap().len(), 1, "{v}");
+}
+
+#[test]
+fn errors_saying_the_same_thing_are_counted() {
+    let p = hello_project("same");
+    let mut src = String::from("fn main() {\n");
+    for i in 0..10 {
+        src.push_str(&format!("    let _a{i}: bool = [\"x\"].contains(\"y\");\n"));
+    }
+    src.push_str("}\n");
+    p.write("src/same.anv", &src);
+    let out = String::from_utf8_lossy(&p.anvil(&["check", "src/same.anv"]).stderr).to_string();
+    let out = if out.is_empty() { String::from_utf8_lossy(&p.anvil(&["check", "src/same.anv"]).stdout).to_string() } else { out };
+    assert!(out.contains("... and 8 more error[E0406]"), "{out}");
+    assert!(out.contains("10 error(s)"), "{out}");
+    assert_eq!(json_of(&p.anvil(&["check", "src/same.anv", "--json"]))["diagnostics"].as_array().unwrap().len(), 10);
+}
+
+#[test]
+fn first_usage_can_be_read_before_it_is_approved() {
+    let p = hello_project("firstusage");
+    assert!(p.anvil(&["golden", "approve", "src/hello.anv"]).status.success());
+    let out = String::from_utf8_lossy(&p.anvil(&["usage", "src/hello.anv"]).stdout).to_string();
+    assert!(out.contains("(missing)") && out.contains(" steps, "), "{out}");
+}
+
+#[test]
+fn a_golden_input_at_the_wrong_depth_is_named_when_approving() {
+    let p = hello_project("inpath");
+    p.write("golden/hello.anv.in", "arg: x\n");
+    let v = json_of(&p.anvil(&["golden", "approve", "src/hello.anv", "--json"]));
+    let unread = v["unread"].as_array().unwrap();
+    assert_eq!(unread.len(), 1, "{v}");
+    assert!(unread[0].as_str().unwrap().contains("it would be golden/src/hello.anv.in"), "{v}");
+}
+
+#[test]
+fn coverage_waits_while_a_test_fails() {
+    let p = hello_project("waits");
+    p.write(
+        "src/two.anv",
+        r#"fn f(a: i64) -> i64 {
+    if a > 0 {
+        return 1;
+    }
+    return 0;
+}
+
+test "stops early" {
+    assert(f(0) == 1);
+    assert(f(1) == 1);
+}
+"#,
+    );
+    let v = json_of(&p.anvil(&["verify", "--json"]));
+    assert_eq!(v["coverage_judged"], false, "{v}");
+    let open = v["open"].as_array().unwrap();
+    assert!(open.iter().all(|f| f["check"] != "unreached" && f["check"] != "untested"), "{v}");
+    assert!(open.iter().any(|f| f["check"] == "test"), "{v}");
 }

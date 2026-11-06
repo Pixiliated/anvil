@@ -138,6 +138,7 @@ fn surely_moved(e: &Expr, out: &mut Live) {
             out.insert(*l);
         }
         ExprKind::And(a, _) | ExprKind::Or(a, _) => surely_moved(a, out),
+        ExprKind::Cond { cond, .. } => surely_moved(cond, out),
         _ => children(e).into_iter().for_each(|c| surely_moved(c, out)),
     }
 }
@@ -562,7 +563,7 @@ impl Walk<'_> {
             }
             Stmt::Break => lp.expect("break outside a loop").brk.clone(),
             Stmt::Continue => lp.expect("continue outside a loop").cont.clone(),
-            Stmt::Reached(_) | Stmt::Drop(_) => after.clone(),
+            Stmt::Reached(_) | Stmt::Drop(_) | Stmt::Line(_) => after.clone(),
             Stmt::If(c, a, b) => {
                 let (in_a, in_b) = (self.block(a, after, lp, mark), self.block(b, after, lp, mark));
                 let mut live = union(&in_a, &in_b);
@@ -607,11 +608,11 @@ impl Walk<'_> {
             Stmt::While(c, body) => {
                 let mut entry = after.clone();
                 refs(c, &mut entry);
-                self.looped(body, after, &entry, &[], mark)
+                self.looped(body, after, &entry, &[], None, mark)
             }
-            // The counter and the snapshot are kept live through the loop, conservatively.
+            // The counter is kept live through the loop, conservatively.
             Stmt::For(i, start, end, body) => {
-                let mut live = self.looped(body, after, after, &[*i], mark);
+                let mut live = self.looped(body, after, after, &[*i], None, mark);
                 if mark {
                     self.leaf(vec![start, end], None, None, &live);
                 }
@@ -621,7 +622,7 @@ impl Walk<'_> {
                 live
             }
             Stmt::ForEach { var, held, iter, body } => {
-                let mut live = self.looped(body, after, after, &[*var, *held], mark);
+                let mut live = self.looped(body, after, after, &[*held], Some(*var), mark);
                 if mark {
                     self.leaf(vec![iter], None, None, &live);
                 }
@@ -634,13 +635,23 @@ impl Walk<'_> {
     }
 
     /// What is live at the head of a loop whose body is `body`: the least set with
-    /// head = base + kept + live before the body (after which the head comes again).
-    fn looped(&self, body: &mut Vec<Stmt>, after: &Live, base: &Live, kept: &[LocalId], mark: bool) -> Live {
+    /// head = base + kept + live before the body (after which the head comes again). `rebound` is
+    /// written at the head of each round, so what the body read of it last can move.
+    fn looped(
+        &self,
+        body: &mut Vec<Stmt>,
+        after: &Live,
+        base: &Live,
+        kept: &[LocalId],
+        rebound: Option<LocalId>,
+        mark: bool,
+    ) -> Live {
         let mut head = base.clone();
         head.extend(kept);
         loop {
             let lp = Loop { brk: after.clone(), cont: head.clone() };
-            let next = union(&head, &self.block(body, &head, Some(&lp), false));
+            let mut next = union(&head, &self.block(body, &head, Some(&lp), false));
+            next.retain(|l| Some(*l) != rebound);
             if next == head {
                 break;
             }
@@ -693,7 +704,14 @@ fn holding_after(s: &Stmt, before: &Live) -> Live {
             out.extend([*var, *held]);
             left_holding(iter, &mut out);
         }
-        Stmt::If(..) | Stmt::Match { .. } | Stmt::Return(_) | Stmt::Break | Stmt::Continue | Stmt::Reached(_) | Stmt::Drop(_) => {}
+        Stmt::If(..)
+        | Stmt::Match { .. }
+        | Stmt::Return(_)
+        | Stmt::Break
+        | Stmt::Continue
+        | Stmt::Reached(_)
+        | Stmt::Drop(_)
+        | Stmt::Line(_) => {}
     }
     out
 }
@@ -748,7 +766,7 @@ mod tests {
                         expr(scrutinee, f, out);
                         arms.iter().for_each(|a| block(&a.body, f, out));
                     }
-                    Stmt::Return(None) | Stmt::Break | Stmt::Continue | Stmt::Reached(_) | Stmt::Drop(_) => {}
+                    Stmt::Return(None) | Stmt::Break | Stmt::Continue | Stmt::Reached(_) | Stmt::Drop(_) | Stmt::Line(_) => {}
                 }
             }
         }
@@ -777,7 +795,7 @@ mod tests {
                     Stmt::Return(_) => out.push(format!("{pad}return")),
                     Stmt::Break => out.push(format!("{pad}break")),
                     Stmt::Continue => out.push(format!("{pad}continue")),
-                    Stmt::Reached(_) => {}
+                    Stmt::Reached(_) | Stmt::Line(_) => {}
                     Stmt::If(_, a, b) => {
                         out.push(format!("{pad}if"));
                         block(a, f, depth + 1, out);
@@ -829,7 +847,7 @@ mod tests {
         assert_eq!(shape(src, "f"), ["if", "  return", "else", "return"]);
         // What a `for` or a `match` is over, likewise.
         let src = "fn f(xs: [i64]) -> i64 {\n    var t: i64 = 0;\n    for x in xs {\n        t = t + x;\n    }\n    return t;\n}\n";
-        assert_eq!(moved(src, "f"), ["xs", "t", "t"]);
+        assert_eq!(moved(src, "f"), ["xs", "t", "x", "t"]);
         let src = "fn f(o: Option[[i64]]) -> i64 {\n    match o {\n        Some(value) => { return value.len(); }\n        None => { return 0; }\n    }\n}\n";
         assert_eq!(moved(src, "f"), ["o", "value"]);
     }
@@ -892,6 +910,12 @@ mod tests {
             "{ADD}\nfn longer(xs: [i64]) -> [i64]\n    ensures result.len() == xs.len() + 1\n{{\n    return add(xs: xs, x: 0);\n}}\n"
         );
         assert!(moved(&src, "longer").is_empty());
+    }
+
+    #[test]
+    fn the_last_read_of_a_loop_variable_moves_it() {
+        let src = "fn f(xs: [[i64]]) -> [[i64]] {\n    var out: [[i64]] = [];\n    for x in xs {\n        out.push(x);\n    }\n    return out;\n}\n";
+        assert_eq!(moved(src, "f"), ["xs", "x", "out"]);
     }
 
     #[test]

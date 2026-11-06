@@ -240,6 +240,11 @@ pub struct Recorder {
     pub copies: BTreeMap<String, CopySite>,
     /// Whether each call keeps its site, so a copy says which call it came from (`profile`).
     pub sites: bool,
+    /// Steps and bytes by source line, when the program was compiled with its lines, by index
+    /// in `Program::lines`; the line running now, and what had been counted when it began.
+    pub lines: Vec<[u64; 2]>,
+    line: Option<usize>,
+    line_from: [u64; 2],
 }
 
 /// The copies made at one site.
@@ -252,6 +257,10 @@ pub struct CopySite {
     /// The same copies by the site of the call the function was running for: (bytes, times).
     /// The empty site is a run not called from the program (main, a test, `parallel_map`).
     pub from: BTreeMap<String, (u64, u64)>,
+    /// When the call the function was running for moved all it was handed, the same copies by
+    /// the nearest call further up that did not: what kept a second reference, as far as a call
+    /// can show it.
+    pub kept_up: BTreeMap<String, (u64, u64)>,
 }
 
 /// A call in progress: what had been counted when it began (steps, bytes, copied), and what its
@@ -330,12 +339,32 @@ impl Recorder {
             branches: vec![0; program.branches.len()],
             copies: BTreeMap::new(),
             sites: false,
+            lines: vec![[0; 2]; program.lines.len()],
+            line: None,
+            line_from: [0; 2],
         }
     }
 
+    /// Counts what happened since the last change of line to the line that was running.
+    fn to_line(&mut self, next: Option<usize>, now: [u64; 2]) {
+        if let Some(l) = self.line {
+            for (total, (n, from)) in self.lines[l].iter_mut().zip(now.iter().zip(&self.line_from)) {
+                *total += n - from;
+            }
+        }
+        self.line = next;
+        self.line_from = now;
+    }
+
     /// Counts `bytes` copied at site `at`, under the call running now.
-    fn copied_at(&mut self, at: &str, bytes: u64) {
+    fn copied_at(&mut self, at: &str, bytes: u64, handed: &BTreeMap<String, Vec<Handed>>) {
         let Recorder { stack, copies, .. } = self;
+        let keeps = |site: &str| handed.get(site).is_some_and(|args| args.iter().any(|a| a.kept.is_some()));
+        // Sites are empty unless the recorder keeps them, and nothing keeps at an empty site.
+        let up = match stack.split_last() {
+            Some((last, rest)) if !keeps(&last.site) => rest.iter().rev().map(|a| a.site.as_str()).find(|s| keeps(s)),
+            _ => None,
+        };
         let (func, from) = match stack.last() {
             Some(a) => (Some(a.func), a.site.as_str()),
             None => (None, ""),
@@ -352,6 +381,11 @@ impl Recorder {
         let f = c.from.get_mut(from).expect("inserted above");
         f.0 += bytes;
         f.1 += 1;
+        if let Some(up) = up {
+            let k = c.kept_up.entry(up.to_string()).or_default();
+            k.0 += bytes;
+            k.1 += 1;
+        }
     }
 
     /// A recorder that also keeps a timeline of at most `limit` events, of the functions in
@@ -769,9 +803,16 @@ pub fn measure(
     let mut rng = gen::Rng::new(gen::test_seed(&f.name, 1));
     for case in 0..cases {
         let size = case * COST_SIZE / cases.max(1);
-        let inputs: Vec<Value> =
+        let mut inputs: Vec<Value> =
             types.iter().map(|t| gen::generate_with(t, program, &mut rng, size, true)).collect();
-        if let Called::Returned(usage) = call_bounded(program, fid, &inputs, max_steps, host.reborrow(), false) {
+        let mut called = call_bounded(program, fid, &inputs, max_steps, host.reborrow(), false);
+        // Requires that tie sizes together rarely hold by chance.
+        if matches!(called, Called::Excluded) {
+            gen::fit_lengths(&mut inputs);
+            gen::fit_numbers(&mut inputs);
+            called = call_bounded(program, fid, &inputs, max_steps, host.reborrow(), false);
+        }
+        if let Called::Returned(usage) = called {
             sample(&inputs, usage);
         }
     }
@@ -810,7 +851,7 @@ pub fn check_contract(
     let largest = if wide { COST_SIZE } else { 30 };
     let (mut checked, mut excluded, mut overflowed, mut beyond) = (0, 0, 0, 0);
     // Requires that tie arguments together rarely hold by chance, so if too few inputs got past
-    // them, more try small numbers, which take the arrays' lengths as their limit.
+    // them, more try arrays of one length and small numbers, which take that length as their limit.
     let more = 4 * cases;
     for case in 0..cases + more {
         if case == cases && checked >= cases / 10 {
@@ -820,6 +861,7 @@ pub fn check_contract(
         let mut inputs: Vec<Value> =
             types.iter().map(|t| gen::generate_with(t, program, &mut rng, size, wide)).collect();
         if case >= cases {
+            gen::fit_lengths(&mut inputs);
             gen::fit_numbers(&mut inputs);
         }
         match call_checked(program, fid, &inputs, max_steps, host.reborrow()) {
@@ -1017,12 +1059,25 @@ impl<'p, 'h> Interp<'p, 'h> {
             while !r.stack.is_empty() {
                 r.leave(None, [self.taken, self.allocated, self.copied], 0);
             }
+            r.to_line(None, [self.taken, self.allocated]);
             r.steps = self.taken;
             r.bytes = self.allocated;
             r.copied = self.copied;
             for (t, n) in r.totals.iter_mut().zip([self.taken, self.allocated, self.copied]) {
                 *t += n;
             }
+        }
+    }
+
+    /// The line running now, when lines are being counted.
+    fn line_now(&self) -> Option<usize> {
+        self.rec.as_ref().and_then(|r| r.line)
+    }
+
+    /// `line` runs from here on.
+    fn at_line(&mut self, line: Option<usize>) {
+        if let Some(r) = &mut self.rec {
+            r.to_line(line, [self.taken, self.allocated]);
         }
     }
 
@@ -1095,7 +1150,7 @@ impl<'p, 'h> Interp<'p, 'h> {
         }
         self.copied += bytes;
         if let Some(r) = &mut self.rec {
-            r.copied_at(at, bytes);
+            r.copied_at(at, bytes, &self.program.handed);
         }
     }
 
@@ -1108,7 +1163,9 @@ impl<'p, 'h> Interp<'p, 'h> {
         if let Some(r) = &mut self.rec {
             r.enter(fid, &args, [self.taken, self.allocated, self.copied], self.depth, site);
         }
+        let line = self.line_now();
         let result = self.call_body(fid, args);
+        self.at_line(line);
         if let (Some(r), Ok(v)) = (&mut self.rec, &result) {
             r.leave(Some(v), [self.taken, self.allocated, self.copied], self.depth);
         }
@@ -1205,6 +1262,10 @@ impl<'p, 'h> Interp<'p, 'h> {
             frame[*l] = Value::Void;
             return Ok(Flow::Normal);
         }
+        if let Stmt::Line(id) = s {
+            self.at_line(Some(*id));
+            return Ok(Flow::Normal);
+        }
         self.step()?;
         match s {
             Stmt::Let(l, e) => {
@@ -1232,18 +1293,22 @@ impl<'p, 'h> Interp<'p, 'h> {
                 return self.block(branch, frame);
             }
             Stmt::While(c, body) => {
+                let here = self.line_now();
                 while self.eval(c, frame)?.as_bool() {
                     if let Some(flow) = self.loop_body(body, frame)? {
                         return Ok(flow);
                     }
+                    self.at_line(here);
                 }
             }
             Stmt::For(l, start, end, body) => {
                 let s = self.eval(start, frame)?.as_i64();
                 let e = self.eval(end, frame)?.as_i64();
                 let mut i = s;
+                let here = self.line_now();
                 while i < e {
                     frame[*l] = Value::I64(i);
+                    self.at_line(here);
                     if let Some(flow) = self.loop_body(body, frame)? {
                         return Ok(flow);
                     }
@@ -1252,10 +1317,19 @@ impl<'p, 'h> Interp<'p, 'h> {
             }
             Stmt::ForEach { var, held, iter, body } => {
                 let items = self.eval(iter, frame)?;
-                frame[*held] = items.clone();
-                let Value::Array(items) = items else { unreachable!("for over {items:?}") };
-                for item in items.iter() {
-                    frame[*var] = item.clone();
+                let Value::Array(a) = &items else { unreachable!("for over {items:?}") };
+                let n = a.len();
+                frame[*held] = items;
+                let here = self.line_now();
+                for i in 0..n {
+                    let Value::Array(a) = &mut frame[*held] else { unreachable!("the snapshot is never written") };
+                    // An array nothing else holds hands its elements out, so they stay unshared.
+                    let item = match Rc::get_mut(a) {
+                        Some(items) => std::mem::replace(&mut items[i], Value::Void),
+                        None => a[i].clone(),
+                    };
+                    frame[*var] = item;
+                    self.at_line(here);
                     if let Some(flow) = self.loop_body(body, frame)? {
                         return Ok(flow);
                     }
@@ -1282,7 +1356,7 @@ impl<'p, 'h> Interp<'p, 'h> {
             }
             Stmt::Break => return Ok(Flow::Break),
             Stmt::Continue => return Ok(Flow::Continue),
-            Stmt::Reached(_) | Stmt::Drop(_) => unreachable!("handled above"),
+            Stmt::Reached(_) | Stmt::Drop(_) | Stmt::Line(_) => unreachable!("handled above"),
         }
         Ok(Flow::Normal)
     }
@@ -1518,6 +1592,14 @@ impl<'p, 'h> Interp<'p, 'h> {
                     _ => unreachable!("compare {a:?} {b:?}"),
                 })
             }
+            ExprKind::Cond { cond, then, otherwise, then_branch, else_branch } => {
+                let (branch, id) =
+                    if self.eval(cond, frame)?.as_bool() { (then, then_branch) } else { (otherwise, else_branch) };
+                if let (Some(id), Some(rec)) = (id, &mut self.rec) {
+                    rec.branches[*id] += 1;
+                }
+                self.eval(branch, frame)?
+            }
             ExprKind::And(l, r) => Value::Bool(self.eval(l, frame)?.as_bool() && self.eval(r, frame)?.as_bool()),
             ExprKind::Or(l, r) => Value::Bool(self.eval(l, frame)?.as_bool() || self.eval(r, frame)?.as_bool()),
             ExprKind::Not(x) => Value::Bool(!self.eval(x, frame)?.as_bool()),
@@ -1620,6 +1702,7 @@ impl<'p, 'h> Interp<'p, 'h> {
                     _ => a.wrapping_mul(c),
                 })
             }
+            Builtin::BitLen => Value::I64(64 - (x.as_i64() as u64).leading_zeros() as i64),
             Builtin::BytesOf { site } => {
                 let Value::Array(items) = x else { unreachable!("bytes_of {x:?}") };
                 let mut out = Vec::with_capacity(items.len());
@@ -1775,6 +1858,22 @@ impl<'p, 'h> Interp<'p, 'h> {
             Builtin::Assert { message } => {
                 if !x.as_bool() {
                     return panic(message.clone());
+                }
+                Value::Void
+            }
+            Builtin::AssertCmp { message, op } => {
+                let y = self.eval(&args[1], frame)?;
+                let holds = match (&x, &y) {
+                    (Value::I64(a), Value::I64(c)) => cmp(*op, a, c),
+                    (Value::F64(a), Value::F64(c)) => cmp(*op, a, c),
+                    (Value::Bool(a), Value::Bool(c)) => cmp(*op, a, c),
+                    (Value::Str(a), Value::Str(c)) => cmp(*op, a.as_bytes(), c.as_bytes()),
+                    _ => unreachable!("assert on {x:?} and {y:?}"),
+                };
+                if !holds {
+                    let ty = &args[0].ty;
+                    let (l, r) = (print_text(&x, ty), print_text(&y, ty));
+                    return panic(anvil_front::ir::failed_sides(message, &l, &r, *ty == Ty::Str));
                 }
                 Value::Void
             }

@@ -227,7 +227,7 @@ fn files(root: &Path, file: Option<&str>) -> Result<(Project, Vec<String>), Repo
 
 fn show(c: &Checked, text: &mut String, all: bool) {
     text.push_str(&format!("{} ({})\n", c.file, c.status));
-    if all {
+    if all || c.status == "missing" {
         for u in &c.measured.runs {
             text.push_str(&format!("    {}\n", u.line()));
         }
@@ -244,7 +244,7 @@ fn show(c: &Checked, text: &mut String, all: bool) {
         text.push_str(&format!("  {}{note}\n", ch.text));
     }
     if c.status == "missing" {
-        text.push_str(&format!("  no approved usage; check it, then `anvil usage approve {}`\n", c.file));
+        text.push_str(&format!("  no approved usage; check these, then `anvil usage approve {}`\n", c.file));
     }
 }
 

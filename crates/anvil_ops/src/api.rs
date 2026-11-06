@@ -36,6 +36,7 @@ pub(crate) fn lines(src: &SourceFile) -> Result<Vec<String>, String> {
                 format!("{} {{ {} }}", header(i.span.start, i.name.span), methods.join("; "))
             }
             Item::Unit(u) if u.public => text(u.span),
+            Item::Const(c) if c.public => text(c.span),
             _ => continue,
         };
         out.push(line.strip_prefix("pub ").unwrap_or(&line).trim_end_matches(';').trim_end().to_string());

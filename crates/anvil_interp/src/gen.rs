@@ -64,6 +64,27 @@ pub fn fit_numbers(inputs: &mut [Value]) {
     inputs.iter_mut().for_each(|v| fit(v, limit));
 }
 
+/// Makes generated arguments more likely to meet requires like `keys.len() == items.len()`: the
+/// arrays among the arguments, and among each struct's fields, are cut to the shortest of them.
+pub fn fit_lengths(inputs: &mut [Value]) {
+    fn level<'v>(values: impl Iterator<Item = &'v mut Value>) {
+        let mut arrays = Vec::new();
+        for v in values {
+            match v {
+                Value::Array(a) => arrays.push(a),
+                Value::Struct(fields) => level(fields.iter_mut()),
+                _ => {}
+            }
+        }
+        if let Some(shortest) = arrays.iter().map(|a| a.len()).min() {
+            for a in arrays {
+                Rc::make_mut(a).truncate(shortest);
+            }
+        }
+    }
+    level(inputs.iter_mut());
+}
+
 const EDGE_INTS: &[i64] = &[0, 1, -1, 2, i64::MAX, i64::MIN];
 /// Characters of generated text: mostly ASCII, some that take two or three bytes.
 const CHARS: &[char] = &['a', 'b', 'c', 'x', 'y', 'z', 'A', 'Z', '0', '9', ' ', ',', '.', '-', 'é', '漢'];
@@ -128,8 +149,9 @@ pub fn generate_with(ty: &Ty, program: &Program, rng: &mut Rng, size: u64, wide:
             }
             Value::Map(Rc::new(entries))
         }
+        // Wide, a struct's arrays grow as a parameter's would: recursion still goes through arrays.
         Ty::Struct(id) => Value::Struct(
-            program.structs[*id].fields.iter().map(|(_, t)| generate(t, rng, size / 2)).collect(),
+            program.structs[*id].fields.iter().map(|(_, t)| generate(t, rng, if wide { size } else { size / 2 })).collect(),
         ),
         Ty::Enum(id) => {
             let variants = &program.enums[*id].variants;

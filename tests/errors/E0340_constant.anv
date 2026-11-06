@@ -1,0 +1,4 @@
+// expect: E0340
+const NOBODY: i64 = 1;
+
+fn main() {}

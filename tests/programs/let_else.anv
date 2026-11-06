@@ -1,0 +1,89 @@
+// `let x: T = e else { ... };` unwraps an Option or a Result, or leaves.
+enum Tree {
+    Leaf(value: i64),
+    Node(left: [Tree], right: [Tree]),
+}
+
+fn first_long(words: [str]) -> str {
+    for w in words {
+        let place: i64 = w.find("x") else {
+            continue;
+        };
+        if place > 0 {
+            return w;
+        }
+    }
+    return "none";
+}
+
+fn number(text: str) -> Result[i64, str] {
+    let n: i64 = text.parse_i64() else {
+        return Err("not a number: {text}");
+    };
+    return Ok(n * 2);
+}
+
+fn doubled(text: str) -> str {
+    let n: i64 = number(text) else why {
+        return "failed, {why}";
+    };
+    return "got {n}";
+}
+
+// Mutable, holding what lives on the heap, and moved on.
+fn grown(found: Option[[i64]]) -> [i64] {
+    var items: [i64] = found else {
+        return [];
+    };
+    items.push(9);
+    return items;
+}
+
+fn last_word(words: [str]) -> str {
+    var out: str = "";
+    var i: i64 = 0;
+    while i < 5 {
+        i = i + 1;
+        let w: str = at(words: words, i: i) else {
+            break;
+        };
+        out = w;
+    }
+    return out;
+}
+
+fn at(words: [str], i: i64) -> Option[str] {
+    if i < words.len() {
+        return Some(words[i]);
+    }
+    return None;
+}
+
+fn must(found: Option[i64]) -> i64 {
+    let n: i64 = found else {
+        panic("nothing found");
+    };
+    return n;
+}
+
+fn main() uses io {
+    print(first_long(["abc", "xa", "axb", "b"]));
+    print(first_long(["q"]));
+    print(doubled("21"));
+    print(doubled("x"));
+    print(grown(Some([1, 2])).len());
+    print(grown(None).len());
+    print(last_word(["a", "b", "c"]));
+    print(must(Some(4)));
+}
+
+test "every way out" {
+    assert(first_long(["ax"]) == "ax");
+    assert(first_long(["xa"]) == "none");
+    assert(doubled("x") == "failed, not a number: x");
+    assert(doubled("2") == "got 4");
+    assert(grown(Some([1])) == [1, 9]);
+    assert(grown(None) == []);
+    assert(last_word(["a", "b"]) == "b");
+    assert(must(Some(1)) == 1);
+}

@@ -1,0 +1,10 @@
+exit: 0
+---
+axb
+none
+got 42
+failed, not a number: x
+3
+0
+c
+4

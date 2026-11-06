@@ -8,6 +8,7 @@
 //! ```text
 //! exit: 101
 //! panic: index 3 out of bounds for length 3 at src/main.anv:7:22
+//! panic: (each further line of a panic's text says `panic:` too)
 //! stderr: a line the program wrote with eprint
 //! ---
 //! everything the program printed, byte for byte
@@ -97,11 +98,13 @@ pub fn orphans(project: &Project) -> Vec<String> {
             continue;
         }
         let shown = format!("{}/{rel}", project.golden_dir);
-        let source = format!("{base}.anv");
-        out.push(if project.files.contains(&source) {
-            format!("{shown} is not read: for {source} it would be {}/{source}.{kind}", project.golden_dir)
-        } else {
-            format!("{shown} is not read: no project file is named {base}")
+        // The file it was meant for: `main` or `main.anv`, wherever in the project that is.
+        let name = base.rsplit('/').next().unwrap_or(base);
+        let name = if name.ends_with(".anv") { name.to_string() } else { format!("{name}.anv") };
+        let meant = project.files.iter().find(|f| f.rsplit('/').next() == Some(name.as_str()));
+        out.push(match meant {
+            Some(source) => format!("{shown} is not read: for {source} it would be {}/{source}.{kind}", project.golden_dir),
+            None => format!("{shown} is not read: no project file is named {base}"),
         });
     }
     out
@@ -135,7 +138,9 @@ impl Output {
     pub fn to_text(&self) -> String {
         let mut s = format!("exit: {}\n", self.exit);
         if let Some(p) = &self.panic {
-            s.push_str(&format!("panic: {p}\n"));
+            for line in p.split('\n') {
+                s.push_str(&format!("panic: {line}\n"));
+            }
         }
         for line in self.stderr.lines() {
             s.push_str(&format!("stderr: {line}\n"));
@@ -154,7 +159,10 @@ impl Output {
             if let Some(v) = line.strip_prefix("exit: ") {
                 exit = Some(v.parse().map_err(|_| format!("bad exit code `{v}`"))?);
             } else if let Some(v) = line.strip_prefix("panic: ") {
-                panic = Some(v.to_string());
+                panic = Some(match panic {
+                    Some(before) => format!("{before}\n{v}"),
+                    None => v.to_string(),
+                });
             } else if let Some(v) = line.strip_prefix("stderr: ") {
                 stderr.push_str(v);
                 stderr.push('\n');
@@ -421,9 +429,10 @@ pub(crate) fn run_native(
     let mut panic = None;
     if exit == PANIC_EXIT_CODE {
         let body = err.strip_suffix('\n').unwrap_or(&err);
-        let start = body.rfind('\n').map_or(0, |i| i + 1);
-        if let Some(m) = body[start..].strip_prefix("panic: ") {
-            panic = Some(m.to_string());
+        // A panic's text can run over several lines, and comes last.
+        let start = body.rfind("\npanic: ").map(|i| i + 1).or(body.starts_with("panic: ").then_some(0));
+        if let Some(start) = start {
+            panic = Some(body[start + "panic: ".len()..].to_string());
             err.truncate(start);
         }
     }

@@ -349,10 +349,49 @@ impl Gen {
         Some(format!("{xs}.parallel_map({name})"))
     }
 
+    /// A value chosen by `if`, unwrapped by `let ... else`, or handed out by a `for`.
+    fn choosing_statement(&mut self, out: &mut String, indent: &str, t: T) {
+        match self.rng.below(3) {
+            0 => {
+                let v = self.fresh("v");
+                let (cond, a, other) = (self.expr(T::B, 2), self.expr(t, 2), self.expr(t, 2));
+                out.push_str(&format!("{indent}let {v}: {} = if {cond} {{ {a} }} else {{ {other} }};\n", t.name()));
+                self.vars.push((v, t));
+            }
+            1 => {
+                let (acc, i, v) = (self.fresh("v"), self.fresh("i"), self.fresh("v"));
+                let text = self.expr(T::S, 1);
+                out.push_str(&format!("{indent}var {acc}: i64 = 0;\n{indent}for {i} in 0..2 {{\n"));
+                out.push_str(&format!("{indent}    let {v}: i64 = ({text} + \"{{{i}}}\").parse_i64() else {{\n"));
+                out.push_str(&format!("{indent}        break;\n{indent}    }};\n"));
+                out.push_str(&format!("{indent}    {acc} = {v};\n{indent}}}\n"));
+                self.vars.push((acc, T::I));
+            }
+            _ => {
+                // Elements handed out and changed; sometimes the array is read again, so shared.
+                let (acc, x, y, words) = (self.fresh("v"), self.fresh("x"), self.fresh("v"), self.fresh("v"));
+                let parts = [self.expr(T::S, 1), self.expr(T::S, 1), self.expr(T::S, 1)];
+                let tail = self.expr(T::S, 1);
+                out.push_str(&format!("{indent}let {words}: [str] = [{}];\n", parts.join(", ")));
+                out.push_str(&format!("{indent}var {acc}: str = \"\";\n{indent}for {x} in {words} {{\n"));
+                out.push_str(&format!("{indent}    var {y}: str = {x};\n{indent}    {y} = {y} + {tail};\n"));
+                out.push_str(&format!("{indent}    {acc} = {acc} + {y};\n{indent}}}\n"));
+                if self.rng.below(2) == 0 {
+                    out.push_str(&format!("{indent}{acc} = {acc} + {words}[0];\n"));
+                }
+                self.vars.push((acc, T::S));
+            }
+        }
+    }
+
     /// A few statements binding new variables, one of them maybe a counted loop.
     fn statements(&mut self, out: &mut String, indent: &str, n: u64) {
         for _ in 0..n {
             let t = *self.pick(&ALL);
+            if self.rng.below(4) == 0 {
+                self.choosing_statement(out, indent, t);
+                continue;
+            }
             match self.rng.below(5) {
                 0 => {
                     // A counted loop updating an accumulator.

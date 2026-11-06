@@ -277,6 +277,8 @@ pub fn explain(code: &str) -> Option<&'static str> {
         "E0340" => "Unused variable or parameter. Remove it, or prefix it with _ if it is unused on purpose.",
         "E0341" => "var never reassigned. Use let; var is reserved for bindings that change.",
         "E0350" => "Invalid main. main takes no parameters and returns nothing or i64 (the exit code, 0..=255).",
+        "E0351" => "Not a constant. A constant is an i64, f64, bool or str, made of literals, other constants and operators, and worked out when the program is checked: it cannot overflow, divide by zero or depend on itself. A value that needs a call, or an array or a map, is a function that returns it.",
+        "E0352" => "A let with an else unwraps: `let x: T = e else { ... };` takes an Option[T] or a Result[T, E], `else why { ... }` naming a Result's error, and its else block must leave by return, break, continue, exit or panic, as nothing would be bound after it.",
         "E0360" => "sqrt of a unit with an odd exponent, which has no unit result (sqrt(f64[m]) is meaningless).",
         "E0370" => "break or continue outside a loop.",
         "E0380" => "Condition is not bool. Anvil has no truthiness: write x != 0, not x.",
@@ -476,7 +478,7 @@ pub fn lint(name: &str) -> Option<&'static str> {
 pub const ALL_CODES: &[&str] = &[
     "E0001", "E0002", "E0003", "E0004", "E0100", "E0110", "E0111", "E0200", "E0201", "E0202", "E0300", "E0301",
     "E0302", "E0303", "E0304", "E0305", "E0306", "E0307", "E0308", "E0310", "E0311", "E0320", "E0321", "E0322",
-    "E0323", "E0330", "E0331", "E0332", "E0333", "E0334", "E0340", "E0341", "E0350", "E0360", "E0370", "E0380",
+    "E0323", "E0330", "E0331", "E0332", "E0333", "E0334", "E0340", "E0341", "E0350", "E0351", "E0352", "E0360", "E0370", "E0380",
     "E0390", "E0391", "E0392", "E0393", "E0400", "E0401", "E0402", "E0403", "E0404", "E0405", "E0406", "E0407",
     "E0408", "E0410", "E0411", "E0412", "E0413", "E0414", "E0415", "E0416", "E0500", "E0501", "E0502", "E0601", "E0602",
     "E0603", "E0604", "E0605", "E0606", "E0607", "E0700", "E0701", "E0702", "E0703", "E0704", "E0800", "E0801",

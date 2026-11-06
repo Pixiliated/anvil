@@ -48,6 +48,7 @@ pub fn check_layout(src: &SourceFile, file: &File) -> Option<Diagnostic> {
     let whole = Span::new(0, src.text.len());
     Some(
         Diagnostic::new("E0110", span, format!("not in canonical layout; the first difference is on line {line}"))
+            .note("the rest of the file checks: this is reported last", None)
             .fix1(FixKind::Mechanical, "format the file (anvil fmt)", whole, formatted),
     )
 }
@@ -194,7 +195,7 @@ impl Printer<'_> {
 
     fn items(&mut self, items: &[Item]) {
         let together =
-            |a: &Item, b: &Item| matches!((a, b), (Item::Unit(_), Item::Unit(_)) | (Item::Import(_), Item::Import(_)));
+            |a: &Item, b: &Item| matches!((a, b), (Item::Unit(_), Item::Unit(_)) | (Item::Const(_), Item::Const(_)) | (Item::Import(_), Item::Import(_)));
         self.entries(items, 0, self.text.len(), |a, b| !together(a, b), |p, item| p.item(item));
     }
 
@@ -211,6 +212,10 @@ impl Printer<'_> {
                     Some(d) => format!("{}unit {} = {};", vis(u.public), u.name.name, self.squash(d.span)),
                     None => format!("{}unit {};", vis(u.public), u.name.name),
                 };
+                self.line(&line);
+            }
+            Item::Const(c) => {
+                let line = format!("{}const {}: {} = {};", vis(c.public), c.name.name, self.squash(c.ty.span), self.expr(&c.value));
                 self.line(&line);
             }
             Item::Struct(s) => {
@@ -399,6 +404,17 @@ impl Printer<'_> {
     // ---- statements ----
 
     fn stmt(&mut self, s: &Stmt) {
+        for a in &s.allows {
+            let line = format!("allow {} {}", a.lint.name, self.slice(a.reason_span));
+            self.line(&line);
+        }
+        if let StmtKind::Let { mutable, name, ty, init, otherwise: Some(other), .. } = &s.kind {
+            let kw = if *mutable { "var" } else { "let" };
+            let why = other.binding.as_ref().map_or(String::new(), |w| format!(" {}", w.name));
+            let head = format!("{kw} {}: {} = {} else{why}", name.name, self.ty(ty), self.expr(init));
+            self.block(&head, &other.body, ";");
+            return;
+        }
         if let Some(t) = self.simple(s) {
             match self.wrapped(s) {
                 // A function literal's body already has its lines: the statement is not split.
@@ -567,6 +583,13 @@ impl Printer<'_> {
             ExprKind::Bool(b) => b.to_string(),
             ExprKind::Name(n) => n.name.clone(),
             ExprKind::Result => "result".into(),
+            ExprKind::If(c, a, b) => {
+                let otherwise = match &b.kind {
+                    ExprKind::If(..) => self.expr(b),
+                    _ => format!("{{ {} }}", self.expr(b)),
+                };
+                format!("if {} {{ {} }} else {otherwise}", self.expr(c), self.expr(a))
+            }
             ExprKind::Field(base, f) => format!("{}.{}", self.expr(base), f.name),
             ExprKind::Call { callee, args } => format!("{}({})", callee.name, self.args(args)),
             ExprKind::Method { receiver, method, args } => {
@@ -755,6 +778,7 @@ impl Entry for Item {
         match self {
             Item::Import(i) => i.span,
             Item::Unit(u) => u.span,
+            Item::Const(c) => c.span,
             Item::Struct(s) => s.span,
             Item::Enum(e) => e.span,
             Item::Fn(f) => match f.allows.first() {
@@ -775,7 +799,10 @@ impl Entry for FnDecl {
 
 impl Entry for Stmt {
     fn span(&self) -> Span {
-        self.span
+        match self.allows.first() {
+            Some(a) => a.span.to(self.span),
+            None => self.span,
+        }
     }
 }
 

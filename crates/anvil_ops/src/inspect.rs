@@ -4,7 +4,7 @@
 //! step limit ends the run but is not a failure of the command: it is part of what was observed.
 
 use crate::golden::Input;
-use crate::{compile, ProgramInput, Report};
+use crate::{compile, compile_lines, ProgramInput, Report};
 use anvil_front::check::closest;
 use anvil_front::ir::Program;
 use anvil_interp::{show, Event, Outcome, Recorder};
@@ -222,8 +222,9 @@ fn event(p: &Program, e: &Event) -> (Value, usize, String) {
     }
 }
 
-/// Copies made at one site: (site, function, bytes, times, by the call they came from).
-type Copied = (String, String, u64, u64, Vec<From>);
+/// Copies made at one site: (site, function, bytes, times, by the call they came from, by the
+/// call further up that kept a reference).
+type Copied = (String, String, u64, u64, Vec<From>, Vec<From>);
 
 /// The copies that came from one call: (site, bytes, times, its arguments and why each is not
 /// moved, None when it is).
@@ -232,6 +233,8 @@ type From = (String, u64, u64, Vec<(String, Option<&'static str>)>);
 /// The copy sites shown in the text, and the calls shown for each.
 const COPY_SITES: usize = 10;
 const COPY_CALLS: usize = 3;
+/// The lines shown in the text.
+const HOT_LINES: usize = 15;
 
 /// The source line a site (`file:line:col`) is on, trimmed; empty when it cannot be read.
 fn site_line(files: &crate::Files, site: &str) -> String {
@@ -245,8 +248,13 @@ fn site_line(files: &crate::Files, site: &str) -> String {
     }
 }
 
+/// The source line `file:line` names; empty when it cannot be read.
+fn line_text(files: &crate::Files, at: &str) -> String {
+    site_line(files, &format!("{at}:1"))
+}
+
 pub fn profile(root: &Path, file: &str, test: Option<&str>, max_steps: Option<u64>, input: &ProgramInput) -> Report {
-    let (_, program) = try_report!(compile(root, file));
+    let program = try_report!(compile_lines(root, file));
     let which = try_report!(target(&program, file, test));
     let given = try_report!(given(root, which, input));
     let run = run_name(&program, which);
@@ -272,22 +280,34 @@ pub fn profile(root: &Path, file: &str, test: Option<&str>, max_steps: Option<u6
             .iter()
             .map(|(at, c)| {
                 let func = c.func.map_or("a test".to_string(), |f| p.funcs[f].name.clone());
-                let mut from: Vec<From> = c
-                    .from
-                    .iter()
-                    .map(|(s, (b, t))| {
-                        let args = p.handed.get(s).map_or(Vec::new(), |ks| ks.iter().map(|k| (k.what.clone(), k.kept)).collect());
-                        (s.clone(), *b, *t, args)
-                    })
-                    .collect();
-                from.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
-                (at.clone(), func, c.bytes, c.times, from)
+                let calls = |of: &std::collections::BTreeMap<String, (u64, u64)>| {
+                    let mut out: Vec<From> = of
+                        .iter()
+                        .map(|(s, (b, t))| {
+                            let args =
+                                p.handed.get(s).map_or(Vec::new(), |ks| ks.iter().map(|k| (k.what.clone(), k.kept)).collect());
+                            (s.clone(), *b, *t, args)
+                        })
+                        .collect();
+                    out.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
+                    out
+                };
+                (at.clone(), func, c.bytes, c.times, calls(&c.from), calls(&c.kept_up))
             })
             .collect();
         copies.sort_by(|a, b| b.2.cmp(&a.2).then(a.0.cmp(&b.0)));
-        (ran, not_run, rec.steps, rec.bytes, rec.copied, copies, ended)
+        // Most steps first, then most bytes; the place breaks ties.
+        let mut lines: Vec<(String, u64, u64)> = p
+            .lines
+            .iter()
+            .zip(&rec.lines)
+            .filter(|(_, n)| n[0] + n[1] > 0)
+            .map(|(at, n)| (at.clone(), n[0], n[1]))
+            .collect();
+        lines.sort_by(|a, b| b.1.cmp(&a.1).then(b.2.cmp(&a.2)).then(a.0.cmp(&b.0)));
+        (ran, not_run, rec.steps, rec.bytes, rec.copied, copies, lines, ended)
     });
-    let (funcs, not_run, steps, bytes, copied, copies, ended) = try_report!(observed.map_err(Report::error));
+    let (funcs, not_run, steps, bytes, copied, copies, lines, ended) = try_report!(observed.map_err(Report::error));
     let files = crate::Files::disk(root);
     let mut text = format!(
         "{:>10} {:>10} {:>8} {:>11} {:>11} {:>11}  function ({run} in {file})\n",
@@ -297,13 +317,22 @@ pub fn profile(root: &Path, file: &str, test: Option<&str>, max_steps: Option<u6
         text.push_str(&format!("{own:>10} {total:>10} {calls:>8} {own_b:>11} {own_c:>11} {b:>11}  {name}\n"));
     }
     text.push_str(&format!("{steps} steps, {bytes} bytes allocated; end: {}\n", ended.text()));
+    if !lines.is_empty() {
+        text.push_str(&format!("{:>10} {:>11}  the costliest lines, callees not counted\n", "steps", "bytes"));
+        for (at, s, b) in lines.iter().take(HOT_LINES) {
+            text.push_str(&format!("{s:>10} {b:>11}  {at}: {}\n", line_text(&files, at)));
+        }
+        if lines.len() > HOT_LINES {
+            text.push_str(&format!("... {} more line(s) in --json\n", lines.len() - HOT_LINES));
+        }
+    }
     if copied > 0 {
         text.push_str(&format!(
             "{copied} of those bytes copied values still shared when they changed; a variable, \
              field or element read for the last time is moved instead of shared. Where, costliest \
              first, and the calls that handed the shared values in:\n"
         ));
-        for (at, func, b, times, from) in copies.iter().take(COPY_SITES) {
+        for (at, func, b, times, from, up) in copies.iter().take(COPY_SITES) {
             text.push_str(&format!("{b:>12} bytes {times:>8}x  {at} in {func}: {}\n", site_line(&files, at)));
             // Copies in main's or a test's own body came from no call: nothing to add.
             let calls: Vec<&From> = from.iter().filter(|(site, ..)| !site.is_empty()).collect();
@@ -319,6 +348,12 @@ pub fn profile(root: &Path, file: &str, test: Option<&str>, max_steps: Option<u6
             }
             if calls.len() > COPY_CALLS {
                 text.push_str(&format!("{:>32}... {} more call site(s)\n", "", calls.len() - COPY_CALLS));
+            }
+            for (site, b, times, args) in up.iter().take(COPY_CALLS) {
+                text.push_str(&format!("{b:>12} bytes {times:>8}x    further up, {site}: {}\n", site_line(&files, site)));
+                for (what, why) in args.iter().filter_map(|(what, kept)| kept.map(|why| (what, why))) {
+                    text.push_str(&format!("{:>34}`{what}` keeps a reference there: {why}\n", ""));
+                }
             }
         }
         if copies.len() > COPY_SITES {
@@ -339,21 +374,31 @@ pub fn profile(root: &Path, file: &str, test: Option<&str>, max_steps: Option<u6
         .collect();
     let copies: Vec<Value> = copies
         .iter()
-        .map(|(at, func, b, times, from)| {
-            let from: Vec<Value> = from
-                .iter()
-                .map(|(site, b, times, args)| {
-                    let args: Vec<Value> =
-                        args.iter().map(|(what, kept)| json!({ "value": what, "moved": kept.is_none(), "kept": kept })).collect();
-                    json!({ "at": site, "line": site_line(&files, site), "bytes": b, "times": times, "args": args })
-                })
-                .collect();
-            json!({ "at": at, "line": site_line(&files, at), "function": func, "bytes": b, "times": times, "from": from })
+        .map(|(at, func, b, times, from, up)| {
+            let calls = |list: &Vec<From>| -> Vec<Value> {
+                list.iter()
+                    .map(|(site, b, times, args)| {
+                        let args: Vec<Value> = args
+                            .iter()
+                            .map(|(what, kept)| json!({ "value": what, "moved": kept.is_none(), "kept": kept }))
+                            .collect();
+                        json!({ "at": site, "line": site_line(&files, site), "bytes": b, "times": times, "args": args })
+                    })
+                    .collect()
+            };
+            json!({
+                "at": at, "line": site_line(&files, at), "function": func, "bytes": b, "times": times,
+                "from": calls(from), "kept_up": calls(up),
+            })
         })
+        .collect();
+    let lines: Vec<Value> = lines
+        .iter()
+        .map(|(at, s, b)| json!({ "at": at, "steps": s, "bytes": b, "text": line_text(&files, at) }))
         .collect();
     let json = json!({
         "ok": true, "file": file, "run": run, "steps": steps, "bytes": bytes, "copied": copied, "functions": functions,
-        "copies": copies, "not_run": not_run,
+        "copies": copies, "lines": lines, "not_run": not_run,
         "end": ended.to_json(),
     });
     Report::ok(json, text)

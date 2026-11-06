@@ -1,0 +1,13 @@
+// Long text is cut to where the sides first differ, never inside a character.
+fn long(tail: str) -> str {
+    var s: str = "";
+    for _i in 0..120 {
+        s = s + "é";
+    }
+    return s + tail + s;
+}
+
+fn main() {
+    assert(long("same") == long("same"));
+    assert(long("left") == long("right"));
+}

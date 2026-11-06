@@ -17,6 +17,7 @@ pub struct File {
 pub enum Item {
     Import(ImportDecl),
     Unit(UnitDecl),
+    Const(ConstDecl),
     Struct(StructDecl),
     Enum(EnumDecl),
     Fn(Box<FnDecl>),
@@ -69,6 +70,16 @@ pub struct TypeParamDecl {
 }
 
 /// `unit m` declares a base unit; `unit N = kg*m/s^2` an alias.
+#[derive(Clone, Debug)]
+pub struct ConstDecl {
+    pub public: bool,
+    pub name: Ident,
+    pub ty: TypeExpr,
+    pub value: Expr,
+    pub span: Span,
+}
+
+/// `unit km = 1000 * m;` or `unit m;`
 #[derive(Clone, Debug)]
 pub struct UnitDecl {
     pub public: bool,
@@ -205,11 +216,21 @@ pub struct Block {
 pub struct Stmt {
     pub kind: StmtKind,
     pub span: Span,
+    /// `allow mutants "why"` written before it.
+    pub allows: Vec<AllowDecl>,
+}
+
+/// What `let x: T = e else why { ... };` does when `e` holds no value.
+#[derive(Clone, Debug)]
+pub struct LetElse {
+    /// `why`: the error of a Result.
+    pub binding: Option<Ident>,
+    pub body: Block,
 }
 
 #[derive(Clone, Debug)]
 pub enum StmtKind {
-    Let { mutable: bool, kw_span: Span, name: Ident, ty: TypeExpr, init: Expr },
+    Let { mutable: bool, kw_span: Span, name: Ident, ty: TypeExpr, init: Expr, otherwise: Option<LetElse> },
     Assign { target: Expr, value: Expr },
     Expr(Expr),
     If { cond: Expr, then: Block, else_: Option<Box<Else>> },
@@ -354,6 +375,8 @@ pub enum ExprKind {
     Unary(UnOp, Box<Expr>),
     Binary(BinOp, Box<Expr>, Box<Expr>),
     Paren(Box<Expr>),
+    /// `if c { a } else { b }`: the value of one of them.
+    If(Box<Expr>, Box<Expr>, Box<Expr>),
     /// `fn(x: i64) -> i64 { return x * k; }`: a function literal. Its name is empty, and it has
     /// no type parameters, contracts or allows.
     Lambda(Box<FnDecl>),

@@ -1,0 +1,5 @@
+exit: 101
+panic: assertion failed at tests/programs/assert_sides_number.anv:12:5: twice(1.5[m]) > 3.5[m]
+panic:   left:  3.0 m
+panic:   right: 3.5 m
+---

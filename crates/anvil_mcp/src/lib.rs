@@ -223,6 +223,8 @@ pub struct MeasureArgs {
     pub input: Option<String>,
     /// main's command-line arguments (default: what the golden's input says).
     pub args: Option<Vec<String>>,
+    /// Do not run the interpreter too: no steps, nothing compared.
+    pub native_only: Option<bool>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -525,7 +527,7 @@ impl AnvilServer {
     async fn measure(&self, Parameters(a): Parameters<MeasureArgs>) -> Result<CallToolResult, ErrorData> {
         self.op(move |root| {
             let input = program_input(a.args, a.input);
-            anvil_ops::measure(root, a.file.as_deref(), Some(steps(a.max_steps)), &input)
+            anvil_ops::measure(root, a.file.as_deref(), Some(steps(a.max_steps)), &input, a.native_only.unwrap_or(false))
         })
         .await
     }
