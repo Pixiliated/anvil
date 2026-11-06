@@ -1,0 +1,10 @@
+// Running out of stack in a parallel_map worker is the same panic.
+fn deep(n: i64) -> i64 {
+    return 1 + deep(n + 1);
+}
+
+fn main() uses io {
+    print("before");
+    let got: [i64] = [1, 2, 3].parallel_map(deep);
+    print(got.len());
+}

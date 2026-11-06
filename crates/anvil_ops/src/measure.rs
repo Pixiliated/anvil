@@ -5,7 +5,7 @@
 
 use crate::golden::{self, Input};
 use crate::project::Project;
-use crate::{Files, Report, EXIT_FAILED, EXIT_OK};
+use crate::{Files, ProgramInput, Report, EXIT_FAILED, EXIT_OK};
 use anvil_front::ir::Program;
 use serde_json::{json, Value};
 use std::path::Path;
@@ -47,7 +47,12 @@ fn run(program: &Program, project: &Project, file: &str, input: &Input) -> Resul
 }
 
 /// One program's numbers, or why it could not be measured.
-fn measure_file(project: &Project, file: &str, max_steps: Option<u64>) -> Result<Option<Value>, String> {
+fn measure_file(
+    project: &Project,
+    file: &str,
+    max_steps: Option<u64>,
+    input: &ProgramInput,
+) -> Result<Option<Value>, String> {
     let src = Files::disk(&project.root).load(file).map_err(|r| r.json["error"].as_str().unwrap_or("").to_string())?;
     let program = match anvil_front::compile_with(&src, &crate::loader(&project.root)) {
         (_, Ok(p)) => p,
@@ -56,7 +61,12 @@ fn measure_file(project: &Project, file: &str, max_steps: Option<u64>) -> Result
     if program.main.is_none() {
         return Ok(None);
     }
-    let input = golden::read_input(project, file)?;
+    let input = if input.given() {
+        let stdin = input.file_bytes(&project.root).map_err(|r| r.json["error"].as_str().unwrap_or("").to_string())?;
+        Input { args: input.args.clone(), stdin: stdin.unwrap_or_default(), env: Vec::new() }
+    } else {
+        golden::read_input(project, file)?
+    };
     let (want, counts) = golden::interpret(program.clone(), max_steps, &project.root, &input)?;
     let (got, heap, ms) = run(&program, project, file, &input)?;
     let same = golden::difference(&want, &got);
@@ -70,7 +80,10 @@ fn measure_file(project: &Project, file: &str, max_steps: Option<u64>) -> Result
 }
 
 /// Every project file with a main (or one file), run natively and measured.
-pub fn measure(root: &Path, file: Option<&str>, max_steps: Option<u64>) -> Report {
+pub fn measure(root: &Path, file: Option<&str>, max_steps: Option<u64>, input: &ProgramInput) -> Report {
+    if file.is_none() && input.given() {
+        return Report::usage("arguments and --input are for one file; name it");
+    }
     let project = match Project::discover(root) {
         Ok(p) => p,
         Err(e) => return Report::usage(e),
@@ -81,7 +94,7 @@ pub fn measure(root: &Path, file: Option<&str>, max_steps: Option<u64>) -> Repor
     };
     let mut rows = Vec::new();
     for f in &files {
-        match measure_file(&project, f, max_steps) {
+        match measure_file(&project, f, max_steps, input) {
             Ok(Some(row)) => rows.push(row),
             Ok(None) if file.is_some() => return Report::usage(format!("{f} has no main to measure")),
             Ok(None) => {}

@@ -540,6 +540,9 @@ impl Printer<'_> {
                 .collect();
             pat = format!("{pat}({})", fs.join(", "));
         }
+        for v in &a.also {
+            pat = format!("{pat} | {}", v.name);
+        }
         let head = format!("{pat} =>");
         let inner = Span::new(a.body.span.start + 1, a.body.span.end - 1);
         if let ([only], false) = (a.body.stmts.as_slice(), self.has_comments(inner.start, inner.end)) {

@@ -101,6 +101,9 @@ const RUNTIME: &[(&str, &[Type], &[Type])] = &[
     ("anvil_str_from_f64", &[types::F64], &[I]),
     ("anvil_str_from_bool", &[I], &[I]),
     ("anvil_print_line", &[I, I], &[]),
+    ("anvil_print_raw", &[I], &[]),
+    ("anvil_panic_at", &[I, I], &[]),
+    ("anvil_read_stdin", &[], &[I]),
     ("anvil_print_i64", &[I, I], &[]),
     ("anvil_print_bool", &[I, I], &[]),
     ("anvil_print_f64", &[types::F64, I, I], &[]),
@@ -642,7 +645,8 @@ fn mutates(e: &Expr) -> bool {
         | ExprKind::Str(_)
         | ExprKind::Local(_)
         | ExprKind::FnRef(_) => false,
-        // A move empties a local, and a take a place, that nothing else in its statement names.
+        // A move empties a local, and a take a place, that nothing read after it in its statement
+        // names.
         ExprKind::Move(_) | ExprKind::Take { .. } => false,
         ExprKind::CallValue(callee, es, _) => mutates(callee) || any(es),
         ExprKind::Bits { l, r, .. } => mutates(l) || mutates(r),
@@ -703,6 +707,19 @@ impl<'a, 'b> Gen<'a, 'b> {
     }
 
     /// Calls a runtime function; returns its result, if any.
+    /// A call's arguments in their order, those handed over evaluated last (`arg_comes_last`).
+    fn call_args(&mut self, args: &[Expr]) -> Vec<Value> {
+        let mut vals = vec![Vec::new(); args.len()];
+        for last in [false, true] {
+            for (a, v) in args.iter().zip(vals.iter_mut()) {
+                if arg_comes_last(a) == last {
+                    *v = self.expr(a);
+                }
+            }
+        }
+        vals.concat()
+    }
+
     fn call_rt(&mut self, name: &'static str, vals: &[Value]) -> Option<Value> {
         let f = self.rt(name);
         let call = self.b.ins().call(f, vals);
@@ -1020,6 +1037,13 @@ impl<'a, 'b> Gen<'a, 'b> {
                 for (k, arm) in arms.iter().enumerate() {
                     let next = if k + 1 < arms.len() {
                         let this = self.b.create_block();
+                        for v in &arm.also {
+                            let other = self.b.create_block();
+                            let hit = self.b.ins().icmp_imm_s(IntCC::Equal, tag, *v as i64);
+                            self.b.ins().brif(hit, this, &[], other, &[]);
+                            self.b.switch_to_block(other);
+                            self.b.seal_block(other);
+                        }
                         let next = self.b.create_block();
                         let hit = self.b.ins().icmp_imm_s(IntCC::Equal, tag, arm.variant as i64);
                         self.b.ins().brif(hit, this, &[], next, &[]);
@@ -1276,10 +1300,7 @@ impl<'a, 'b> Gen<'a, 'b> {
                 vals
             }
             ExprKind::Call(fid, call_args, _) => {
-                let mut vals = Vec::new();
-                for a in call_args {
-                    vals.extend(self.expr(a));
-                }
+                let vals = self.call_args(call_args);
                 let f = self.func_ref(*fid);
                 let call = self.b.ins().call(f, &vals);
                 self.b.inst_results(call).to_vec()
@@ -1314,9 +1335,7 @@ impl<'a, 'b> Gen<'a, 'b> {
             ExprKind::CallValue(callee, call_args, _) => {
                 let (c, owned) = self.borrow(callee);
                 let mut vals = vec![c[0]];
-                for a in call_args {
-                    vals.extend(self.expr(a));
-                }
+                vals.extend(self.call_args(call_args));
                 let Ty::Fn(ft) = &callee.ty else { unreachable!() };
                 let mut sig = self.be.signature(self.program, ft.params.iter(), &ft.ret);
                 sig.params.insert(0, AbiParam::new(I));
@@ -2139,6 +2158,21 @@ impl<'a, 'b> Gen<'a, 'b> {
                 let got = self.b.ins().icmp_imm_s(IntCC::NotEqual, line, 0);
                 return self.option(*eid, got, |_| vec![line]);
             }
+            Builtin::PrintRaw => {
+                let (t, owned) = self.borrow(&bargs[0]);
+                self.call_rt("anvil_print_raw", &[t[0]]);
+                if owned {
+                    self.call_rt("anvil_release", &[t[0]]);
+                }
+                return Vec::new();
+            }
+            Builtin::Panic { site } => {
+                let (m, _) = self.borrow(&bargs[0]);
+                let s = self.str_obj(site);
+                self.call_rt("anvil_panic_at", &[m[0], s]);
+                return Vec::new();
+            }
+            Builtin::ReadStdin => return vec![self.call_rt("anvil_read_stdin", &[]).unwrap()],
             Builtin::Exit { site } => {
                 let code = self.expr(&bargs[0])[0];
                 let s = self.str_obj(site);
@@ -2372,6 +2406,9 @@ impl<'a, 'b> Gen<'a, 'b> {
             | Builtin::ArrSorted { .. }
             | Builtin::ArrReversed
             | Builtin::EPrint
+            | Builtin::PrintRaw
+            | Builtin::Panic { .. }
+            | Builtin::ReadStdin
             | Builtin::Exit { .. }
             | Builtin::Env
             | Builtin::ListDir

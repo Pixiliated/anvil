@@ -1,0 +1,5 @@
+// expect: E0002
+fn main() -> i64 {
+    let s: str = `never closed;
+    return s.len();
+}

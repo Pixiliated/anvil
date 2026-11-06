@@ -629,3 +629,32 @@ Short records of choices that are not obvious from the code. Newest last.
   before the statement, and go at the first point they can.
 - **Not taken from the snapshot**: `for x in xs` still shares each element with what it is
   over, so changing `x` copies it, even when `xs` is dead. A later milestone can hand elements out.
+
+## M37 (v0.38)
+
+- **Ask the users**: thirty-six milestones were chosen by reading the compiler. Three fresh agents
+  with only the binary found what reading had not: a crash, a silent native stack overflow, and that
+  all three misnamed the golden input file and approved a wrong run.
+- **Names by scope**: one name per function was stricter than "no shadowing" needs. It cost about
+  twenty renames across the three programs and caught nothing: a name in a block that has ended
+  cannot be confused with one in the next.
+- **`A | B` over a catch-all**: a catch-all would hide a new variant, the reason `match` has none.
+  An arm naming several keeps the check and ends the boilerplate, which the `unreached` lint made
+  expensive (60 findings on one program). It binds nothing, so what a binding means stays simple.
+- **One field, any name**: constructors already take a single field unnamed, so `Some(x)` was the
+  one place it had to be `Some(value: x)`. With several fields, order would be a guess: still named.
+- **`panic` is not tested**: a test cannot pass through one, so asking for a test was asking for an
+  `allow`. A branch that ends in `panic` states what `allow unreached` only excused. `expect` is a
+  library function with a required reason, not a built-in `unwrap`.
+- **An argument handed over goes last**: reading a variable has no effect and cannot panic, so doing
+  it after the other arguments cannot be seen, except that it can then hand the value over. The rule
+  is in `ir::arg_comes_last` and `moves` relies on it; other reads keep their order.
+- **Mutants see only what can see them**: a run that never enters the mutated function goes exactly
+  as it did, by determinism, so skipping it loses nothing. The budget per run replaces one for the
+  whole program, which was computed from the last test alone: any bigger test ran out of steps and
+  "noticed" every mutant, so reports of nothing surviving could be false. Rerun under the fix, the
+  standard library still has no survivors; the JSON tool, which had reported none, has 7.
+- **Stack overflow keeps its text on both backends**: the depth differs by nature, so the interpreter
+  no longer names one; a program that runs out on both now has one golden.
+- **Left out**: constants, `ln` and `exp` (not the same bits on every platform), sampling profiles
+  and a faster interpreter. Listed in M38 or waiting for a second report.

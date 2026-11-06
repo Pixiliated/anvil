@@ -12,4 +12,4 @@ readme = "README.md"
 name = "anvil_interp"
 
 [dependencies]
-anvil_front = { package = "anvil-lang-front", version = "0.37.0", path = "../anvil_front" }
+anvil_front = { package = "anvil-lang-front", version = "0.38.0", path = "../anvil_front" }

@@ -1,4 +1,4 @@
-# Anvil language specification (v0.37)
+# Anvil language specification (v0.38)
 
 Anvil is a small, compiled, general-purpose language designed to be written mostly by AI agents
 and read by humans. Its rules aim at three things: one obvious way to write each thing, code
@@ -82,6 +82,7 @@ your own). `anvil std` lists them with their pub items; `anvil std list` prints 
 
 | Module | Has |
 |---|---|
+| `std.expect` | `expect(o: option, why: text)` and `expect_ok(r: result, why: text)`: the value, or a panic with `why` |
 | `std.list` | `map`, `keep`, `fold`, `any`, `all`, `count`, `first_where`, `index_of`, `contains`, `sort_by` (stable), `sort_by_key`, `min_by_key`, `max_by_key`, `sum`, `range`, `concat`, `flatten`, `unique`, `chunks` |
 | `std.set` | `Set[T: key]` with `has`, `add`, `remove`, `len`, `items`, `union`, `intersection`, `difference`; `set_of` |
 | `std.text` | `pad_left`, `pad_right`, `repeat`, `lines`, `words` |
@@ -166,8 +167,9 @@ let name: Type = value;   // immutable
 var name: Type = value;   // mutable; must be reassigned or changed somewhere
 ```
 
-Every binding states its type. A name is declared once per function: no shadowing, even in
-inner blocks or match arms. Parameters, loop variables and match bindings are immutable. A
+Every binding states its type. No shadowing: a name cannot be declared while it is in scope, even
+in an inner block. Blocks side by side, such as match arms or two loops, can each use a name.
+Parameters, loop variables and match bindings are immutable. A
 variable or parameter that is never read is an error unless its name starts with `_`.
 
 Assignment (only `var` bindings): `name = value;`, `name.field = value;`,
@@ -182,7 +184,9 @@ value **moves** to where it goes, so the receiver may hold the only reference an
 in place. A read moves when its statement (`let`, an assignment, an expression statement,
 `return`, the condition of an `if`, what a `match` or `for` is over) names the variable once and
 nothing reads the variable again before it is next written, on any path through loops and
-branches; what an `ensures` clause reads never moves.
+branches; what an `ensures` clause reads never moves. An argument of a call that is moved or taken
+by fields is evaluated after the call's other arguments, so they may read it:
+`xs = add(xs: xs, x: xs.len())` hands `xs` over.
 So a functional update is as cheap as changing the value directly:
 
 ```
@@ -290,7 +294,7 @@ do. There are four:
 
 | Effect | Performed by |
 |---|---|
-| `io` | `print`, `eprint`, `exit`, `args`, `env`, `read_line` |
+| `io` | `print`, `print_raw`, `eprint`, `exit`, `args`, `env`, `read_line`, `read_stdin` |
 | `fs` | `read_file`, `write_file`, `read_bytes`, `write_bytes`, `list_dir` |
 | `clock` | `clock_ns` |
 | `random` | `random_below`, `random_f64`, `random_seed` |
@@ -498,6 +502,10 @@ let shouted: [str] = words.parallel_map(fn(w: str) -> str { return w.to_upper();
 
 ## Text
 
+A **raw string** is written in backticks: `` `{"a": 1}\n` `` is exactly those characters, with no
+escapes, no interpolation, and line breaks kept (a CRLF as `\n`); it cannot hold a backtick. Other
+strings stay on one line.
+
 `str` values are immutable. `+` joins two strings; `==`, `!=`, `<`, `<=`, `>`, `>=` compare
 them byte by byte; `s.len()` is the length in bytes. Strings are not indexed by position, but
 they slice by byte offsets: `s[from..to]`, with the bounds rules of arrays, and a panic if
@@ -536,9 +544,9 @@ else. Prepending (`s = x + s`), or interpolating `s` into itself, copies: build 
 and `join` them instead.
 
 Text **handed over** appends the same way: `a + b` where `a` is a variable, field or element read
-for the last time (see Moves), or itself such an append, adds `b` to `a`'s text. So
-`return s + "!"` in a function handed `s`, `p.name = p.name + x` and `s + a + b` on a moved `s`
-grow the text in place too. Only text made by an append has room; the first append to other
+for the last time (see Moves), what a call returned, or itself such an append, adds `b` to `a`'s
+text. So `return s + "!"` in a function handed `s`, `p.name = p.name + x`, `f(s) + x` and
+`s + a + b` on a moved `s` grow the text in place too. Only text made by an append has room; the first append to other
 text copies it into room of its own.
 
 ## Bytes
@@ -697,9 +705,11 @@ match s {
   call rules: one field positional, two or more named in order. A variant without fields is
   written `Enum.Variant`.
 - `match` is a statement. It lists **every variant exactly once**; there is no catch-all arm,
-  so adding a variant makes every match that forgets it an error.
+  so adding a variant makes every match that forgets it an error. One arm can name several:
+  `Red | Green => { ... }`, with their fields ignored and nothing bound.
 - A pattern lists every field of its variant in declaration order. `field` binds it under its
-  own name, `field: name` binds it under another name, `field: _` ignores it.
+  own name, `field: name` binds it under another name, `field: _` ignores it. The only field of
+  a variant takes any name: `Some(x)`, `Err(_)`.
 - Enums have `==` (see Equality); read their fields with `match`.
 
 ## Option, Result and `?`
@@ -707,7 +717,7 @@ match s {
 `Option[T]` has variants `Some(value: T)` and `None`. `Result[T, E]` has `Ok(value: T)` and
 `Err(error: E)`. Their constructors are written without a prefix: `Some(3)`, `None`, `Ok(x)`,
 `Err("bad")`. `Some(x)` takes its type from `x`; `None`, `Ok` and `Err` need an expected type
-from context. Match on them like any enum: `Some(value) => { }`.
+from context. Match on them like any enum: `Some(x) => { }`, `Err(why) => { }`.
 
 Recoverable errors are values; there are no exceptions. `e?` unwraps a success and returns a
 failure early:
@@ -763,7 +773,9 @@ target's bounds are checked.
 | Call | Meaning |
 |---|---|
 | `print(x)` | writes the text of `x` (`i64`, `f64`, `bool` or `str`), then a newline; needs `uses io` |
-| `eprint(x)` | the same, to stderr; needs `uses io` |
+| `print_raw(text)` | writes the `str` with no newline; needs `uses io` |
+| `eprint(x)` | the same as `print`, to stderr; needs `uses io` |
+| `panic(message)` | stops the program with `panic: <message> (<where>)`. It ends a path like `return`, and a branch that ends in it needs no test |
 | `exit(code)` | ends the program with the code (0..=255, else a panic); nothing after it runs, so it ends a function's path like `return`; in a test it is a failure; needs `uses io` |
 | `env(name)` | `Option[str]`: the environment variable; names starting `ANVIL_` are the runtime's and read as `None`; needs `uses io` |
 | `list_dir(path)` | `Result[[str], FileError]`: the names in the directory, sorted bytewise; needs `uses fs` |
@@ -778,6 +790,7 @@ target's bounds are checked.
 | `random_seed(n)` | restarts the random sequence from seed `n`; needs `uses random` |
 | `args()` | `[str]`: the program's command-line arguments, without its own name; needs `uses io` |
 | `read_line()` | `Option[str]`: the next line of standard input without its `\n` or `\r\n`, `None` at the end; panics on text that is not UTF-8; needs `uses io` |
+| `read_stdin()` | `bytes`: all that is left of standard input; needs `uses io` |
 | `read_file(path)` | `Result[str, FileError]`: the whole file; needs `uses fs` |
 | `write_file(path: p, text: t)` | `Result[i64, FileError]`: replaces the file's contents with `t`, creating it, `Ok` of the bytes written; needs `uses fs` |
 
@@ -832,7 +845,9 @@ fn main() uses io, fs {
 
 `main` takes no parameters and returns nothing or `i64`. Its `i64` result is the exit code and
 must be in 0..=255; `exit(code)` ends the program earlier. A panic writes `panic: <message>` to
-stderr and exits with code 101.
+stderr and exits with code 101. Running out of stack is a panic too, `stack overflow: calls nested
+too deeply`; the interpreter allows 10,000 nested calls, and native code as many as 64 MiB of
+stack holds, so a program should not count on either depth.
 Panic messages name the source location: `index 3 out of bounds for length 3 at
 main.anv:12:9`.
 
@@ -985,7 +1000,8 @@ anvil watch [--native] [--runs N]           verify, and again after every change
 
 A **golden** (`golden/<file>.out`) is a program's approved output: its exit code, its panic
 message if any, the lines it wrote with eprint (`stderr: ...`), and every byte it printed. A
-program that reads arguments, the environment or stdin is given them by `golden/<file>.in`,
+program that reads arguments, the environment or stdin is given them by `golden/<file>.in`
+(`golden/main.anv.in` for `main.anv`; `verify` reports a file there that belongs to no program),
 written by hand: a line `arg: VALUE` per argument and `env: NAME=value` per variable, then
 `---`, then the stdin byte for byte. Without one, it runs with none of them. `golden check --native` also builds each program and
 requires the executable to match and to free every object. Only `golden approve` writes one,

@@ -809,10 +809,19 @@ pub fn check_contract(
     let wide = f.steps.is_some() || f.allocs.is_some();
     let largest = if wide { COST_SIZE } else { 30 };
     let (mut checked, mut excluded, mut overflowed, mut beyond) = (0, 0, 0, 0);
-    for case in 0..cases {
-        let size = 1 + case * largest / cases.max(1);
-        let inputs: Vec<Value> =
+    // Requires that tie arguments together rarely hold by chance, so if too few inputs got past
+    // them, more try small numbers, which take the arrays' lengths as their limit.
+    let more = 4 * cases;
+    for case in 0..cases + more {
+        if case == cases && checked >= cases / 10 {
+            break;
+        }
+        let size = 1 + case.min(cases) * largest / cases.max(1);
+        let mut inputs: Vec<Value> =
             types.iter().map(|t| gen::generate_with(t, program, &mut rng, size, wide)).collect();
+        if case >= cases {
+            gen::fit_numbers(&mut inputs);
+        }
         match call_checked(program, fid, &inputs, max_steps, host.reborrow()) {
             Called::Returned(_) => checked += 1,
             Called::Excluded => excluded += 1,
@@ -934,6 +943,7 @@ fn alloc_bytes(e: &Expr, v: &Value) -> u64 {
             Builtin::MapKeys
             | Builtin::MapValues
             | Builtin::ReadLine { .. }
+            | Builtin::ReadStdin
             | Builtin::ReadFile
             | Builtin::StrTrim
             | Builtin::BytesOf { .. }
@@ -1092,8 +1102,7 @@ impl<'p, 'h> Interp<'p, 'h> {
     /// Calls `fid`; `site` is the call's (empty when it is not a call in the program).
     fn call(&mut self, fid: FuncId, args: Vec<Value>, site: &str) -> R<Value> {
         if self.depth >= MAX_CALL_DEPTH {
-            let name = &self.program.funcs[fid].name;
-            return panic(format!("stack overflow: call depth exceeded {MAX_CALL_DEPTH} in `{name}`"));
+            return panic("stack overflow: calls nested too deeply");
         }
         self.depth += 1;
         if let Some(r) = &mut self.rec {
@@ -1256,7 +1265,7 @@ impl<'p, 'h> Interp<'p, 'h> {
                 let v = self.eval(scrutinee, frame)?;
                 frame[*held] = v.clone();
                 let Value::Enum(tag, fields) = v else { unreachable!("match on {v:?}") };
-                let arm = arms.iter().find(|a| a.variant == tag).expect("match is exhaustive");
+                let arm = arms.iter().find(|a| a.variant == tag || a.also.contains(&tag)).expect("match is exhaustive");
                 for (field, local) in &arm.bindings {
                     frame[*local] = fields[*field].clone();
                 }
@@ -1305,7 +1314,7 @@ impl<'p, 'h> Interp<'p, 'h> {
                 v => unreachable!("field of {v:?}"),
             },
             ExprKind::Call(fid, args, site) => {
-                let vals = self.eval_all(args, frame)?;
+                let vals = self.eval_args(args, frame)?;
                 self.call(*fid, vals, site)?
             }
             ExprKind::FnRef(fid) => Value::Fn(Rc::new(Closure { func: *fid, captures: Vec::new() })),
@@ -1317,7 +1326,7 @@ impl<'p, 'h> Interp<'p, 'h> {
                     unreachable!("calling a value that is not a function")
                 };
                 let mut vals = c.captures.clone();
-                vals.extend(self.eval_all(args, frame)?);
+                vals.extend(self.eval_args(args, frame)?);
                 self.call(c.func, vals, site)?
             }
             ExprKind::StructLit(_, fields) => Value::Struct(self.eval_all(fields, frame)?),
@@ -1545,6 +1554,19 @@ impl<'p, 'h> Interp<'p, 'h> {
         Ok(vals)
     }
 
+    /// A call's arguments, those handed over last (see `arg_comes_last`).
+    fn eval_args(&mut self, es: &[Expr], frame: &mut Vec<Value>) -> R<Vec<Value>> {
+        let mut vals = vec![Value::Void; es.len()];
+        for last in [false, true] {
+            for (e, v) in es.iter().zip(vals.iter_mut()) {
+                if arg_comes_last(e) == last {
+                    *v = self.eval(e, frame)?;
+                }
+            }
+        }
+        Ok(vals)
+    }
+
     fn builtin(&mut self, b: &Builtin, args: &[Expr], frame: &mut Vec<Value>) -> R<Value> {
         match b {
             Builtin::ClockNs => {
@@ -1561,11 +1583,20 @@ impl<'p, 'h> Interp<'p, 'h> {
                 return Ok(Value::Array(Rc::new(all)));
             }
             Builtin::ReadLine { message } => return self.read_line(message),
+            Builtin::ReadStdin => {
+                let mut all = Vec::new();
+                if let Some(input) = self.host.stdin.as_deref_mut() {
+                    input.read_to_end(&mut all).expect("stdin read failed");
+                }
+                return Ok(Value::Bytes(all.into()));
+            }
             _ => {}
         }
         let x = self.eval(&args[0], frame)?;
         Ok(match b {
-            Builtin::ClockNs | Builtin::RandomF64 | Builtin::Args | Builtin::ReadLine { .. } => unreachable!(),
+            Builtin::ClockNs | Builtin::RandomF64 | Builtin::Args | Builtin::ReadLine { .. } | Builtin::ReadStdin => {
+                unreachable!()
+            }
             Builtin::ReadFile => {
                 file_result(self.read_file(x.as_str()).and_then(|b| match String::from_utf8(b.to_vec()) {
                     Ok(s) => Ok(Value::Str(s.into())),
@@ -1696,6 +1727,16 @@ impl<'p, 'h> Interp<'p, 'h> {
                 }
                 Value::Void
             }
+            Builtin::PrintRaw => {
+                let text = x.as_str().to_string();
+                if let Some(r) = &mut self.rec {
+                    let (step, depth) = (self.taken, self.depth);
+                    r.event(None, || Event::Print { step, depth, text: text.clone(), stderr: false });
+                }
+                self.out.write_all(text.as_bytes()).expect("stdout write failed");
+                Value::Void
+            }
+            Builtin::Panic { site } => return panic(format!("{} ({site})", x.as_str())),
             Builtin::Exit { site } => {
                 let code = x.as_i64();
                 if self.in_test {

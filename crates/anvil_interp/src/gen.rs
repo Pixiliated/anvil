@@ -41,6 +41,29 @@ pub fn test_seed(name: &str, run_seed: u64) -> u64 {
     h ^ run_seed.wrapping_mul(0x9e37_79b9_7f4a_7c15)
 }
 
+/// Makes generated arguments more likely to meet requires like `0 <= i && i < xs.len()`: each
+/// integer among them becomes small and not negative, below the length of the longest array or
+/// text among them if there is one. Integers inside structs become small too.
+pub fn fit_numbers(inputs: &mut [Value]) {
+    fn length(v: &Value) -> Option<i64> {
+        match v {
+            Value::Array(a) => Some(a.len() as i64),
+            Value::Str(s) => Some(s.len() as i64),
+            Value::Bytes(b) => Some(b.len() as i64),
+            _ => None,
+        }
+    }
+    fn fit(v: &mut Value, limit: i64) {
+        match v {
+            Value::I64(n) => *n = n.rem_euclid(limit),
+            Value::Struct(fields) => fields.iter_mut().for_each(|f| fit(f, 8)),
+            _ => {}
+        }
+    }
+    let limit = inputs.iter().filter_map(length).max().filter(|n| *n > 0).unwrap_or(8);
+    inputs.iter_mut().for_each(|v| fit(v, limit));
+}
+
 const EDGE_INTS: &[i64] = &[0, 1, -1, 2, i64::MAX, i64::MIN];
 /// Characters of generated text: mostly ASCII, some that take two or three bytes.
 const CHARS: &[char] = &['a', 'b', 'c', 'x', 'y', 'z', 'A', 'Z', '0', '9', ' ', ',', '.', '-', 'é', '漢'];

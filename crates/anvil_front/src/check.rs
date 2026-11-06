@@ -18,7 +18,9 @@ use std::collections::{HashMap, HashSet};
 
 pub const BUILTINS: &[&str] = &[
     "print",
+    "print_raw",
     "assert",
+    "panic",
     "sqrt",
     "abs",
     "to_f64",
@@ -29,6 +31,7 @@ pub const BUILTINS: &[&str] = &[
     "random_seed",
     "args",
     "read_line",
+    "read_stdin",
     "read_file",
     "write_file",
     "bytes_of",
@@ -49,7 +52,9 @@ pub const TYPE_NAMES: &[&str] = &["i64", "f64", "bool", "str", "bytes", "Option"
 /// CONSTRUCTORS; a test keeps them in step).
 pub const BUILTIN_SIGNATURES: &[(&str, &str)] = &[
     ("print", "print(x) uses io: writes an i64, f64, bool or str and a newline"),
+    ("print_raw", "print_raw(text: str) uses io: writes the text with no newline"),
     ("assert", "assert(cond: bool)"),
+    ("panic", "panic(message: str): stops the program with the message; a branch that ends in it needs no test"),
     ("sqrt", "sqrt(x: f64) -> f64, halving the unit"),
     ("abs", "abs(x) for i64 or f64"),
     ("to_f64", "to_f64(i: i64) -> f64"),
@@ -60,6 +65,7 @@ pub const BUILTIN_SIGNATURES: &[(&str, &str)] = &[
     ("random_seed", "random_seed(seed: i64) uses random: restarts the sequence"),
     ("args", "args() -> [str] uses io: the command-line arguments"),
     ("read_line", "read_line() -> Option[str] uses io: the next line of stdin, None at the end"),
+    ("read_stdin", "read_stdin() -> bytes uses io: all that is left of stdin"),
     ("read_file", "read_file(path: str) -> Result[str, FileError] uses fs: the whole file"),
     ("write_file", "write_file(path: str, text: str) -> Result[i64, FileError] uses fs: replaces the file"),
     ("bytes_of", "bytes_of(xs: [i64]) -> bytes: each value 0..=255 as a byte"),
@@ -860,6 +866,11 @@ impl<'a> Checker<'a> {
 
     /// E0604 for each imported name the module never used, with its removal as the fix.
     fn unused_imports(&mut self, imports: &[&ast::ImportDecl]) {
+        // A module's tests are left out when it is imported, so what they use looks unused then;
+        // the file is checked on its own for this.
+        if self.module != 0 {
+            return;
+        }
         let touched = self.touched.borrow().clone();
         for (k, imp) in imports.iter().enumerate() {
             for (i, n) in imp.names.iter().enumerate() {
@@ -1531,6 +1542,10 @@ impl<'a> Checker<'a> {
         if self.abstract_body || body.is_empty() {
             return body;
         }
+        // A branch that panics says it should not run: a test could not pass through it anyway.
+        if let Some(Stmt::Expr(Expr { kind: ExprKind::Builtin(Builtin::Panic { .. }, _), .. })) = body.last() {
+            return body;
+        }
         let id = *self.branch_ids.entry((self.module, at.start)).or_insert_with(|| {
             self.branches.push(Branch { module: self.module, at, owner, kind });
             self.branches.len() - 1
@@ -1540,11 +1555,11 @@ impl<'a> Checker<'a> {
     }
 
     fn declare_local(&mut self, b: &mut Body, name: &ast::Ident, ty: Ty, meta: LocalMeta) -> LocalId {
-        if let Some(prev) = b.declared.get(&name.name) {
-            let prev = *prev;
+        if b.scopes.iter().any(|s| s.contains_key(&name.name)) {
+            let prev = b.declared[&name.name];
             self.err(
-                Diagnostic::new("E0202", name.span, format!("`{}` is already declared in this function", name.name))
-                    .note("first declared here", Some(prev)),
+                Diagnostic::new("E0202", name.span, format!("`{}` is already declared here", name.name))
+                    .note("first declared here, and still in scope", Some(prev)),
             );
         } else if let Some((_, prev)) = b.enclosing.as_ref().and_then(|e| e.get(&name.name)) {
             let prev = *prev;
@@ -2421,12 +2436,48 @@ impl<'a> Checker<'a> {
             }
             let def = self.variant_spans.get(&(id, vi)).copied();
             self.note_use(arm.variant.span, def);
+            let mut also = Vec::new();
+            for other in &arm.also {
+                let Some(oi) = variants.iter().position(|v| v.name == other.name) else {
+                    unknown_arm = true;
+                    let names: Vec<String> = variants.iter().map(|v| v.name.clone()).collect();
+                    self.err(
+                        Diagnostic::new("E0200", other.span, format!("`{ename}` has no variant `{}`", other.name))
+                            .note(format!("variants: {}", names.join(", ")), None),
+                    );
+                    continue;
+                };
+                if let Some(prev) = seen.insert(oi, other.span) {
+                    self.err(
+                        Diagnostic::new("E0401", other.span, format!("`{}` is matched twice", other.name))
+                            .note("first matched here", Some(prev)),
+                    );
+                    continue;
+                }
+                let def = self.variant_spans.get(&(id, oi)).copied();
+                self.note_use(other.span, def);
+                also.push(oi);
+            }
             b.scopes.push(HashMap::new());
-            let bindings = self.pattern(b, arm, (id, vi), &variants[vi]);
+            let bindings = if arm.also.is_empty() {
+                self.pattern(b, arm, (id, vi), &variants[vi])
+            } else {
+                if arm.fields.is_some() {
+                    self.err(
+                        Diagnostic::new("E0402", arm.fields_span, "an arm with several variants binds no fields")
+                            .note("name the variants alone: Red | Green => { ... }", None),
+                    );
+                }
+                Vec::new()
+            };
             let body = self.block(b, &arm.body);
-            let body = self.marked(b, arm.body.span, BranchKind::Arm(arm.variant.name.clone()), body);
+            let mut shown = arm.variant.name.clone();
+            for other in &arm.also {
+                shown = format!("{shown} | {}", other.name);
+            }
+            let body = self.marked(b, arm.body.span, BranchKind::Arm(shown), body);
             self.close_scope(b, arm.body.span.end);
-            out.push(Arm { variant: vi, bindings, body });
+            out.push(Arm { variant: vi, also, bindings, body });
         }
         let missing: Vec<&VariantDef> =
             variants.iter().enumerate().filter(|(i, _)| !seen.contains_key(i)).map(|(_, v)| v).collect();
@@ -2457,7 +2508,7 @@ impl<'a> Checker<'a> {
                     scrutinee.span,
                     format!("match on `{ename}` does not handle {}", names.join(", ")),
                 )
-                .note("every variant needs its own arm; there is no catch-all", None)
+                .note("every variant needs an arm; there is no catch-all, but one arm can name several: A | B => { ... }", None)
                 .fix1(
                     FixKind::ChangesMeaning,
                     "add empty arms for the missing variants",
@@ -2531,6 +2582,16 @@ impl<'a> Checker<'a> {
             (Some(fs), false) => fs,
         };
         let decl: Vec<&str> = v.fields.iter().map(|(f, _)| f.as_str()).collect();
+        // The only field takes any name, as its constructor takes the value unnamed.
+        let only: Vec<ast::PatField>;
+        let fields: &[ast::PatField] = match (fields.as_slice(), decl.as_slice()) {
+            ([pf], [d]) if pf.binding.is_none() && pf.field.name != *d => {
+                let field = ast::Ident { name: d.to_string(), span: pf.field.span };
+                only = vec![ast::PatField { field, binding: Some(pf.field.clone()), span: pf.span }];
+                &only
+            }
+            _ => fields,
+        };
         let mut ok = true;
         let mut given: HashMap<&str, usize> = HashMap::new();
         for (i, pf) in fields.iter().enumerate() {
@@ -3694,7 +3755,9 @@ impl<'a> Checker<'a> {
             let mut cands: Vec<String> = self.func_index.keys().cloned().collect();
             cands.extend(BUILTINS.iter().map(|s| s.to_string()));
             let mut d = Diagnostic::new("E0200", callee.span, format!("unknown function `{name}`"));
-            if let Some(s) = closest(name, cands.iter()) {
+            if let Some(module) = crate::std_module_with(name) {
+                d = d.note(format!("std.{module} has it: import std.{module}.{{{name}}};"), None);
+            } else if let Some(s) = closest(name, cands.iter()) {
                 d = d.fix1(FixKind::ChangesMeaning, format!("did you mean `{s}`?"), callee.span, s);
             }
             self.err(d);
@@ -3861,17 +3924,22 @@ impl<'a> Checker<'a> {
         }
         // Recorded first, so an error in an argument cannot also report the effect as unused.
         match name {
-            "print" | "eprint" | "exit" | "env" => self.note_effect(b, Effect::Io, callee.span, &format!("`{name}`")),
+            "print" | "print_raw" | "eprint" | "exit" | "env" => {
+                self.note_effect(b, Effect::Io, callee.span, &format!("`{name}`"))
+            }
             "list_dir" => self.note_effect(b, Effect::Fs, callee.span, "`list_dir`"),
             "clock_ns" => self.note_effect(b, Effect::Clock, callee.span, "clock_ns"),
             "random_below" | "random_f64" | "random_seed" => {
                 self.note_effect(b, Effect::Random, callee.span, &format!("`{name}`"))
             }
-            "args" | "read_line" => self.note_effect(b, Effect::Io, callee.span, &format!("`{name}`")),
+            "args" | "read_line" | "read_stdin" => self.note_effect(b, Effect::Io, callee.span, &format!("`{name}`")),
             "read_file" | "read_bytes" => self.note_effect(b, Effect::Fs, callee.span, &format!("`{name}`")),
             _ => {}
         }
-        if matches!(name, "args" | "read_line" | "read_file" | "read_bytes" | "bytes_of" | "env" | "list_dir") {
+        if matches!(
+            name,
+            "args" | "read_line" | "read_stdin" | "read_file" | "read_bytes" | "bytes_of" | "env" | "list_dir"
+        ) {
             self.note_alloc(b, callee.span, &format!("`{name}`"));
         }
         let vals: Vec<Expr> = args.iter().map(|a| self.expr(b, &a.value)).collect();
@@ -3917,7 +3985,7 @@ impl<'a> Checker<'a> {
             let b = if name == "print" { Builtin::Print } else { Builtin::EPrint };
             return Expr { kind: ExprKind::Builtin(b, vals), ty: Ty::Void };
         }
-        if name == "clock_ns" || name == "random_f64" || name == "args" || name == "read_line" {
+        if name == "clock_ns" || name == "random_f64" || name == "args" || name == "read_line" || name == "read_stdin" {
             if !vals.is_empty() {
                 self.err(Diagnostic::new(
                     "E0303",
@@ -3930,6 +3998,7 @@ impl<'a> Checker<'a> {
             return match name {
                 "clock_ns" => Expr { kind: ExprKind::Builtin(Builtin::ClockNs, vals), ty: Ty::I64 },
                 "args" => Expr { kind: ExprKind::Builtin(Builtin::Args, vals), ty: Ty::Array(Box::new(Ty::Str)) },
+                "read_stdin" => Expr { kind: ExprKind::Builtin(Builtin::ReadStdin, vals), ty: Ty::Bytes },
                 "read_line" => Expr {
                     kind: ExprKind::Builtin(Builtin::ReadLine { message: read_line_message(&site) }, vals),
                     ty: self.option_of(Ty::Str),
@@ -4032,6 +4101,18 @@ impl<'a> Checker<'a> {
                     return bad(self, "an i64 exit code");
                 }
                 Expr { kind: ExprKind::Builtin(Builtin::Exit { site }, vec![x]), ty: Ty::Void }
+            }
+            "panic" => {
+                if t != Ty::Str {
+                    return bad(self, "a str message");
+                }
+                Expr { kind: ExprKind::Builtin(Builtin::Panic { site }, vec![x]), ty: Ty::Void }
+            }
+            "print_raw" => {
+                if t != Ty::Str {
+                    return bad(self, "a str");
+                }
+                Expr { kind: ExprKind::Builtin(Builtin::PrintRaw, vec![x]), ty: Ty::Void }
             }
             "env" => {
                 if t != Ty::Str {
@@ -4507,7 +4588,11 @@ impl<'a> Checker<'a> {
                     Ty::Map(..) => "maps have len, has, get, set, remove, keys and values",
                     _ => "only arrays, str and maps have methods; write a function that takes the value",
                 };
-                self.err(Diagnostic::new("E0406", method.span, format!("{t} has no method `{m}`")).note(have, None));
+                let mut d = Diagnostic::new("E0406", method.span, format!("{t} has no method `{m}`")).note(have, None);
+                if let Some(module) = crate::std_module_with(m) {
+                    d = d.note(format!("std.{module} has it as a function: import std.{module}.{{{m}}};"), None);
+                }
+                self.err(d);
                 return Self::err_expr();
             }
         };
@@ -4664,8 +4749,10 @@ fn cmp_op(op: BinOp) -> CmpOp {
 fn always_returns(stmts: &[ast::Stmt]) -> bool {
     stmts.iter().any(|s| match &s.kind {
         StmtKind::Return(_) => true,
-        // `exit(code)` ends the program, so nothing after it runs.
-        StmtKind::Expr(ast::Expr { kind: AK::Call { callee, .. }, .. }) => callee.name == "exit",
+        // `exit(code)` and `panic(message)` end the program, so nothing after them runs.
+        StmtKind::Expr(ast::Expr { kind: AK::Call { callee, .. }, .. }) => {
+            callee.name == "exit" || callee.name == "panic"
+        }
         StmtKind::Match { arms, .. } => !arms.is_empty() && arms.iter().all(|a| always_returns(&a.body.stmts)),
         StmtKind::If { then, else_: Some(e), .. } => {
             always_returns(&then.stmts)

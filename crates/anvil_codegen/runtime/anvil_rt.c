@@ -9,6 +9,7 @@
 #define _CRT_SECURE_NO_WARNINGS
 #ifndef _WIN32
 #define _POSIX_C_SOURCE 200809L /* clock_gettime */
+#define _XOPEN_SOURCE 700       /* sigaltstack, SA_ONSTACK */
 #endif
 #ifdef _MSC_VER
 #pragma warning(disable : 4200) /* flexible array members are standard C99 */
@@ -35,6 +36,8 @@ __declspec(dllimport) unsigned long __stdcall GetFileAttributesW(const wchar_t *
 __declspec(dllimport) unsigned long __stdcall GetActiveProcessorCount(unsigned short group);
 __declspec(dllimport) void __stdcall Sleep(unsigned long ms);
 __declspec(dllimport) int __stdcall CloseHandle(void *handle);
+__declspec(dllimport) void *__stdcall AddVectoredExceptionHandler(unsigned long first, long(__stdcall *handler)(void *));
+__declspec(dllimport) int __stdcall SetThreadStackGuarantee(unsigned long *size);
 #define ATOMIC_ADD(p, v) _InterlockedExchangeAdd64((volatile long long *)(p), (v))
 #define ATOMIC_CAS(p, expected, desired) _InterlockedCompareExchange64((volatile long long *)(p), (desired), (expected))
 #define ATOMIC_SET(p, v) _InterlockedExchange64((volatile long long *)(p), (v))
@@ -44,6 +47,7 @@ __declspec(dllimport) int __stdcall CloseHandle(void *handle);
 #include <sys/stat.h>
 #include <dirent.h>
 #include <pthread.h>
+#include <signal.h>
 #include <unistd.h>
 #define ATOMIC_ADD(p, v) __atomic_fetch_add((p), (v), __ATOMIC_SEQ_CST)
 static int64_t atomic_cas(int64_t *p, int64_t expected, int64_t desired) {
@@ -369,6 +373,11 @@ static FILE *stream_of(int64_t stream) {
     return stream ? stderr : stdout;
 }
 
+void anvil_print_raw(const AnvStr *s) {
+    init_stdout();
+    fwrite(s->bytes, 1, (size_t)s->len, stdout);
+}
+
 void anvil_print_line(const AnvStr *s, int64_t stream) {
     FILE *f = stream_of(stream);
     fwrite(s->bytes, 1, (size_t)s->len, f);
@@ -449,6 +458,79 @@ static void panic_bytes(const char *p, int64_t len) {
 }
 
 void anvil_panic(const AnvStr *message) { panic_bytes(message->bytes, message->len); }
+
+/* panic(message): the message and where, as the interpreter words it. */
+void anvil_panic_at(const AnvStr *message, const AnvStr *site) {
+    size_t n = (size_t)message->len + (size_t)site->len + 3;
+    char *buf = xmalloc(n);
+    memcpy(buf, message->bytes, (size_t)message->len);
+    memcpy(buf + message->len, " (", 2);
+    memcpy(buf + message->len + 2, site->bytes, (size_t)site->len);
+    buf[n - 1] = ')';
+    panic_bytes(buf, (int64_t)n);
+}
+
+/* ---- running out of stack: a panic like any other, where the system would end the program
+ * with no word (the text is the interpreter's). It runs on what is kept for it: a stack of its
+ * own on POSIX, the room SetThreadStackGuarantee keeps on Windows. */
+
+static void stack_overflow(void) {
+    static const char text[] = "panic: stack overflow: calls nested too deeply\n";
+    init_stdout();
+    fflush(stdout);
+    fwrite(text, 1, sizeof text - 1, stderr);
+    fflush(stderr);
+    if (mem_measuring) mem_report();
+    _Exit(ANVIL_PANIC_EXIT);
+}
+
+#define THREAD_STACK ((size_t)64 << 20)
+#define STACK_RESERVE ((size_t)64 << 10)
+
+#ifdef _WIN32
+static long __stdcall on_exception(void *info) {
+    const unsigned long code = **(const unsigned long **)info; /* EXCEPTION_POINTERS, EXCEPTION_RECORD */
+    if (code == 0xC00000FDul) stack_overflow();
+    return 0; /* look further */
+}
+
+static void guard_stack(void) {
+    unsigned long reserve = (unsigned long)STACK_RESERVE;
+    SetThreadStackGuarantee(&reserve);
+}
+
+static void init_stack_guard(void) { AddVectoredExceptionHandler(1, on_exception); }
+#else
+static THREAD_LOCAL uintptr_t stack_end = 0;
+
+static void on_fault(int sig, siginfo_t *info, void *context) {
+    (void)sig;
+    (void)context;
+    const uintptr_t at = (uintptr_t)info->si_addr;
+    /* In or just past the page at the far end of this thread's stack. */
+    if (stack_end && at >= stack_end - ((uintptr_t)1 << 20) && at < stack_end + ((uintptr_t)1 << 18)) stack_overflow();
+    signal(SIGSEGV, SIG_DFL); /* anything else is what it always was */
+}
+
+static void guard_stack(void) {
+    char here;
+    stack_end = (uintptr_t)&here - THREAD_STACK;
+    stack_t alt;
+    alt.ss_sp = xmalloc(STACK_RESERVE);
+    alt.ss_size = STACK_RESERVE;
+    alt.ss_flags = 0;
+    if (sigaltstack(&alt, NULL) != 0) runtime_error("cannot set up the stack guard");
+}
+
+static void init_stack_guard(void) {
+    struct sigaction action;
+    memset(&action, 0, sizeof action);
+    action.sa_sigaction = on_fault;
+    action.sa_flags = SA_SIGINFO | SA_ONSTACK;
+    sigemptyset(&action.sa_mask);
+    if (sigaction(SIGSEGV, &action, NULL) != 0) runtime_error("cannot set up the stack guard");
+}
+#endif
 
 /* Same text as ir::index_message. */
 void anvil_panic_index(int64_t index, int64_t len, const AnvStr *site) {
@@ -801,7 +883,7 @@ AnvArr *anvil_args(const AnvTypeInfo *ti) {
 }
 
 /* The next line of stdin without "\n" or "\r\n"; NULL at the end. Mirrors the interpreter. */
-AnvStr *anvil_read_line(const AnvStr *message) {
+static void init_stdin(void) {
     static int ready = 0;
     if (!ready) {
         ready = 1;
@@ -811,6 +893,30 @@ AnvStr *anvil_read_line(const AnvStr *message) {
     }
     init_stdout();
     fflush(stdout); /* a prompt shows before the program waits */
+}
+
+AnvStr *anvil_read_stdin(void) {
+    init_stdin();
+    size_t cap = 4096, len = 0;
+    char *buf = xmalloc(cap);
+    for (;;) {
+        if (len == cap) {
+            cap *= 2;
+            char *grown = realloc(buf, cap);
+            if (!grown) runtime_error("out of memory");
+            buf = grown;
+        }
+        size_t got = fread(buf + len, 1, cap - len, stdin);
+        len += got;
+        if (got == 0) break;
+    }
+    AnvStr *s = str_from(buf, (int64_t)len);
+    free(buf);
+    return s;
+}
+
+AnvStr *anvil_read_line(const AnvStr *message) {
+    init_stdin();
     size_t cap = 128, len = 0;
     char *buf = xmalloc(cap);
     int c;
@@ -1242,6 +1348,7 @@ static void *job_main(void *arg) {
 #endif
     Job *job = arg;
     current_job = job;
+    guard_stack();
     job->work(job->f, job->in, job->out, job->base);
     current_job = NULL;
     ATOMIC_SET(&job->done, 1);
@@ -1657,12 +1764,15 @@ int wmain(int argc, wchar_t **wargv) {
     init_clock();
     init_files();
     init_measure();
+    init_stack_guard();
+    guard_stack();
     anvil_program();
     return 0;
 }
 #else
 static void *run_program(void *unused) {
     (void)unused;
+    guard_stack();
     anvil_program();
     return NULL;
 }
@@ -1675,6 +1785,7 @@ int main(int argc, char **argv) {
     init_clock();
     init_files();
     init_measure();
+    init_stack_guard();
     pthread_attr_t attr;
     pthread_t thread;
     if (pthread_attr_init(&attr) != 0 || pthread_attr_setstacksize(&attr, (size_t)64 << 20) != 0 ||

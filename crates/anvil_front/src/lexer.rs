@@ -242,6 +242,12 @@ pub(crate) fn keyword(s: &str) -> Option<Tok> {
 }
 
 pub fn lex(text: &str) -> Result<Vec<Token>, Diagnostic> {
+    if text.starts_with('\u{feff}') {
+        let span = Span::new(0, '\u{feff}'.len_utf8());
+        return Err(Diagnostic::new("E0001", span, "the file starts with a byte-order mark")
+            .note("some editors and PowerShell 5.1's `Set-Content -Encoding UTF8` write one", None)
+            .fix1(FixKind::Mechanical, "remove it", span, ""));
+    }
     lex_range(text, 0, text.len())
 }
 
@@ -280,7 +286,11 @@ pub(crate) fn lex_range(text: &str, start: usize, end: usize) -> Result<Vec<Toke
             out.push(lex_string(text, &mut i)?);
             continue;
         }
-        let two = if i + 1 < end { &text[i..i + 2] } else { "" };
+        if c == b'`' {
+            out.push(lex_raw(text, &mut i)?);
+            continue;
+        }
+        let two = if i + 1 < end { text.get(i..i + 2).unwrap_or("") } else { "" };
         let tok2 = match two {
             ".." => Some(Tok::DotDot),
             "->" => Some(Tok::Arrow),
@@ -349,6 +359,7 @@ pub fn comments(text: &str) -> Vec<Span> {
             b'"' => {
                 i = string_end(bytes, i).unwrap_or_else(|| text[i..].find('\n').map_or(bytes.len(), |n| i + n));
             }
+            b'`' => i = text[i + 1..].find('`').map_or(bytes.len(), |n| i + n + 2),
             b'/' if bytes.get(i + 1) == Some(&b'/') => {
                 let mut end = text[i..].find('\n').map_or(bytes.len(), |n| i + n);
                 if end > i && bytes[end - 1] == b'\r' {
@@ -448,13 +459,19 @@ fn lex_string(text: &str, i: &mut usize) -> Result<Token, Diagnostic> {
                 let open = *i;
                 let mut j = open + 1;
                 let unclosed = |j: usize| {
-                    Diagnostic::new(
+                    let d = Diagnostic::new(
                         "E0004",
                         Span::new(open, j),
                         "`{` in a string starts an interpolation that must close with `}` on the same line, \
                          with no braces inside",
                     )
-                    .note("write `{{` for a literal `{`", None)
+                    .note("write `{{` for a literal `{`", None);
+                    // With no `}` on the line it cannot be an interpolation.
+                    let line = text[open..].split('\n').next().unwrap_or("");
+                    if line.contains('}') {
+                        return d;
+                    }
+                    d.fix1(FixKind::Mechanical, "double it", Span::new(open, open + 1), "{{")
                 };
                 loop {
                     match bytes.get(j) {
@@ -490,6 +507,18 @@ fn lex_string(text: &str, i: &mut usize) -> Result<Token, Diagnostic> {
         parts.push(LexPart::Lit(s));
     }
     Ok(Token { tok: Tok::Interp(parts), span })
+}
+
+/// `` `text` ``: exactly the characters between the backticks, line breaks included (a CRLF as a
+/// line feed, so the value does not depend on how the file was saved).
+fn lex_raw(text: &str, i: &mut usize) -> Result<Token, Diagnostic> {
+    let start = *i;
+    let Some(n) = text[start + 1..].find('`') else {
+        return Err(Diagnostic::new("E0002", Span::new(start, start + 1), "unterminated raw string: no closing backtick"));
+    };
+    *i = start + n + 2;
+    let s = text[start + 1..start + 1 + n].replace("\r\n", "\n");
+    Ok(Token { tok: Tok::Str(s), span: Span::new(start, *i) })
 }
 
 fn lex_number(text: &str, i: &mut usize) -> Result<Token, Diagnostic> {

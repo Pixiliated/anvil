@@ -34,6 +34,10 @@ pub use query::{complete_in, refs_in, type_at_in};
 pub use testing::{test, PROPERTY_CASES};
 pub use usage::{usage, usage_approve};
 
+/// Whether long commands say how far they are, on stderr (the CLI does; the MCP server's stdio is
+/// its protocol's).
+pub static PROGRESS: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
 use anvil_front::diag::{self, Diagnostic, FixKind};
 use anvil_front::ir::{Program, PANIC_EXIT_CODE};
 use anvil_front::span::{SourceFile, Span};
@@ -236,8 +240,8 @@ pub const COMMANDS: &[Command] = &[
     },
     Command {
         name: "measure",
-        positionals: &["file?"],
-        options: &[STEPS],
+        positionals: &["file?", "args*"],
+        options: &[STEPS, INPUT],
         summary: "run programs natively: heap bytes asked for, the most held at once, objects and time, beside the interpreter's counts",
     },
     Command {

@@ -1,0 +1,12 @@
+// expect: E0200
+enum Color {
+    Red,
+    Green,
+}
+
+fn f(c: Color) -> i64 {
+    match c {
+        Red | Blue => { return 1; }
+        Green => { return 2; }
+    }
+}

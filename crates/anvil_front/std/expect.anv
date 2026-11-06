@@ -1,0 +1,35 @@
+// The standard library's way to say a value must be there: `import std.expect.{expect, expect_ok};`.
+
+// What `o` holds; panics with `why` when it holds nothing.
+// example: expect(o: Some(3), why: "set above") == 3
+pub fn expect[T](o: Option[T], why: str) -> T {
+    match o {
+        Some(value) => { return value; }
+        None => { panic(why); }
+    }
+}
+
+// The value of `r`; panics with `why` when it holds an error.
+// example: expect_ok(r: parse("7"), why: "a digit") == 7
+pub fn expect_ok[T, E](r: Result[T, E], why: str) -> T {
+    match r {
+        Ok(value) => { return value; }
+        Err(error: _) => { panic(why); }
+    }
+}
+
+fn parse(text: str) -> Result[i64, str] {
+    if text == "7" {
+        return Ok(7);
+    }
+    return Err("not seven");
+}
+
+test "what is there comes out" {
+    assert(expect(o: Some("x"), why: "") == "x");
+    assert(expect_ok(r: parse("7"), why: "") == 7);
+}
+
+test "an error stays an error before it is expected" {
+    assert(parse("8") == Err("not seven"));
+}

@@ -162,7 +162,7 @@ fn dispatch(p: &Parsed) -> Result<Report, String> {
         "mutate" => anvil_ops::mutate(root, file, text("only"), steps),
         "api" => anvil_ops::api(root, pos(0)),
         "api approve" => anvil_ops::api_approve(root, file),
-        "measure" => anvil_ops::measure(root, pos(0), steps),
+        "measure" => anvil_ops::measure(root, pos(0), steps, &input(false)),
         "usage" => anvil_ops::usage(root, pos(0), steps),
         "usage approve" => anvil_ops::usage_approve(root, pos(0), steps),
         "golden check" => anvil_ops::golden_check(root, pos(0), native, steps),
@@ -192,10 +192,16 @@ fn dispatch(p: &Parsed) -> Result<Report, String> {
 }
 
 fn main() -> ExitCode {
-    if std::env::args().skip(1).collect::<Vec<_>>() == ["--version"] {
+    let words: Vec<String> = std::env::args().skip(1).collect();
+    if words == ["--version"] {
         println!("anvil {}", anvil_ops::version());
         return ExitCode::SUCCESS;
     }
+    if words == ["--help"] || words == ["-h"] || words == ["help"] {
+        println!("{}", usage());
+        return ExitCode::SUCCESS;
+    }
+    anvil_ops::PROGRESS.store(true, std::sync::atomic::Ordering::Relaxed);
     let parsed = match parse_args() {
         Ok(p) => p,
         Err(e) => {

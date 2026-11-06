@@ -1054,7 +1054,7 @@ fn grow(n: i64) -> i64
     assert_eq!(at, [("contract", "1:4"), ("contract", "7:4"), ("allow", "14:4"), ("contract", "20:4"), ("contract", "26:4")], "{v}");
     assert!(found[0].2.starts_with("`half_up` breaks its contract for n: 1: ensures failed at src/maths.anv:2:13"), "{v}");
     assert!(found[1].2.contains("for xs: [0]: index 1 out of bounds"), "{v}");
-    assert!(found[3].2.contains("checked on none of 100 generated inputs"), "{v}");
+    assert!(found[3].2.contains("checked on none of 500 generated inputs"), "{v}");
     assert!(found[4].2.contains("runs past 1000000 steps for n: 9223372036854775807"), "{v}");
     let file = v["files"].as_array().unwrap().iter().find(|f| f["file"] == "src/maths.anv").unwrap();
     let status = |name: &str| {
@@ -2133,4 +2133,229 @@ fn native_memory_is_measured() {
     let all = p.json(&["measure"]);
     assert_eq!(all["programs"].as_array().unwrap().len(), 1, "{all}");
     assert_eq!(all["programs"][0]["file"], "src/hello.anv", "{all}");
+}
+
+// ---- what fresh agents found writing real programs (M37) ----
+
+#[test]
+fn odd_characters_are_errors_not_crashes() {
+    let p = hello_project("characters");
+    // A byte-order mark: a mechanical fix removes it.
+    std::fs::write(p.0.join("src/hello.anv"), format!("\u{feff}{HELLO}")).unwrap();
+    let out = p.anvil(&["check", "src/hello.anv"]);
+    assert_eq!(out.status.code(), Some(1), "{out:?}");
+    assert!(String::from_utf8_lossy(&out.stderr).contains("E0001") || String::from_utf8_lossy(&out.stdout).contains("E0001"), "{out:?}");
+    assert!(p.anvil(&["fix", "src/hello.anv"]).status.success());
+    assert_eq!(std::fs::read_to_string(p.0.join("src/hello.anv")).unwrap(), HELLO);
+    // Anywhere else, in any width of character, next to any other.
+    for c in ["\u{e9}", "\u{2192}", "\u{1f600}"] {
+        for shape in ["{c}", "+{c}", "x {c} y", "={c}="] {
+            let code = shape.replace("{c}", c);
+            p.write("src/hello.anv", &format!("fn main() -> i64 {{\n    return 1 {code};\n}}\n"));
+            let out = p.anvil(&["check", "src/hello.anv"]);
+            assert_eq!(out.status.code(), Some(1), "{code}: {out:?}");
+        }
+    }
+}
+
+#[test]
+fn golden_files_of_no_program_are_found() {
+    let p = hello_project("orphans");
+    p.write("src/maths.anv", "fn twice(n: i64) -> i64 {\n    return n * 2;\n}\n\ntest \"twice\" {\n    assert(twice(2) == 4);\n}\n");
+    std::fs::create_dir_all(p.0.join("golden/src")).unwrap();
+    p.write("golden/src/hello.in", "arg: x\n---\n");
+    p.write("golden/src/gone.anv.out", "exit: 0\n---\n");
+    let v = p.json(&["verify"]);
+    let found: Vec<String> = v["open"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|f| f["message"].as_str().unwrap().contains("is not read"))
+        .map(|f| f["message"].as_str().unwrap().to_string())
+        .collect();
+    assert_eq!(
+        found,
+        [
+            "golden/src/gone.anv.out is not read: no project file is named src/gone.anv",
+            "golden/src/hello.in is not read: for src/hello.anv it would be golden/src/hello.anv.in",
+        ],
+        "{v}"
+    );
+}
+
+#[test]
+fn contracts_on_two_arguments_are_reached_and_their_allows_kept() {
+    let p = hello_project("reach");
+    p.write(
+        "src/maths.anv",
+        r#"fn swapped(xs: [i64], a: i64, b: i64) -> i64
+    requires 0 <= a && a < xs.len()
+    requires 0 <= b && b < xs.len()
+{
+    return xs[a] + xs[b];
+}
+
+allow contract "only one value is allowed, and nothing generates it"
+fn exact(n: i64) -> i64
+    requires n == 123456
+{
+    return n;
+}
+
+test "both" {
+    assert(swapped(xs: [1, 2], a: 0, b: 1) == 3);
+    assert(exact(123456) == 123456);
+}
+"#,
+    );
+    let v = p.json(&["verify"]);
+    let contracts = |name: &str| {
+        let file = v["files"].as_array().unwrap().iter().find(|f| f["file"] == "src/maths.anv").unwrap();
+        file["contracts"].as_array().unwrap().iter().find(|c| c["function"] == name).unwrap().clone()
+    };
+    assert!(contracts("swapped")["checked"].as_u64().unwrap() >= 50, "{v}");
+    // Nothing to check it on, so the allow is doing its job: neither finding is reported.
+    assert_eq!(contracts("exact")["checked"], 0, "{v}");
+    let about: Vec<&serde_json::Value> =
+        v["open"].as_array().unwrap().iter().filter(|f| f["check"] == "contract" || f["check"] == "allow").collect();
+    assert!(about.is_empty(), "{v}");
+}
+
+#[test]
+fn mutate_runs_what_reaches_the_function_and_says_how_far_it_is() {
+    let p = hello_project("reaching");
+    p.write(
+        "src/maths.anv",
+        r#"fn count(n: i64) -> i64 {
+    var i: i64 = 0;
+    while i < n {
+        i = i + 1;
+    }
+    return i;
+}
+
+fn other(n: i64) -> i64 {
+    return n * 2;
+}
+
+test "count" {
+    assert(count(3) == 3);
+}
+
+test "other" {
+    assert(other(2) == 4);
+}
+"#,
+    );
+    let out = p.anvil(&["mutate", "src/maths.anv", "--json"]);
+    let v = json_of(&out);
+    assert!(String::from_utf8_lossy(&out.stderr).starts_with("mutate: "), "{out:?}");
+    let by = |to: &str| -> String {
+        let m = v["mutants"].as_array().unwrap().iter().find(|m| m["to"] == to).unwrap();
+        m["by"].as_str().unwrap_or("").to_string()
+    };
+    // Each is noticed by the test that reaches it, whatever the order, and a loop that no longer
+    // ends runs out of a budget set by its own test.
+    assert_eq!(by("/"), "test \"other\" in src/maths.anv", "{v}");
+    assert_eq!(by("-"), "test \"count\" in src/maths.anv (it ran out of steps)", "{v}");
+    // The same answers over and over, whatever the threads.
+    let again = json_of(&p.anvil(&["mutate", "src/maths.anv", "--json"]));
+    assert_eq!(v["mutants"], again["mutants"]);
+}
+
+#[test]
+fn measure_takes_a_programs_input() {
+    let p = hello_project("measure_input");
+    p.write("input.txt", "abc\n");
+    p.write(
+        "src/hello.anv",
+        "fn main() uses io {\n    let all: bytes = read_stdin();\n    print(\"{all.len()} {args().len()}\");\n}\n",
+    );
+    let v = json_of(&p.anvil(&["measure", "src/hello.anv", "--json", "--input", "input.txt", "--", "x", "y"]));
+    assert_eq!(v["ok"], true, "{v}");
+    assert!(v["programs"][0]["steps"].as_u64().unwrap() > 0, "{v}");
+    assert_eq!(p.anvil(&["measure", "--input", "input.txt"]).status.code(), Some(2));
+}
+
+#[test]
+fn help_is_not_an_error() {
+    for word in ["--help", "-h", "help"] {
+        let out = anvil(&[word]);
+        assert_eq!(out.status.code(), Some(0), "{word}");
+        assert!(String::from_utf8_lossy(&out.stdout).starts_with("usage: anvil"), "{word}");
+    }
+}
+
+#[test]
+fn text_built_on_a_call_and_arguments_read_twice_do_not_copy() {
+    let p = hello_project("handed_last");
+    let quoted = |n: u64| {
+        format!("fn quoted(s: str) -> str {{\n    return s + \"x\";\n}}\n\nfn main() uses io {{\n    var s: str = \"\";\n    for _i in 0..{n} {{\n        s = quoted(s) + \", \";\n    }}\n    print(\"{{s.len()}}\");\n}}\n")
+    };
+    let (one, ..) = heap_of(&p, &quoted(4000));
+    let (two, ..) = heap_of(&p, &quoted(8000));
+    assert!(two <= one * 9 / 4, "text on a call's result grows faster than n: {one} then {two}");
+    let v = p.json(&["measure", "src/hello.anv"]);
+    assert_eq!(v["programs"][0]["copied"], 0, "{v}");
+
+    let read_twice = |n: u64| {
+        format!("fn grown(xs: [i64], n: i64) -> [i64] {{\n    var ys: [i64] = xs;\n    ys.push(n);\n    return ys;\n}}\n\nfn main() uses io {{\n    var xs: [i64] = [];\n    for _i in 0..{n} {{\n        xs = grown(xs: xs, n: xs.len());\n    }}\n    print(\"{{xs.len()}}\");\n}}\n")
+    };
+    let (one, ..) = heap_of(&p, &read_twice(1000));
+    let (two, ..) = heap_of(&p, &read_twice(2000));
+    assert!(two <= one * 9 / 4, "an argument read twice grows faster than n: {one} then {two}");
+    let v = p.json(&["measure", "src/hello.anv"]);
+    assert_eq!(v["programs"][0]["copied"], 0, "{v}");
+}
+
+#[test]
+fn names_used_side_by_side_are_told_apart() {
+    let p = hello_project("side_by_side");
+    p.write(
+        "src/maths.anv",
+        "fn f(o: Option[i64], r: Option[str]) -> i64 {\n    var t: i64 = 0;\n    match o {\n        Some(x) => { t = t + x; }\n        None => {}\n    }\n    match r {\n        Some(x) => { t = t + x.len(); }\n        None => {}\n    }\n    return t;\n}\n\ntest \"both\" {\n    assert(f(o: Some(1), r: Some(\"ab\")) == 3);\n    assert(f(o: None, r: None) == 0);\n}\n",
+    );
+    assert!(p.anvil(&["test", "src/maths.anv"]).status.success());
+    // Each has its own type, from where it is written.
+    let first = p.json(&["type-at", "src/maths.anv", "4", "14"]);
+    let second = p.json(&["type-at", "src/maths.anv", "8", "14"]);
+    assert_eq!(first["declaration"]["detail"], "i64", "{first}");
+    assert_eq!(second["declaration"]["detail"], "str", "{second}");
+    // Named by a position, references stay with the one declared there.
+    let refs = p.json(&["refs", "src/maths.anv", "4:14"]);
+    let uses = refs["declarations"][0]["uses"].as_array().unwrap();
+    let lines: Vec<u64> = uses.iter().map(|r| r["line"].as_u64().unwrap()).collect();
+    assert_eq!(lines, [4], "{refs}");
+}
+
+// The budget was once the last test's steps alone, so any bigger test "noticed" every mutant.
+#[test]
+fn a_big_test_does_not_notice_mutants_it_never_reaches() {
+    let p = hello_project("budget");
+    p.write(
+        "src/maths.anv",
+        r#"fn busy(n: i64) -> i64 {
+    var i: i64 = 0;
+    while i < n {
+        i = i + 1;
+    }
+    return i;
+}
+
+fn loose(a: i64, b: bool) -> bool {
+    return a >= 0 || b;
+}
+
+test "big" {
+    assert(busy(50000) == 50000);
+}
+
+test "small, and last" {
+    assert(loose(a: 1, b: true));
+}
+"#,
+    );
+    let v = json_of(&p.anvil(&["mutate", "src/maths.anv", "--json"]));
+    let m = v["mutants"].as_array().unwrap().iter().find(|m| m["from"] == "||").unwrap();
+    assert_eq!(m["status"], "survived", "{v}");
 }

@@ -51,8 +51,23 @@ pub(crate) fn run_all(
     ffi: &mut Option<crate::Ffi>,
     root: &Path,
 ) -> Vec<Ran> {
-    let mut out = Vec::new();
-    for (i, t) in program.tests.iter().enumerate() {
+    (0..program.tests.len()).map(|i| run_one(program, i, cases, seed, max_steps, rec.as_deref_mut(), ffi, root)).collect()
+}
+
+/// Runs one test of `program`, as `run_all` does.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn run_one(
+    program: &Program,
+    i: usize,
+    cases: u64,
+    seed: u64,
+    max_steps: Option<u64>,
+    mut rec: Option<&mut anvil_interp::Recorder>,
+    ffi: &mut Option<crate::Ffi>,
+    root: &Path,
+) -> Ran {
+    let t = &program.tests[i];
+    {
         let mut ran = Ran {
             name: t.name.clone(),
             property: !t.inputs.is_empty(),
@@ -103,9 +118,8 @@ pub(crate) fn run_all(
         if let Some(r) = &rec {
             ran.usage = std::array::from_fn(|k| r.totals[k] - before[k]);
         }
-        out.push(ran);
+        ran
     }
-    out
 }
 
 /// The steps one call may take while its contract is checked: a call that takes more loops, or

@@ -214,6 +214,18 @@ pub struct TraceArgs {
 
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
+pub struct MeasureArgs {
+    /// One project file (default: every file with a main).
+    pub file: Option<String>,
+    /// Stop the interpreter's run after this many statements and loop iterations (default 100000000).
+    pub max_steps: Option<u64>,
+    /// A file whose bytes are main's stdin (default: what the golden's input says).
+    pub input: Option<String>,
+    /// main's command-line arguments (default: what the golden's input says).
+    pub args: Option<Vec<String>>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
 pub struct ProfileArgs {
     /// Path of the .anv file, relative to the server's root or absolute.
     pub file: String,
@@ -510,8 +522,12 @@ impl AnvilServer {
         (the same on every run), and the time taken (which is not), beside the interpreter's steps, \
         bytes and copied bytes. The file's own program, or every project file with a main. A native \
         run that differs from the interpreter is a tool error.")]
-    async fn measure(&self, Parameters(a): Parameters<UsageArgs>) -> Result<CallToolResult, ErrorData> {
-        self.op(move |root| anvil_ops::measure(root, a.file.as_deref(), Some(steps(a.max_steps)))).await
+    async fn measure(&self, Parameters(a): Parameters<MeasureArgs>) -> Result<CallToolResult, ErrorData> {
+        self.op(move |root| {
+            let input = program_input(a.args, a.input);
+            anvil_ops::measure(root, a.file.as_deref(), Some(steps(a.max_steps)), &input)
+        })
+        .await
     }
 
     #[tool(description = "What each run of a file takes (main under its golden's input, and each test): \

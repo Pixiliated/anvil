@@ -102,6 +102,8 @@ impl Parser {
         } else {
             let mut d = self.unexpected(&format!("`{}`", tok.text()));
             if tok == Tok::Semi {
+                // Where it is missing, not where the next line happens to start.
+                d.span = self.prev_span();
                 d = d.fix1(FixKind::Mechanical, "add `;`", self.prev_span().at_end(), ";");
             }
             Err(d)
@@ -822,13 +824,19 @@ impl Parser {
             fields_span = open.to(self.expect(Tok::RParen)?);
             fields = Some(fs);
         }
+        let mut also = Vec::new();
+        while self.eat(&Tok::Pipe) {
+            also.push(self.ident("a variant name")?);
+        }
         if self.peek() != &Tok::FatArrow {
-            return Err(self.unexpected("`=>`").note("match arms look like: Circle(radius) => { ... }", None));
+            return Err(self
+                .unexpected("`=>`")
+                .note("match arms look like: Circle(radius) => { ... } or Red | Green => { ... }", None));
         }
         self.bump();
         let body = self.block()?;
         let span = variant.span.to(body.span);
-        Ok(Arm { variant, fields, fields_span, body, span })
+        Ok(Arm { variant, also, fields, fields_span, body, span })
     }
 
     fn if_stmt(&mut self) -> PResult<Stmt> {

@@ -222,10 +222,12 @@ pub enum StmtKind {
     Continue,
 }
 
-/// `Rect(width, height: h) => { ... }`
+/// `Rect(width, height: h) => { ... }`, or `Red | Green => { ... }`
 #[derive(Clone, Debug)]
 pub struct Arm {
     pub variant: Ident,
+    /// The other variants an arm with several handles; such an arm binds nothing.
+    pub also: Vec<Ident>,
     /// None for `Empty`; Some for `Circle(...)`.
     pub fields: Option<Vec<PatField>>,
     pub fields_span: Span,

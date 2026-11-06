@@ -1,0 +1,10 @@
+// Running out of stack is a panic like any other: the same text on both backends, with what was
+// printed before it kept.
+fn deep(n: i64) -> i64 {
+    return 1 + deep(n + 1);
+}
+
+fn main() uses io {
+    print("before");
+    print(deep(0));
+}

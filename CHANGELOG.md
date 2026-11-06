@@ -3,6 +3,18 @@
 Each version is one roadmap milestone (docs/ROADMAP.md); docs/DECISIONS.md says why things are
 the way they are.
 
+## 0.38.0
+- Three fresh agents wrote real programs with v0.37; this release is what they found.
+- Fixed: a crash on a byte-order mark or a wide character outside a string, a false stale `allow
+  contract`, and native stack overflow ending a program with no message (now a panic).
+- Language: names reused side by side, `Some(x)` with any name, `A | B =>` arms, `panic`, raw
+  strings in backticks, `print_raw`, `read_stdin`; `std.expect`.
+- Fewer copies: `f(s) + x` appends, and `f(a: x, b: x.len())` hands `x` over.
+- `mutate` runs side by side, only against runs that enter the mutated function, with progress. Its
+  step budget is fixed: it came from the last test alone, so a bigger test could falsely kill
+  every mutant, and earlier reports of nothing surviving may have been wrong.
+- `verify` finds files in `golden/` of no program; `measure` takes arguments and `--input`.
+
 ## 0.37.0
 - A local lets go of its value when nothing can read it again, instead of when the function ends,
   in both backends: peak memory falls (place_moves.anv by half), and a value a dead local held

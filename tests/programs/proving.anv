@@ -1,0 +1,175 @@
+// What three fresh agents needed while writing real programs (see docs/ROADMAP.md, M37): names
+// reused side by side, one field bound by any name, arms with several variants, panic, raw text,
+// output with no newline, all of stdin, and text built on what a call returns.
+import std.expect.{expect, expect_ok};
+
+enum Token {
+    Number(value: i64),
+    Name(text: str),
+    Open,
+    Close,
+    Comma,
+}
+
+struct Bag {
+    items: [i64],
+    label: str,
+}
+
+// Both loops and every arm use `t`, `x` and `n`: blocks side by side can each use a name.
+fn describe(tokens: [Token]) -> str {
+    var out: str = "";
+    for t in tokens {
+        match t {
+            Number(n) => { out = out + "{n} "; }
+            Name(n) => { out = out + n + " "; }
+            Open | Close => { out = out + "bracket "; }
+            Comma => { out = out + "comma "; }
+        }
+    }
+    for t in tokens {
+        match t {
+            Number | Name => { out = out + "x"; }
+            Open | Close | Comma => { out = out + "."; }
+        }
+    }
+    return out;
+}
+
+fn is_word(t: Token) -> bool {
+    match t {
+        Name(_) => { return true; }
+        Number | Open | Close | Comma => { return false; }
+    }
+}
+
+// The only field of a variant takes any name, and `_` ignores it.
+fn either(o: Option[i64], r: Result[i64, str]) -> i64 {
+    var total: i64 = 0;
+    match o {
+        Some(n) => { total = total + n; }
+        None => {}
+    }
+    match r {
+        Ok(_) => { total = total + 1; }
+        Err(why) => { total = total + why.len(); }
+    }
+    return total;
+}
+
+// A branch that ends in panic needs no test: it says it must not run.
+fn digit(c: str) -> i64 {
+    if c == "0" {
+        return 0;
+    }
+    if c == "1" {
+        return 1;
+    }
+    panic("not a binary digit: {c}");
+}
+
+fn only_digit(t: Token) -> i64 {
+    match t {
+        Number(n) => { return n; }
+        Name | Open | Close | Comma => { panic("not a number"); }
+    }
+}
+
+// What a call returns is appended to, as a variable handed over is.
+fn quoted(s: str, text: str) -> str {
+    return s + "\"" + text + "\"";
+}
+
+fn pretty(names: [str]) -> str {
+    var s: str = "[";
+    for name in names {
+        s = quoted(s: s, text: name) + ", ";
+    }
+    return s + "]";
+}
+
+// `next` is read by another argument and handed over: it is handed over last.
+fn add(bag: Bag, at: i64, x: i64) -> Bag {
+    var b: Bag = bag;
+    b.items.push(at * x);
+    return b;
+}
+
+fn filled(n: i64) -> Bag {
+    var bag: Bag = Bag { items: [], label: "filled" };
+    for i in 0..n {
+        bag = add(bag: bag, at: bag.items.len(), x: i);
+    }
+    return bag;
+}
+
+fn grown(xs: [i64], n: i64) -> [i64] {
+    var ys: [i64] = xs;
+    ys.push(n);
+    return ys;
+}
+
+// Places too, by fields; the other argument has read the array before it moves.
+fn filled_field(n: i64) -> Bag {
+    var bag: Bag = Bag { items: [], label: "field" };
+    for _i in 0..n {
+        bag.items = grown(xs: bag.items, n: bag.items.len());
+    }
+    return bag;
+}
+
+fn apply(f: fn([i64], i64) -> [i64], xs: [i64]) -> [i64] {
+    return f(xs, xs.len());
+}
+
+fn show(xs: [i64]) -> str {
+    var s: str = "";
+    for x in xs {
+        s = s + "{x},";
+    }
+    return s;
+}
+
+// A pure function's reads stay reads: order only moves what is handed over.
+fn pair(left: [i64], right: i64, third: [i64]) -> i64 {
+    return left.len() * 100 + right * 10 + third.len();
+}
+
+fn kept_order() -> i64 {
+    let xs: [i64] = [1, 2, 3];
+    let ys: [i64] = [4];
+    return pair(left: xs, right: xs.len() + ys.len(), third: ys);
+}
+
+fn parse_one(text: str) -> Result[i64, str] {
+    if text == "1" {
+        return Ok(1);
+    }
+    return Err("not one");
+}
+
+fn main() uses io {
+    let tokens: [Token] = [Token.Number(7), Token.Name("x"), Token.Open, Token.Close, Token.Comma];
+    print(describe(tokens));
+    print("word: {is_word(tokens[1])} {is_word(tokens[0])}");
+    print("either: {either(o: Some(2), r: Ok(1))} {either(o: None, r: Err("abc"))}");
+    print("digit: {digit("0")} {digit("1")} {only_digit(tokens[0])}");
+    print(`raw: {"a": [1, 2]} \n stays`);
+    print(`two
+lines`);
+    print_raw("no newline, ");
+    print_raw("then more");
+    print("");
+    print(pretty(["a", "b"]));
+    print(show(filled(4).items));
+    print(show(filled_field(3).items));
+    print(show(apply(f: grown, xs: [5, 6])));
+    print("order: {kept_order()}");
+    print("expect: {expect(o: Some(3), why: "set above")} {expect_ok(r: parse_one("1"), why: "one")}");
+    print("{parse_one("2") == Err("not one")}");
+    let line: Option[str] = read_line();
+    print("line: {expect(o: line, why: "the input has a first line")}");
+    let rest: bytes = read_stdin();
+    print("rest: {rest.len()} bytes: {expect(o: rest.to_str(), why: "the input is text")}");
+    print("after: {read_stdin().len()}");
+}

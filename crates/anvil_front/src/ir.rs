@@ -308,6 +308,8 @@ pub enum Step {
 #[derive(Clone, Debug)]
 pub struct Arm {
     pub variant: usize,
+    /// The other variants this arm handles; it then has no bindings.
+    pub also: Vec<usize>,
     /// (field index in the variant, local bound to it)
     pub bindings: Vec<(usize, LocalId)>,
     pub body: Vec<Stmt>,
@@ -391,9 +393,17 @@ pub enum CmpOp {
 pub enum Builtin {
     /// Prints each argument (unit-carrying floats with their unit) then a newline.
     Print,
+    /// The text with no newline.
+    PrintRaw,
     Assert {
         message: String,
     },
+    /// Stops the program with the message and the site.
+    Panic {
+        site: String,
+    },
+    /// All that is left of stdin, as bytes.
+    ReadStdin,
     Sqrt,
     AbsI64 {
         message: String,
@@ -781,14 +791,29 @@ pub fn append_parts(l: LocalId, e: &Expr) -> Option<Vec<&Expr>> {
 }
 
 /// Whether `a + b` (a StrConcat) appends `b` to the text of `a` instead of copying both: when
-/// `a` is a value handed over (a move or a take, see `moves`) or itself such an append, so it
-/// may be the only reference. Then `return s + x` and `p.name = p.name + x` grow the text in
-/// place like `s = s + x` (`append_parts`) does; both backends use this rule.
+/// `a` is a value handed over (a move or a take, see `moves`), what a call returned, or itself
+/// such an append, so it may be the only reference. Then `return s + x`, `f(s) + x` and
+/// `p.name = p.name + x` grow the text in place like `s = s + x` (`append_parts`) does; both
+/// backends use this rule.
 pub fn concat_appends(e: &Expr) -> bool {
     match &e.kind {
         ExprKind::StrConcat(left, _, _) => {
-            matches!(left.kind, ExprKind::Move(_) | ExprKind::Take { .. }) || concat_appends(left)
+            matches!(
+                left.kind,
+                ExprKind::Move(_) | ExprKind::Take { .. } | ExprKind::Call(..) | ExprKind::CallValue(..)
+            ) || concat_appends(left)
         }
+        _ => false,
+    }
+}
+
+/// Whether an argument of a call is evaluated after the others: a value handed over by plain
+/// steps, which does nothing and cannot panic. So `f(w: next, at: next.now)` reads `next.now`
+/// first and can then hand `next` over. Both backends use this rule.
+pub fn arg_comes_last(e: &Expr) -> bool {
+    match &e.kind {
+        ExprKind::Move(_) => true,
+        ExprKind::Take { path, .. } => path.iter().all(|s| matches!(s, Step::Field(_))),
         _ => false,
     }
 }

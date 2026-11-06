@@ -1,0 +1,21 @@
+exit: 0
+---
+7 x bracket bracket comma xx...
+word: true false
+either: 3 3
+digit: 0 1 7
+raw: {"a": [1, 2]} \n stays
+two
+lines
+no newline, then more
+["a", "b", ]
+0,1,4,9,
+0,1,2,
+5,6,2,
+order: 341
+expect: 3 1
+true
+line: first
+rest: 12 bytes: second
+third
+after: 0

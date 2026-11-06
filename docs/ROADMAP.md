@@ -300,3 +300,31 @@ green and the interpreter and native backend agreeing on every program in `tests
 - [x] A corpus program on both backends with the leak check; native peak is tested from real
   heap numbers (two big arrays in turn peak at one, in seven shapes of last read); across the
   corpus peak falls 5%, place_moves.anv's by half (262,240 to 131,229 bytes)
+
+## M37: Proving ground (v0.38)
+- [x] Three fresh agents, given only the v0.37 binary, wrote a JSON query tool, a Lisp interpreter
+  and a warehouse simulation, each to a clean `verify --native`, and logged what cost them time
+- [x] Bugs: a crash on a byte-order mark or a wide character outside a string; an `allow contract`
+  called stale when its contract could not be checked at all; a native stack overflow ending the
+  program with no word (now the same panic as the interpreter's, in workers too)
+- [x] Names can be reused side by side (match arms, two loops); the only field of a variant takes
+  any name (`Some(x)`, `Err(_)`); one arm can name several variants (`A | B => { }`)
+- [x] `panic(message)`, whose branches need no test; `std.expect`; raw strings in backticks;
+  `print_raw`; `read_stdin`
+- [x] Hidden copies gone: `f(s) + x` appends, and an argument handed over is evaluated last, so
+  `xs = add(xs: xs, x: xs.len())` does not copy
+- [x] `mutate` runs mutants side by side, each only against the runs that enter its function, with
+  a step budget per run (the old one came from the last test alone, so a bigger test falsely
+  "noticed" every mutant), stops at the first that notices, and says how far it is on stderr
+- [x] Contracts tying arguments together are reached: if too few inputs pass `requires`, more try
+  small numbers within the arrays' lengths
+- [x] Files in `golden/` that belong to no program are found (all three agents misnamed the input
+  file and approved a run without it); `measure` takes arguments and `--input`; errors point at
+  `std` functions and at the line missing its `;`; `--help` is not an error
+
+## M38: Proving ground, second round (v0.39)
+- [ ] Fresh agents on new kinds of program, against the same log format, to see what the changes
+  saved and what is next
+- [ ] What the first round asked for and did not get: `for x in xs` handing elements out; `profile`
+  by line, and naming the statement that kept a second reference; `cost` on struct fields, one
+  generic instance, and log n; constants; `measure` without the interpreter's run

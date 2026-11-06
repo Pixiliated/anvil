@@ -19,11 +19,18 @@ use std::collections::HashMap;
 /// The standard library: modules written in Anvil and built into the compiler, imported as
 /// `import std.list.{map};` from any file. Their file names are `std/<name>.anv`.
 pub const STD_MODULES: &[(&str, &str)] = &[
+    ("expect", include_str!("../std/expect.anv")),
     ("list", include_str!("../std/list.anv")),
     ("math", include_str!("../std/math.anv")),
     ("set", include_str!("../std/set.anv")),
     ("text", include_str!("../std/text.anv")),
 ];
+
+/// The standard module with a public function of this name.
+pub fn std_module_with(name: &str) -> Option<&'static str> {
+    let has = |text: &str| text.contains(&format!("pub fn {name}(")) || text.contains(&format!("pub fn {name}["));
+    STD_MODULES.iter().find(|(_, text)| has(text)).map(|(n, _)| *n)
+}
 
 /// The source of a standard module from its file name (`std/list.anv`).
 pub fn std_source(file: &str) -> Option<&'static str> {

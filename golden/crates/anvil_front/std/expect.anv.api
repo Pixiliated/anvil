@@ -1,0 +1,2 @@
+fn expect[T](o: Option[T], why: str) -> T
+fn expect_ok[T, E](r: Result[T, E], why: str) -> T

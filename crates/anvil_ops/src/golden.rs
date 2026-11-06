@@ -70,6 +70,43 @@ impl Input {
     }
 }
 
+/// The files of the golden directory that belong to no project file, each with what is wrong.
+/// A wrongly named input is otherwise a program quietly run with none.
+pub fn orphans(project: &Project) -> Vec<String> {
+    fn walk(dir: &Path, out: &mut Vec<PathBuf>) {
+        let Ok(entries) = std::fs::read_dir(dir) else { return };
+        for entry in entries.flatten() {
+            let p = entry.path();
+            if p.is_dir() {
+                walk(&p, out);
+            } else {
+                out.push(p);
+            }
+        }
+    }
+    let dir = project.root.join(&project.golden_dir);
+    let mut found = Vec::new();
+    walk(&dir, &mut found);
+    found.sort();
+    let mut out = Vec::new();
+    for p in found {
+        let Ok(rel) = p.strip_prefix(&dir) else { continue };
+        let rel = rel.to_string_lossy().replace('\\', "/");
+        let Some((base, kind)) = rel.rsplit_once('.') else { continue };
+        if !matches!(kind, "out" | "in" | "usage" | "api") || project.files.iter().any(|f| f == base) {
+            continue;
+        }
+        let shown = format!("{}/{rel}", project.golden_dir);
+        let source = format!("{base}.anv");
+        out.push(if project.files.contains(&source) {
+            format!("{shown} is not read: for {source} it would be {}/{source}.{kind}", project.golden_dir)
+        } else {
+            format!("{shown} is not read: no project file is named {base}")
+        });
+    }
+    out
+}
+
 /// Where a program's input lives: `<golden dir>/<file>.in`.
 pub fn input_path(project: &Project, file: &str) -> PathBuf {
     project.root.join(&project.golden_dir).join(format!("{file}.in"))
@@ -199,23 +236,39 @@ pub fn interpret(
     root: &Path,
     input: &Input,
 ) -> Result<(Output, Counts), String> {
+    interpret_reaching(program, max_steps, root, input).map(|(out, counts, _)| (out, counts))
+}
+
+/// The functions a run entered, as (file, offset of the name).
+pub(crate) fn reached(program: &Program, rec: &Recorder) -> Vec<(String, usize)> {
+    let entered = program.funcs.iter().zip(&rec.funcs).filter(|(_, s)| s.calls > 0);
+    entered.map(|(f, _)| (program.modules[f.module].clone(), f.span.start)).collect()
+}
+
+/// `interpret`, and the functions the run entered.
+pub(crate) fn interpret_reaching(
+    program: Program,
+    max_steps: Option<u64>,
+    root: &Path,
+    input: &Input,
+) -> Result<(Output, Counts, Vec<(String, usize)>), String> {
     let mut ffi = crate::c_functions(&program)?;
     let (root, input) = (root.to_path_buf(), input.clone());
-    let (outcome, bytes, err, counts) = anvil_interp::run_on_big_stack(move || {
+    let (outcome, bytes, err, counts, entered) = anvil_interp::run_on_big_stack(move || {
         let mut buf = Vec::new();
         let mut err = Vec::new();
         let mut rec = Recorder::new(&program);
         let mut stdin = std::io::Cursor::new(input.stdin.as_slice());
         let host = crate::checked_host(&mut ffi, &root, &input.args, Some(&mut stdin), &mut err, &input.env);
         let o = anvil_interp::run_main_recorded(&program, &mut buf, max_steps, Some(&mut rec), host);
-        (o, buf, err, Counts::of(&rec))
+        (o, buf, err, Counts::of(&rec), reached(&program, &rec))
     });
     let stdout = String::from_utf8_lossy(&bytes).into_owned();
     let stderr = String::from_utf8_lossy(&err).into_owned();
     match outcome {
-        anvil_interp::Outcome::Exit(exit) => Ok((Output { exit, panic: None, stdout, stderr }, counts)),
+        anvil_interp::Outcome::Exit(exit) => Ok((Output { exit, panic: None, stdout, stderr }, counts, entered)),
         anvil_interp::Outcome::Panicked(m) => {
-            Ok((Output { exit: PANIC_EXIT_CODE, panic: Some(m), stdout, stderr }, counts))
+            Ok((Output { exit: PANIC_EXIT_CODE, panic: Some(m), stdout, stderr }, counts, entered))
         }
         anvil_interp::Outcome::OutOfSteps(n) => Err(anvil_interp::step_limit_message(n)),
     }

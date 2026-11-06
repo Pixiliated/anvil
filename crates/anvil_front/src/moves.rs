@@ -164,6 +164,10 @@ struct Occ {
     path: Vec<Seg>,
     read: bool,
     call: Option<String>,
+    /// The call this read is a whole argument of.
+    arg_of: Option<usize>,
+    /// The calls around this occurrence.
+    within: Vec<usize>,
 }
 
 /// What a read becomes.
@@ -236,14 +240,21 @@ fn place_indices_mut(e: &mut Expr) -> Vec<&mut Expr> {
     }
 }
 
+/// Where `occs` is: the call whose argument it is walking, and the calls around it.
+#[derive(Default)]
+struct OccWalk {
+    calls: usize,
+    within: Vec<usize>,
+}
+
 /// The locals `e` names and the places in them, in evaluation-independent walk order (the
 /// order `apply` visits them in).
-fn occs(e: &Expr, out: &mut Vec<Occ>, call: Option<&str>) {
+fn occs(e: &Expr, out: &mut Vec<Occ>, call: Option<&str>, arg_of: Option<usize>, walk: &mut OccWalk) {
     if let Some((local, path)) = place(e) {
         let call = call.filter(|_| costly(&e.ty)).map(str::to_string);
-        out.push(Occ { local, path, read: true, call });
+        out.push(Occ { local, path, read: true, call, arg_of, within: walk.within.clone() });
         for i in place_indices(e) {
-            occs(i, out, None);
+            occs(i, out, None, None, walk);
         }
         return;
     }
@@ -255,15 +266,27 @@ fn occs(e: &Expr, out: &mut Vec<Occ>, call: Option<&str>) {
             | ExprKind::MapRemove { path, .. } => segs(path),
             _ => Vec::new(),
         };
-        out.push(Occ { local, path, read: false, call: None });
+        out.push(Occ { local, path, read: false, call: None, arg_of: None, within: walk.within.clone() });
     }
     let site = match &e.kind {
         ExprKind::Call(_, _, site) | ExprKind::CallValue(_, _, site) => Some(site.as_str()),
         _ => None,
     };
-    for c in children(e) {
-        occs(c, out, site);
+    let Some(_) = site else {
+        for c in children(e) {
+            occs(c, out, None, None, walk);
+        }
+        return;
+    };
+    walk.calls += 1;
+    let id = walk.calls;
+    walk.within.push(id);
+    // What a function value is called through is read first, wherever its arguments go.
+    let callee = matches!(e.kind, ExprKind::CallValue(..));
+    for (i, c) in children(e).into_iter().enumerate() {
+        occs(c, out, site, (!callee || i > 0).then_some(id), walk);
     }
+    walk.within.pop();
 }
 
 /// Whether two places in one local can share a value: one is around the other, unless a field
@@ -403,8 +426,9 @@ impl Walk<'_> {
     /// overwrites whole, whose old value is then dead.
     fn leaf(&self, exprs: Vec<&mut Expr>, target: Option<(LocalId, Vec<Seg>)>, written: Option<LocalId>, after: &Live) {
         let mut all = Vec::new();
+        let mut walk = OccWalk::default();
         for e in &exprs {
-            occs(e, &mut all, None);
+            occs(e, &mut all, None, None, &mut walk);
         }
         let (acts, whys): (Vec<Act>, Vec<&'static str>) =
             (0..all.len()).map(|k| self.act(&all, k, target.as_ref(), written, after)).unzip();
@@ -440,8 +464,16 @@ impl Walk<'_> {
         }
         let l = o.local;
         let dead = !after.contains(&l) || written == Some(l);
-        let others: Vec<&[Seg]> =
-            all.iter().enumerate().filter(|(j, x)| *j != k && x.local == l).map(|(_, x)| &x.path[..]).collect();
+        // A whole argument handed over comes last (`ir::arg_comes_last`), so what the call's other
+        // arguments read of it has been read by then.
+        let last_in = o.arg_of.filter(|_| by_fields(&o.path));
+        let read_before = |x: &Occ| last_in.is_some_and(|c| x.read && x.arg_of != Some(c) && x.within.contains(&c));
+        let others: Vec<&[Seg]> = all
+            .iter()
+            .enumerate()
+            .filter(|(j, x)| *j != k && x.local == l && !read_before(x))
+            .map(|(_, x)| &x.path[..])
+            .collect();
         let target = target.filter(|(t, _)| *t == l).map(|(_, p)| &p[..]);
         let alone = others.is_empty() && target.is_none();
         let apart = others.iter().all(|p| !overlap(p, &o.path));
@@ -862,6 +894,22 @@ mod tests {
         assert!(moved(&src, "longer").is_empty());
     }
 
+    #[test]
+    fn an_argument_read_by_another_is_handed_over_last() {
+        let src = format!("{ADD}\nfn f(xs: [i64]) -> [i64] {{\n    return add(xs: xs, x: xs.len());\n}}\n");
+        assert_eq!(moved(&src, "f"), ["xs"]);
+        // Read again after the call, or by a call around it: it stays.
+        let src = format!(
+            "{ADD}\nfn pair(a: [i64], b: i64) -> i64 {{\n    return a.len() + b;\n}}\n\nfn f(xs: [i64]) -> i64 {{\n    return pair(a: add(xs: xs, x: 1), b: xs.len());\n}}\n"
+        );
+        assert!(!moved(&src, "f").contains(&"xs".to_string()), "{:?}", moved(&src, "f"));
+        // Named whole twice: one of the two would see the other's move.
+        let src = format!(
+            "fn same(a: [i64], b: [i64]) -> i64 {{\n    return a.len() + b.len();\n}}\n\nfn f(xs: [i64]) -> i64 {{\n    return same(a: xs, b: xs);\n}}\n"
+        );
+        assert!(moved(&src, "f").is_empty(), "{:?}", moved(&src, "f"));
+    }
+
     const BAG: &str = "struct Bag {\n    items: [i64],\n    n: i64,\n}\n";
 
     #[test]
@@ -890,14 +938,15 @@ mod tests {
 
     #[test]
     fn places_that_may_be_the_same_stay() {
-        // r[j] may be r[i]; c whole holds c.items; the element of a dead array is not taken.
+        // r[j] may be r[i]; the element of a dead array is not taken. c.items is taken: its other
+        // read comes first.
         let src = format!(
             "{ADD}\n{BAG}\nfn other(rows: [[i64]], i: i64, j: i64) -> [[i64]] {{\n    var r: [[i64]] = rows;\n    r[i] = add(xs: r[j], x: 0);\n    return r;\n}}\n\n\
              fn whole(b: Bag) -> i64 {{\n    var c: Bag = b;\n    c.items = add(xs: c.items, x: c.items.len());\n    return c.n;\n}}\n\n\
              fn first(rows: [[i64]]) -> [i64] {{\n    return rows[0];\n}}\n"
         );
         assert_eq!(moved(&src, "other"), ["rows", "j", "r"]);
-        assert_eq!(moved(&src, "whole"), ["b", "c.1"]);
+        assert_eq!(moved(&src, "whole"), ["b", "c.0", "c.1"]);
         assert_eq!(moved(&src, "first"), ["rows"]);
     }
 
@@ -918,7 +967,7 @@ mod tests {
         assert_eq!(
             handed,
             [
-                ("t.anv:13:20".to_string(), "b.items".to_string(), Some(super::NAMED_AGAIN)),
+                ("t.anv:13:20".to_string(), "b.items".to_string(), Some(super::READ_LATER)),
                 ("t.anv:15:12".to_string(), "r[j]".to_string(), Some(super::MAY_BE_WRITTEN)),
                 ("t.anv:16:20".to_string(), "r[0]".to_string(), Some(super::READ_LATER)),
             ]
@@ -928,11 +977,5 @@ mod tests {
         let p = crate::compile(&SourceFile::new("t.anv", src)).unwrap_or_else(|d| panic!("{d:?}"));
         let all: Vec<(&str, Option<&str>)> = p.handed.values().flatten().map(|k| (k.what.as_str(), k.kept)).collect();
         assert_eq!(all, [("xs", None)]);
-    }
-
-    #[test]
-    fn a_value_named_twice_in_a_statement_stays() {
-        let src = format!("{ADD}\nfn both(xs: [i64]) -> [i64] {{\n    return add(xs: xs, x: xs.len());\n}}\n");
-        assert!(moved(&src, "both").is_empty());
     }
 }

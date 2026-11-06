@@ -200,8 +200,9 @@ pub fn explain(code: &str) -> Option<&'static str> {
             "Duplicate definition. Each function, struct, unit, field, parameter and test name is declared once."
         }
         "E0202" => {
-            "Shadowing is not allowed. A name declared in a function cannot be declared again in that \
-                    function, even in an inner block. Pick a new, more specific name."
+            "Shadowing is not allowed. A name cannot be declared again while it is in scope, even in an \
+                    inner block. Blocks side by side, such as match arms or two loops, can each use a name. \
+                    Pick a new, more specific name."
         }
         "E0300" => {
             "Type mismatch. Anvil has no implicit conversions: i64 and f64 never mix, and integer literals \

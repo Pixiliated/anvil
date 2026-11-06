@@ -171,7 +171,13 @@ pub fn golden_approve(root: &Path, file: &str, max_steps: Option<u64>) -> Report
     json["ok"] = json!(true);
     json["golden"] = json!(path.display().to_string());
     json["change"] = json!(change);
-    ok(json, format!("approved {rel} ({change}):\n{}", out.to_text()))
+    // A misnamed input means this was just approved without it: say so here, not only in verify.
+    let stem = rel.strip_suffix(".anv").unwrap_or(&rel);
+    let lost: Vec<String> =
+        golden::orphans(&project).into_iter().filter(|m| m.contains(&format!("/{stem}."))).collect();
+    let note: String = lost.iter().map(|m| format!("note: {m}\n")).collect();
+    json["unread"] = json!(lost);
+    ok(json, format!("approved {rel} ({change}):\n{}{note}", out.to_text()))
 }
 
 /// Where a function or branch is declared: its file and the offset of its name (of its block's
@@ -380,9 +386,9 @@ fn contract_findings(
         let json = match result {
             Checked::Unchecked(why) => json!({ "function": name, "status": "unchecked", "why": why }),
             Checked::Held { checked, excluded, overflowed, beyond } => {
-                if allowed {
+                if allowed && checked > 0 {
                     add("allow", format!("`{name}` keeps its contract on every generated input, so its `allow contract` is stale: remove it"), at.clone());
-                } else if checked == 0 {
+                } else if !allowed && checked == 0 {
                     add(
                         "contract",
                         format!("`{name}` was checked on none of {} generated inputs ({excluded} outside its requires, {overflowed} overflowing i64, {beyond} bounded beyond what a check may run), so its contract went unchecked; test it, or write `allow contract \"why\"` before it", excluded + overflowed + beyond),
@@ -527,7 +533,7 @@ fn unreached(coverage: &[Coverage], files: &mut [Value], seen: &mut Vec<Seen>) {
             }
             for b in missed {
                 let message = format!(
-                    "{} in `{}` never runs in a test or a golden-checked main; take it in a test, or write `allow unreached \"why\"` before the function",
+                    "{} in `{}` never runs in a test or a golden-checked main; take it in a test, end it in panic(\"why\") if it must not run, or write `allow unreached \"why\"` before the function",
                     b.what, f.name
                 );
                 seen.push(Seen { file: c.file.clone(), check: "unreached".into(), message, at: b.at.clone() });
@@ -610,6 +616,9 @@ fn run_verify(root: &Path, native: bool, max_steps: Option<u64>) -> Result<Verif
     untested(&coverage, &mut files, &mut seen);
     unreached(&coverage, &mut files, &mut seen);
     api_findings(&project, &coverage, &mut files, &mut seen);
+    for message in golden::orphans(&project) {
+        seen.push(Seen { file: project.golden_dir.clone(), check: "golden".into(), message, at: String::new() });
+    }
     let mut record = Record::open(&project.root)?;
     let now = anvil_record::now_utc();
     let sync = record.sync(&seen, &now)?;
