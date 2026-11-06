@@ -2,7 +2,7 @@
 //! type, from a seeded generator, so the same test sees the same cases on every run; and
 //! smaller versions of a failing input, so a failure is reported with a small counterexample.
 
-use crate::Value;
+use crate::{Fields, Value};
 use anvil_front::ir::{Program, Ty, OPTION_NONE};
 use std::rc::Rc;
 
@@ -56,7 +56,7 @@ pub fn fit_numbers(inputs: &mut [Value]) {
     fn fit(v: &mut Value, limit: i64) {
         match v {
             Value::I64(n) => *n = n.rem_euclid(limit),
-            Value::Struct(fields) => fields.iter_mut().for_each(|f| fit(f, 8)),
+            Value::Struct(fields) => fields.make_mut().iter_mut().for_each(|f| fit(f, 8)),
             _ => {}
         }
     }
@@ -72,7 +72,7 @@ pub fn fit_lengths(inputs: &mut [Value]) {
         for v in values {
             match v {
                 Value::Array(a) => arrays.push(a),
-                Value::Struct(fields) => level(fields.iter_mut()),
+                Value::Struct(fields) => level(fields.make_mut().iter_mut()),
                 _ => {}
             }
         }
@@ -244,9 +244,9 @@ pub fn shrink(v: &Value, ty: &Ty, program: &Program) -> Vec<Value> {
             let types = &program.structs[*id].fields;
             for i in 0..fields.len() {
                 for smaller in shrink(&fields[i], &types[i].1, program) {
-                    let mut changed = fields.clone();
+                    let mut changed = fields.to_vec();
                     changed[i] = smaller;
-                    out.push(Value::Struct(changed));
+                    out.push(Value::Struct(changed.into()));
                 }
             }
         }
@@ -255,20 +255,20 @@ pub fn shrink(v: &Value, ty: &Ty, program: &Program) -> Vec<Value> {
             // Option: Some(x) can become None.
             let is_option = def.name.starts_with("Option[");
             if is_option && *tag != OPTION_NONE {
-                out.push(Value::Enum(OPTION_NONE, Vec::new()));
+                out.push(Value::Enum(OPTION_NONE, Fields::default()));
             }
             // An earlier variant without fields is simpler.
             for (k, v) in def.variants.iter().enumerate().take(*tag) {
                 if v.fields.is_empty() && !(is_option && k == OPTION_NONE) {
-                    out.push(Value::Enum(k, Vec::new()));
+                    out.push(Value::Enum(k, Fields::default()));
                 }
             }
             let types = &def.variants[*tag].fields;
             for i in 0..fields.len() {
                 for smaller in shrink(&fields[i], &types[i].1, program) {
-                    let mut changed = fields.clone();
+                    let mut changed = fields.to_vec();
                     changed[i] = smaller;
-                    out.push(Value::Enum(*tag, changed));
+                    out.push(Value::Enum(*tag, changed.into()));
                 }
             }
         }

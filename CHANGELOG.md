@@ -3,6 +3,13 @@
 Each version is one roadmap milestone (docs/ROADMAP.md); docs/DECISIONS.md says why things are
 the way they are.
 
+## 0.40.0
+- The interpreter is about three times faster, with the same counts. `mutate` runs only what runs the
+  mutated statement, and `verify` checks files side by side.
+- `mutate` says when no run runs a statement, apart from when none noticed.
+- A failed `assert` on arrays, structs and the like says what they were, in a test.
+- `s.find_from(t: x, at: i)`. A `testkit.anv` shares test helpers without being an API.
+
 ## 0.39.0
 - Three more fresh agents wrote real programs with v0.38; this release is what they and the first
   round asked for. They found no compiler bugs.

@@ -1,0 +1,37 @@
+// `s.find_from(t: x, at: i)` goes on from a byte offset, so a scan is one pass over the text.
+fn count(text: str, word: str) -> i64 {
+    var n: i64 = 0;
+    var at: i64 = 0;
+    while true {
+        let found: i64 = text.find_from(t: word, at: at) else {
+            break;
+        };
+        n = n + 1;
+        at = found + word.len();
+    }
+    return n;
+}
+
+fn main() uses io {
+    print(count(text: "a,b,,c", word: ","));
+    print(count(text: "é,é", word: "é"));
+    match "abc".find_from(t: "", at: 3) {
+        Some(at) => { print(at); }
+        None => { print("none"); }
+    }
+    match "abc".find_from(t: "abcd", at: 0) {
+        Some(at) => { print(at); }
+        None => { print("none"); }
+    }
+    let far: Option[i64] = "abc".find_from(t: "a", at: 4);
+    print(far == None);
+}
+
+test "from the start, from the middle, from the end" {
+    assert("abcabc".find_from(t: "c", at: 0) == Some(2));
+    assert("abcabc".find_from(t: "c", at: 3) == Some(5));
+    assert("abcabc".find_from(t: "c", at: 6) == None);
+    assert("abc".find_from(t: "", at: 1) == Some(1));
+    assert(count(text: "xx", word: "x") == 2);
+    assert(count(text: "", word: "x") == 0);
+}

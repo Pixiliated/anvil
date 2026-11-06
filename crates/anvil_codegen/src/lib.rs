@@ -104,6 +104,7 @@ const RUNTIME: &[(&str, &[Type], &[Type])] = &[
     ("anvil_print_raw", &[I], &[]),
     ("anvil_panic_at", &[I, I], &[]),
     ("anvil_panic_sides", &[I, I, I, I], &[]),
+    ("anvil_str_find_from", &[I, I, I, I], &[I]),
     ("anvil_read_stdin", &[], &[I]),
     ("anvil_print_i64", &[I, I], &[]),
     ("anvil_print_bool", &[I, I], &[]),
@@ -632,45 +633,6 @@ struct Gen<'a, 'b> {
 
 fn args(vals: &[Value]) -> Vec<BlockArg> {
     vals.iter().map(|v| BlockArg::Value(*v)).collect()
-}
-
-/// Whether evaluating `e` can change a local (only push and pop do).
-fn mutates(e: &Expr) -> bool {
-    let any = |es: &[Expr]| es.iter().any(mutates);
-    match &e.kind {
-        ExprKind::Push { .. } | ExprKind::Pop { .. } | ExprKind::MapSet { .. } | ExprKind::MapRemove { .. } => true,
-        ExprKind::Slice { base, from, to, .. } => mutates(base) || mutates(from) || mutates(to),
-        ExprKind::MapLit { entries, .. } => entries.iter().any(|(k, v)| mutates(k) || mutates(v)),
-        ExprKind::Int(_)
-        | ExprKind::Float(_)
-        | ExprKind::Bool(_)
-        | ExprKind::Str(_)
-        | ExprKind::Local(_)
-        | ExprKind::FnRef(_) => false,
-        // A move empties a local, and a take a place, that nothing read after it in its statement
-        // names.
-        ExprKind::Move(_) | ExprKind::Take { .. } => false,
-        ExprKind::CallValue(callee, es, _) => mutates(callee) || any(es),
-        ExprKind::Bits { l, r, .. } => mutates(l) || mutates(r),
-        ExprKind::BitNot(x) => mutates(x),
-        ExprKind::Closure { captures: es, .. } => any(es),
-        ExprKind::Field(x, _) | ExprKind::Not(x) | ExprKind::FNeg(x) | ExprKind::INeg { e: x, .. } => mutates(x),
-        ExprKind::Try { inner, .. } => mutates(inner),
-        ExprKind::Index { base, index, .. } => mutates(base) || mutates(index),
-        ExprKind::IArith { l, r, .. }
-        | ExprKind::FArith(_, l, r)
-        | ExprKind::Cmp(_, l, r)
-        | ExprKind::And(l, r)
-        | ExprKind::Or(l, r)
-        | ExprKind::StrConcat(l, r, _) => mutates(l) || mutates(r),
-        ExprKind::Cond { cond, then, otherwise, .. } => mutates(cond) || mutates(then) || mutates(otherwise),
-        ExprKind::Call(_, es, _)
-        | ExprKind::StructLit(_, es)
-        | ExprKind::ArrayLit(es)
-        | ExprKind::Interp(es)
-        | ExprKind::Builtin(_, es)
-        | ExprKind::Variant { fields: es, .. } => any(es),
-    }
 }
 
 impl<'a, 'b> Gen<'a, 'b> {
@@ -1401,7 +1363,7 @@ impl<'a, 'b> Gen<'a, 'b> {
                 }
                 self.enum_value(*enum_id, *variant, &given)
             }
-            ExprKind::Index { base, index, site } if base.ty == Ty::Bytes => {
+            ExprKind::Index { base, index, site, .. } if base.ty == Ty::Bytes => {
                 let (b, owned) = if mutates(index) { (self.expr(base), true) } else { self.borrow(base) };
                 let i = self.expr(index)[0];
                 let s = self.str_obj(site);
@@ -1431,7 +1393,7 @@ impl<'a, 'b> Gen<'a, 'b> {
                 let v = self.expr(x)[0];
                 vec![self.b.ins().bnot(v)]
             }
-            ExprKind::Index { base, index, site } => {
+            ExprKind::Index { base, index, site, .. } => {
                 // A borrowed array could be changed in place by a pop in the index expression.
                 let (arr, owned) = if mutates(index) { (self.expr(base), true) } else { self.borrow(base) };
                 let i = self.expr(index)[0];
@@ -2302,6 +2264,41 @@ impl<'a, 'b> Gen<'a, 'b> {
                     _ => self.b.ins().imul(a, c),
                 }];
             }
+            Builtin::StrFindFrom { site } => {
+                let s = self.expr(&bargs[0])[0];
+                let t = self.expr(&bargs[1])[0];
+                let at = self.expr(&bargs[2])[0];
+                let where_ = self.str_obj(site);
+                let r = self.call_rt("anvil_str_find_from", &[s, t, at, where_]).unwrap();
+                self.call_rt("anvil_release", &[s]);
+                self.call_rt("anvil_release", &[t]);
+                let Ty::Enum(eid) = ty else { unreachable!() };
+                let found = self.b.ins().icmp_imm_s(IntCC::SignedGreaterThanOrEqual, r, 0);
+                return self.option(*eid, found, |_| vec![r]);
+            }
+            Builtin::AssertCmp { message, op } if matches!(bargs[0].ty, Ty::Bytes) => {
+                let a = self.expr(&bargs[0])[0];
+                let c = self.expr(&bargs[1])[0];
+                let holds = self.scalar_cmp(*op, &Ty::Bytes, a, c);
+                self.call_rt("anvil_release", &[a]);
+                self.call_rt("anvil_release", &[c]);
+                let fail = self.b.ins().icmp_imm_s(IntCC::Equal, holds, 0);
+                self.panic_if(fail, message);
+                return Vec::new();
+            }
+            // Only the interpreter can write these, and it does so beside the panic.
+            Builtin::AssertCmp { message, op } if !matches!(bargs[0].ty, Ty::I64 | Ty::F64(_) | Ty::Bool | Ty::Str) => {
+                let ty = &bargs[0].ty;
+                let a = self.expr(&bargs[0]);
+                let c = self.expr(&bargs[1]);
+                let same = self.eq(ty, &a, &c);
+                let lay = self.layout(ty);
+                self.release(&lay, &a);
+                self.release(&lay, &c);
+                let fail = self.b.ins().icmp_imm_s(if *op == CmpOp::Eq { IntCC::Equal } else { IntCC::NotEqual }, same, 0);
+                self.panic_if(fail, message);
+                return Vec::new();
+            }
             Builtin::AssertCmp { message, op } => {
                 let ty = &bargs[0].ty;
                 let a = self.expr(&bargs[0])[0];
@@ -2472,6 +2469,7 @@ impl<'a, 'b> Gen<'a, 'b> {
             | Builtin::WrappingMul
             | Builtin::BitLen
             | Builtin::AssertCmp { .. }
+            | Builtin::StrFindFrom { .. }
             | Builtin::BytesOf { .. }
             | Builtin::ReadBytes
             | Builtin::WriteBytes

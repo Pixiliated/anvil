@@ -405,8 +405,9 @@ pub enum Builtin {
     Assert {
         message: String,
     },
-    /// `assert(a == b)` on numbers, booleans or text; args are the two sides, shown when it fails
-    /// (see `failed_sides`).
+    /// `assert(a == b)` and the like; args are the two sides. When it fails, numbers, booleans and
+    /// text are shown in the panic (see `failed_sides`); a test also says what other values were,
+    /// beside the panic, as only the interpreter can write them.
     AssertCmp {
         message: String,
         op: CmpOp,
@@ -434,6 +435,11 @@ pub enum Builtin {
     /// All keys in ascending order, or the values in the same order.
     MapKeys,
     MapValues,
+    /// `s.find_from(t: x, at: i)`: the first `x` at or after byte `i`, an Option of its byte offset;
+    /// panics naming `site` when `i` is outside 0..=len.
+    StrFindFrom {
+        site: String,
+    },
     /// str methods; args are the receiver and the other str. Find gives an Option of the byte offset.
     StrContains,
     StrFind,
@@ -592,6 +598,8 @@ pub enum ExprKind {
         base: Box<Expr>,
         index: Box<Expr>,
         site: String,
+        /// The index cannot change a local (see `mutates`), so when it is evaluated cannot be seen.
+        plain: bool,
     },
     /// `xs[from..to]` of an array or a str (byte offsets on character boundaries): a new value.
     Slice {
@@ -885,6 +893,9 @@ pub fn slice_message(from: i64, to: i64, len: i64, site: &str) -> String {
 pub fn slice_char_message(from: i64, to: i64, site: &str) -> String {
     format!("slice {from}..{to} splits a character at {site}")
 }
+pub fn find_from_message(at: i64, len: i64, site: &str) -> String {
+    format!("find from {at} out of bounds for length {len} at {site}")
+}
 pub fn split_message(site: &str) -> String {
     format!("split with an empty separator at {site}")
 }
@@ -1105,6 +1116,45 @@ pub fn failed_sides(message: &str, left: &str, right: &str, text: bool) -> Strin
         left.len(),
         right.len()
     )
+}
+
+/// Whether evaluating `e` can change a local (only push and pop do).
+pub fn mutates(e: &Expr) -> bool {
+    let any = |es: &[Expr]| es.iter().any(mutates);
+    match &e.kind {
+        ExprKind::Push { .. } | ExprKind::Pop { .. } | ExprKind::MapSet { .. } | ExprKind::MapRemove { .. } => true,
+        ExprKind::Slice { base, from, to, .. } => mutates(base) || mutates(from) || mutates(to),
+        ExprKind::MapLit { entries, .. } => entries.iter().any(|(k, v)| mutates(k) || mutates(v)),
+        ExprKind::Int(_)
+        | ExprKind::Float(_)
+        | ExprKind::Bool(_)
+        | ExprKind::Str(_)
+        | ExprKind::Local(_)
+        | ExprKind::FnRef(_) => false,
+        // A move empties a local, and a take a place, that nothing read after it in its statement
+        // names.
+        ExprKind::Move(_) | ExprKind::Take { .. } => false,
+        ExprKind::CallValue(callee, es, _) => mutates(callee) || any(es),
+        ExprKind::Bits { l, r, .. } => mutates(l) || mutates(r),
+        ExprKind::BitNot(x) => mutates(x),
+        ExprKind::Closure { captures: es, .. } => any(es),
+        ExprKind::Field(x, _) | ExprKind::Not(x) | ExprKind::FNeg(x) | ExprKind::INeg { e: x, .. } => mutates(x),
+        ExprKind::Try { inner, .. } => mutates(inner),
+        ExprKind::Index { base, index, .. } => mutates(base) || mutates(index),
+        ExprKind::IArith { l, r, .. }
+        | ExprKind::FArith(_, l, r)
+        | ExprKind::Cmp(_, l, r)
+        | ExprKind::And(l, r)
+        | ExprKind::Or(l, r)
+        | ExprKind::StrConcat(l, r, _) => mutates(l) || mutates(r),
+        ExprKind::Cond { cond, then, otherwise, .. } => mutates(cond) || mutates(then) || mutates(otherwise),
+        ExprKind::Call(_, es, _)
+        | ExprKind::StructLit(_, es)
+        | ExprKind::ArrayLit(es)
+        | ExprKind::Interp(es)
+        | ExprKind::Builtin(_, es)
+        | ExprKind::Variant { fields: es, .. } => any(es),
+    }
 }
 
 pub fn missing_key_message(site: &str) -> String {

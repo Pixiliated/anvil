@@ -31,6 +31,7 @@ use anvil_front::ir::{Program, PANIC_EXIT_CODE};
 use anvil_front::span::SourceFile;
 use anvil_interp::{FuncStats, Recorder};
 use serde_json::{json, Value};
+use std::collections::HashSet;
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -247,19 +248,18 @@ pub fn interpret(
     interpret_reaching(program, max_steps, root, input).map(|(out, counts, _)| (out, counts))
 }
 
-/// The functions a run entered, as (file, offset of the name).
-pub(crate) fn reached(program: &Program, rec: &Recorder) -> Vec<(String, usize)> {
-    let entered = program.funcs.iter().zip(&rec.funcs).filter(|(_, s)| s.calls > 0);
-    entered.map(|(f, _)| (program.modules[f.module].clone(), f.span.start)).collect()
+/// The lines of statements a run ran (`file:line`), for a program compiled with its lines.
+pub(crate) fn lines_run(program: &Program, rec: &Recorder) -> HashSet<String> {
+    program.lines.iter().zip(&rec.lines).filter(|(_, n)| n[0] > 0).map(|(at, _)| at.clone()).collect()
 }
 
-/// `interpret`, and the functions the run entered.
+/// `interpret`, and the lines the run ran.
 pub(crate) fn interpret_reaching(
     program: Program,
     max_steps: Option<u64>,
     root: &Path,
     input: &Input,
-) -> Result<(Output, Counts, Vec<(String, usize)>), String> {
+) -> Result<(Output, Counts, HashSet<String>), String> {
     let mut ffi = crate::c_functions(&program)?;
     let (root, input) = (root.to_path_buf(), input.clone());
     let (outcome, bytes, err, counts, entered) = anvil_interp::run_on_big_stack(move || {
@@ -269,7 +269,7 @@ pub(crate) fn interpret_reaching(
         let mut stdin = std::io::Cursor::new(input.stdin.as_slice());
         let host = crate::checked_host(&mut ffi, &root, &input.args, Some(&mut stdin), &mut err, &input.env);
         let o = anvil_interp::run_main_recorded(&program, &mut buf, max_steps, Some(&mut rec), host);
-        (o, buf, err, Counts::of(&rec), reached(&program, &rec))
+        (o, buf, err, Counts::of(&rec), lines_run(&program, &rec))
     });
     let stdout = String::from_utf8_lossy(&bytes).into_owned();
     let stderr = String::from_utf8_lossy(&err).into_owned();

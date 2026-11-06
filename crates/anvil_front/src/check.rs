@@ -89,6 +89,7 @@ pub const METHODS: &[(&str, &str, &str)] = &[
     ("str", "starts_with", "starts_with(t: str) -> bool"),
     ("str", "ends_with", "ends_with(t: str) -> bool"),
     ("str", "find", "find(t: str) -> Option[i64]"),
+    ("str", "find_from", "find_from(t: str, at: i64) -> Option[i64]"),
     ("str", "split", "split(sep: str) -> [str]"),
     ("str", "trim", "trim() -> str"),
     ("str", "parse_i64", "parse_i64() -> Option[i64]"),
@@ -3409,11 +3410,13 @@ impl<'a> Checker<'a> {
                 match x.ty.clone() {
                     Ty::Array(elem) => {
                         let site = self.site(e.span);
-                        (ExprKind::Index { base: Box::new(x), index: Box::new(i), site }, *elem)
+                        let plain = !mutates(&i);
+                        (ExprKind::Index { base: Box::new(x), index: Box::new(i), site, plain }, *elem)
                     }
                     Ty::Bytes => {
                         let site = self.site(e.span);
-                        (ExprKind::Index { base: Box::new(x), index: Box::new(i), site }, Ty::I64)
+                        let plain = !mutates(&i);
+                        (ExprKind::Index { base: Box::new(x), index: Box::new(i), site, plain }, Ty::I64)
                     }
                     Ty::Error => return Self::err_expr(),
                     other => {
@@ -4323,9 +4326,9 @@ impl<'a> Checker<'a> {
                     return bad(self, "bool");
                 }
                 let message = format!("assertion failed at {site}: {}", self.text(arg.span));
-                // A comparison of what `print` can write shows both sides when it fails.
+                // A comparison shows both sides when it fails.
                 if let ExprKind::Cmp(op, l, r) = &x.kind {
-                    if matches!(l.ty, Ty::I64 | Ty::F64(_) | Ty::Bool | Ty::Str) {
+                    if !matches!(l.ty, Ty::Param(_) | Ty::Error) {
                         let sides = vec![(**l).clone(), (**r).clone()];
                         return Expr { kind: ExprKind::Builtin(Builtin::AssertCmp { message, op: *op }, sides), ty: Ty::Void };
                     }
@@ -4746,7 +4749,7 @@ impl<'a> Checker<'a> {
         }
         // `set` and `replace` name their two arguments, like any call with two parameters; the
         // rest take one or none.
-        if m != "set" && m != "replace" {
+        if m != "set" && m != "replace" && m != "find_from" {
             for a in args {
                 if let Some(n) = &a.name {
                     self.err(Diagnostic::new("E0304", n.span, format!("`{m}` takes positional arguments")).fix1(
@@ -4764,7 +4767,7 @@ impl<'a> Checker<'a> {
             "push" | "remove" | "has" | "get" | "contains" | "find" | "starts_with" | "ends_with" | "split" | "xor"
             | "unsigned_shr" | "wrapping_add" | "wrapping_sub" | "wrapping_mul" | "join" | "fixed"
             | "parallel_map" => Some(1),
-            "replace" => Some(2),
+            "replace" | "find_from" => Some(2),
             _ => None,
         };
         if let Some(want) = want_args {
@@ -4802,6 +4805,19 @@ impl<'a> Checker<'a> {
             self.note_alloc(b, e.span, "`replace`");
             let builtin = Builtin::StrReplace { message: replace_message(&site) };
             return Expr { kind: ExprKind::Builtin(builtin, vals), ty: Ty::Str };
+        }
+        if let ("find_from", Ty::Str) = (m, &x.ty) {
+            let params = [("t".to_string(), Ty::Str), ("at".to_string(), Ty::I64)];
+            let ok = self.check_args("find_from", e.span, args, &params, None) == Some(true);
+            let mut vals = vec![x];
+            for (a, (_, want)) in args.iter().zip(&params) {
+                vals.push(self.expect(b, &a.value, want));
+            }
+            if !ok {
+                return Self::err_expr();
+            }
+            let ty = self.option_of(Ty::I64);
+            return Expr { kind: ExprKind::Builtin(Builtin::StrFindFrom { site }, vals), ty };
         }
         if let ("parallel_map", Ty::Array(elem)) = (m, &x.ty) {
             let elem = (**elem).clone();

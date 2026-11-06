@@ -286,11 +286,14 @@ fn verify_file(
         if let Some(m) = &r.failure {
             test_failures += 1;
             let inputs = r.inputs.as_ref().map(|i| format!(" for {i}")).unwrap_or_default();
-            add("test", format!("test \"{}\" fails{inputs}: {m}", r.name), String::new());
+            let sides = r.sides.as_ref().map(|s| format!("\n{s}")).unwrap_or_default();
+            add("test", format!("test \"{}\" fails{inputs}: {m}{sides}", r.name), String::new());
         }
     }
     let contracts = contract_findings(&program, &src, contracts, &mut add);
-    undocumented(&src, &mut add);
+    if !is_test_kit(file) {
+        undocumented(&src, &mut add);
+    }
     let g = golden::check_file(project, &src, program, native, max_steps);
     if g.failed() {
         add("golden", format!("{}: {}", g.status, g.detail.clone().unwrap_or_default()), String::new());
@@ -551,8 +554,15 @@ fn unreached(coverage: &[Coverage], files: &mut [Value], seen: &mut Vec<Seen>) {
 
 /// Every project file's public API against its approved one. A change that breaks its users
 /// names the project files whose programs include the file.
+/// Whether `file` is a test kit (`testkit.anv`, `testkit_board.anv`): helpers its tests share. What
+/// it makes `pub` is for them, not an API to document and approve.
+fn is_test_kit(file: &str) -> bool {
+    let name = file.rsplit('/').next().unwrap_or(file);
+    name == "testkit.anv" || name.starts_with("testkit_")
+}
+
 fn api_findings(project: &Project, coverage: &[Coverage], files: &mut [Value], seen: &mut Vec<Seen>) {
-    for f in &project.files {
+    for f in project.files.iter().filter(|f| !is_test_kit(f)) {
         let c = match crate::api::check(project, f) {
             Ok(c) => c,
             // A file that does not parse is already a finding of its own.
@@ -603,15 +613,45 @@ struct Verified {
     passed: bool,
 }
 
+/// What verifying one file found.
+type FileVerified = (Value, Option<Coverage>, Vec<Seen>);
+
+/// Verifies every file of the project, side by side, each result in the project's order. One at a
+/// time when a file has C functions, which may not expect threads.
+fn verify_files(project: &Project, native: bool, max_steps: Option<u64>) -> Vec<FileVerified> {
+    let has_c = project
+        .files
+        .iter()
+        .any(|f| std::fs::read_to_string(project.root.join(f)).is_ok_and(|t| t.contains("extern")));
+    let wanted = std::env::var("ANVIL_THREADS").ok().and_then(|v| v.parse::<usize>().ok());
+    let cores = std::thread::available_parallelism().map_or(1, |n| n.get());
+    let threads = if has_c { 1 } else { wanted.unwrap_or(cores).clamp(1, 8).min(project.files.len().max(1)) };
+    let next = std::sync::atomic::AtomicUsize::new(0);
+    let done: std::sync::Mutex<Vec<Option<FileVerified>>> =
+        std::sync::Mutex::new(project.files.iter().map(|_| None).collect());
+    std::thread::scope(|scope| {
+        for _ in 0..threads {
+            scope.spawn(|| loop {
+                let k = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                let Some(f) = project.files.get(k) else { break };
+                let mut seen = Vec::new();
+                let (v, c) = verify_file(project, f, native, max_steps, &mut seen);
+                done.lock().expect("a file's worker crashed")[k] = Some((v, c, seen));
+            });
+        }
+    });
+    done.into_inner().expect("a file's worker crashed").into_iter().map(|r| r.expect("every file ran")).collect()
+}
+
 fn run_verify(root: &Path, native: bool, max_steps: Option<u64>) -> Result<Verified, String> {
     let project = Project::discover(root)?;
     let mut seen = Vec::new();
     let mut coverage = Vec::new();
     let mut files: Vec<Value> = Vec::new();
-    for f in &project.files {
-        let (v, c) = verify_file(&project, f, native, max_steps, &mut seen);
+    for (v, c, s) in verify_files(&project, native, max_steps) {
         files.push(v);
         coverage.extend(c);
+        seen.extend(s);
     }
     // A test that stops early leaves what it would have run looking unrun: fix the tests first.
     let judged = !files.iter().any(|f| f["tests_failed"].as_i64().unwrap_or(0) > 0);

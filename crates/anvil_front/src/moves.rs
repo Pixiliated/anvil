@@ -363,7 +363,7 @@ fn take(e: &mut Expr) {
                 path.push(Step::Field(i));
                 cur = base.kind;
             }
-            ExprKind::Index { base, index, site } => {
+            ExprKind::Index { base, index, site, .. } => {
                 path.push(Step::Index { index: *index, site });
                 cur = base.kind;
             }

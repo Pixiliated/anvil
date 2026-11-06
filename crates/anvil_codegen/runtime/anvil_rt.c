@@ -743,6 +743,20 @@ int64_t anvil_str_find(const AnvStr *s, const AnvStr *t) {
     return -1;
 }
 
+int64_t anvil_str_find_from(const AnvStr *s, const AnvStr *t, int64_t at, const AnvStr *site) {
+    if (at < 0 || at > s->len) {
+        char buf[512];
+        int n = snprintf(buf, sizeof buf, "find from %lld out of bounds for length %lld at %.*s", (long long)at,
+                         (long long)s->len, (int)site->len, site->bytes);
+        if (n >= (int)sizeof buf) n = (int)sizeof buf - 1;
+        panic_bytes(buf, n);
+    }
+    for (int64_t i = at; i + t->len <= s->len; i++) {
+        if (memcmp(s->bytes + i, t->bytes, (size_t)t->len) == 0) return i;
+    }
+    return -1;
+}
+
 int64_t anvil_str_starts(const AnvStr *s, const AnvStr *t) {
     return t->len <= s->len && memcmp(s->bytes, t->bytes, (size_t)t->len) == 0;
 }

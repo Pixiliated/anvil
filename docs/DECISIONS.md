@@ -684,3 +684,23 @@ Short records of choices that are not obvious from the code. Newest last.
 - **Left out**: tuples (a struct says more, and no agent lost more than typing), `import as` and raw
   strings holding a backtick (one attempt each). Listed in M39 or waiting for a third report.
 
+## M39 (v0.40)
+
+- **The counts are the check**: an optimisation of the reference interpreter must not change what a
+  program does or what it is said to cost, so every approved step, byte and copy count had to stay
+  exactly as it was, on this repository and on the six agents' programs. That is what made it safe to
+  change how values are held.
+- **Faster, not a bytecode**: reading a field cloned the whole struct and a literal allocated its text
+  each time, so most of the cost was waste, not the tree walk. Three times faster for a few hundred
+  lines; a compiled form is the next step if the loop is still what agents complain of.
+- **Fields are shared until written**, as arrays were: a struct held in another value is read without
+  copying. Arrays inside count as shared exactly when they did, since writing unshares on the way down.
+- **Mutants need only what runs them**: a run that does not run the mutated statement goes as it did,
+  so it cannot notice. Verdicts were compared with the old way on all six programs: none differ. A
+  survivor nothing runs is told apart from one that was run and not noticed: they want different fixes.
+- **Values beside the panic**: writing any value natively would need a printer for each type, and the
+  panic text must agree on both backends. Tests run in the interpreter, which has one, so it adds them
+  beside the panic: where they are wanted, with the rule intact.
+- **`testkit.anv` by name**: a new visibility or `test fn` would be language for one lint's sake. A
+  file's name says what it is for, and its helpers still have to be tested.
+

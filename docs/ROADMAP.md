@@ -338,8 +338,17 @@ green and the interpreter and native backend agreeing on every program in `tests
   test declares effects
 
 ## M39: Speed of the loop (v0.40)
-- [ ] The interpreter, which every test, golden, `verify` and mutant runs on, is about 40 times
-  slower than native code: find out what it would take to cut that, and do the cheap part
-- [ ] What round two asked for and did not get: a failed `assert` showing arrays and structs; sharing
-  test helpers without publishing them; `find` from an offset and `char_at`; describing a valid struct
-  to the contract lint, so it need not be switched off; several goldens per program; tuples
+- [x] The interpreter, which every test, golden, `verify` and mutant runs on, is about three times
+  faster on six real programs, with every approved step, byte and copy count unchanged: reads in place
+  instead of copies, fields shared until written, frames used again, numbers and truth without going
+  through a value, and the common cases out of the one large function
+- [x] `mutate` runs only what runs the mutated statement, and says when nothing does
+- [x] `verify` checks files side by side
+- [x] A failed `assert` on arrays, structs and the like says what they were, in a test
+- [x] `s.find_from(t: x, at: i)`; a `testkit.anv` shares test helpers without being an API
+
+## M40: Proving ground, third round (v0.41)
+- [ ] Fresh agents on new kinds of program, against the same log format: do `let ... else`, `if`
+  values and constants get used, and is the loop faster for them?
+- [ ] What round two asked for and did not get: describing a valid struct to the contract lint, so it
+  need not be switched off; several goldens per program; tuples

@@ -35,7 +35,7 @@ fn every_listed_method_checks_with_its_signature() {
                     "fn(i64) -> i64" => "same".to_string(),
                     _ => "2".to_string(),
                 };
-                if *name == "set" || *name == "replace" {
+                if *name == "set" || *name == "replace" || *name == "find_from" {
                     format!("{pname}: {value}")
                 } else {
                     value

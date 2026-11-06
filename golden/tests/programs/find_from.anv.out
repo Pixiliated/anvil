@@ -1,0 +1,7 @@
+exit: 101
+panic: find from 4 out of bounds for length 3 at tests/programs/find_from.anv:26:28
+---
+3
+2
+3
+none

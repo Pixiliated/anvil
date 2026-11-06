@@ -28,6 +28,8 @@ pub(crate) struct Ran {
     /// None if it passed; the panic or step-limit message if not.
     pub failure: Option<String>,
     pub stopped: bool,
+    /// What a failed `assert` on arrays, structs and the like compared.
+    pub sides: Option<String>,
     pub output: String,
     /// What eprint wrote.
     pub errors: String,
@@ -73,6 +75,7 @@ pub(crate) fn run_one(
             property: !t.inputs.is_empty(),
             failure: None,
             stopped: false,
+            sides: None,
             output: String::new(),
             errors: String::new(),
             inputs: None,
@@ -87,7 +90,7 @@ pub(crate) fn run_one(
             let host = crate::checked_host(ffi, root, &[], None, &mut err, &[]);
             match anvil_interp::run_test_with(program, i, &[], &mut buf, max_steps, rec.as_deref_mut(), host) {
                 Ok(()) => {}
-                Err(TestFail::Panic(m)) => ran.failure = Some(m),
+                Err(TestFail::Panic(m, sides)) => (ran.failure, ran.sides) = (Some(m), sides),
                 Err(TestFail::Stopped(m)) => (ran.failure, ran.stopped) = (Some(m), true),
             }
             ran.output = String::from_utf8_lossy(&buf).into_owned();
@@ -293,6 +296,10 @@ pub fn test(
             v["panic"] = json!(m);
             v["output"] = json!(r.output);
             text.push_str(&format!("FAIL \"{}\": {m}\n", r.name));
+            if let Some(sides) = &r.sides {
+                v["sides"] = json!(sides);
+                text.push_str(&format!("{sides}\n"));
+            }
             if let (Some(inputs), Some(case)) = (&r.inputs, r.case) {
                 v["inputs"] = json!(inputs);
                 v["case"] = json!(case);

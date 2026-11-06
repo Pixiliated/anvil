@@ -1,7 +1,7 @@
 //! `anvil mutate FILE`: does anything notice when the code is wrong? Each mutant changes one
 //! thing in one function or constant of FILE (an operator, a literal, a call statement), and is run against
-//! the tests and goldens of FILE and of every project file that imports it that enter the mutated
-//! function; the others go as they did. A mutant nothing notices "survives": a test is missing,
+//! the tests and goldens of FILE and of every project file that imports it that run the mutated
+//! statement; the others go as they did. A mutant nothing notices "survives": a test is missing,
 //! or asserts too little. Some survivors change nothing a
 //! program can see (`a < b` for `a <= b` in a min); `allow mutants "why"` before the function or
 //! one statement says so, and is reported as stale when nothing in it survives.
@@ -13,7 +13,7 @@ use anvil_front::ast::{self, BinOp, Else, ExprKind, InterpPart, Item, StmtKind, 
 use anvil_front::ir::Program;
 use anvil_front::span::SourceFile;
 use serde_json::json;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Mutex;
@@ -28,12 +28,12 @@ struct Mutant {
     from: String,
     to: String,
     function: String,
-    /// Where its function is: from the name to the end of the body. `EVERYWHERE` for a constant,
+    /// The line of the statement it is in, as `Stmt::Line` has it. `EVERYWHERE` for a constant,
     /// which any run may read.
-    decl: (usize, usize),
+    line: usize,
 }
 
-const EVERYWHERE: (usize, usize) = (0, usize::MAX);
+const EVERYWHERE: usize = 0;
 
 /// The operator each one is mutated to: the one a slip of the hand or of thought gives.
 fn swap(op: BinOp) -> Option<BinOp> {
@@ -61,9 +61,10 @@ fn swap(op: BinOp) -> Option<BinOp> {
 
 /// Collects the mutants of the functions in a file, in source order.
 struct Sites<'a> {
+    src: &'a SourceFile,
     text: &'a str,
     function: String,
-    decl: (usize, usize),
+    line: usize,
     out: Vec<Mutant>,
     /// The statements with an `allow mutants`, as the spans of what they excuse.
     excused: Vec<(usize, usize)>,
@@ -72,13 +73,17 @@ struct Sites<'a> {
 impl Sites<'_> {
     fn add(&mut self, start: usize, end: usize, text: String, from: &str, to: &str) {
         let function = self.function.clone();
-        self.out.push(Mutant { start, end, text, from: from.into(), to: to.into(), function, decl: self.decl });
+        self.out.push(Mutant { start, end, text, from: from.into(), to: to.into(), function, line: self.line });
     }
 
     fn block(&mut self, b: &ast::Block) {
+        let around = self.line;
         for s in &b.stmts {
+            self.line = self.src.line_col(s.span.start).0;
             self.stmt(s);
         }
+        // An `else if` is on no line of its own: it runs as part of the `if` it follows.
+        self.line = around;
     }
 
     fn stmt(&mut self, s: &ast::Stmt) {
@@ -246,13 +251,14 @@ struct Found {
 
 /// The mutants of the file's functions and constants (of those in `only`).
 fn mutants(src: &SourceFile, file: &ast::File, only: Option<&[String]>) -> Found {
-    let mut sites = Sites { text: &src.text, function: String::new(), decl: (0, 0), out: Vec::new(), excused: Vec::new() };
+    let mut sites =
+        Sites { src, text: &src.text, function: String::new(), line: EVERYWHERE, out: Vec::new(), excused: Vec::new() };
     let mut allowed = Vec::new();
     for item in &file.items {
         if let Item::Const(c) = item {
             if only.is_none_or(|o| o.contains(&c.name.name)) {
                 sites.function = c.name.name.clone();
-                sites.decl = EVERYWHERE;
+                sites.line = EVERYWHERE;
                 sites.expr(&c.value);
             }
         }
@@ -271,7 +277,6 @@ fn mutants(src: &SourceFile, file: &ast::File, only: Option<&[String]>) -> Found
             allowed.push((name.clone(), d.name.span.start));
         }
         sites.function = name;
-        sites.decl = (d.name.span.start, d.body.span.end);
         sites.block(&d.body);
     }
     sites.out.sort_by_key(|m| (m.start, m.end));
@@ -282,14 +287,14 @@ fn mutants(src: &SourceFile, file: &ast::File, only: Option<&[String]>) -> Found
 struct Run {
     test: Option<usize>,
     steps: u64,
-    /// The functions it entered, as (file, offset of the name). A run that enters none of the
-    /// mutated function goes exactly as it did, so it cannot notice the mutant.
-    reached: Vec<(String, usize)>,
+    /// The lines of statements it ran (`file:line`). A run that does not run the mutated statement
+    /// goes exactly as it did, so it cannot notice the mutant.
+    lines: HashSet<String>,
 }
 
 impl Run {
-    fn sees(&self, file: &str, decl: (usize, usize)) -> bool {
-        decl == EVERYWHERE || self.reached.iter().any(|(f, at)| f == file && decl.0 <= *at && *at < decl.1)
+    fn sees(&self, file: &str, line: usize) -> bool {
+        line == EVERYWHERE || self.lines.contains(&format!("{file}:{line}"))
     }
 
     /// What a mutant may take here: ten times as many steps, so one that loops is noticed.
@@ -313,10 +318,10 @@ fn judge(
     target: &Target,
     program: Program,
     file: &str,
-    decl: (usize, usize),
+    line: usize,
     max_steps: Option<u64>,
 ) -> Result<Option<String>, String> {
-    let seeing: Vec<&Run> = target.runs.iter().filter(|r| r.sees(file, decl)).collect();
+    let seeing: Vec<&Run> = target.runs.iter().filter(|r| r.sees(file, line)).collect();
     let tests: Vec<(usize, u64)> =
         seeing.iter().filter_map(|r| r.test.map(|t| (t, r.budget(max_steps)))).collect();
     if !tests.is_empty() {
@@ -347,6 +352,15 @@ fn judge(
     Ok(None)
 }
 
+/// `compile`, with the lines of statements kept, to see which each run runs.
+fn compile_lines(files: Files, file: &str) -> Result<Program, String> {
+    let src = files.load(file).map_err(|r| r.json["error"].as_str().unwrap_or("").to_string())?;
+    match anvil_front::compile_lines(&src, &files.loader()) {
+        (_, Ok(p)) => Ok(p),
+        (_, Err(d)) => Err(format!("{} error(s), the first {}: {}", d.len(), d[0].code, d[0].message)),
+    }
+}
+
 fn compile(files: Files, file: &str) -> Result<Program, String> {
     let src = files.load(file).map_err(|r| r.json["error"].as_str().unwrap_or("").to_string())?;
     match anvil_front::compile_with(&src, &files.loader()) {
@@ -370,7 +384,7 @@ fn baseline(project: &Project, file: &str, program: Program) -> Result<Target, S
         for t in 0..p.tests.len() {
             let mut rec = anvil_interp::Recorder::new(&p);
             let r = crate::testing::run_one(&p, t, crate::PROPERTY_CASES, 0, None, Some(&mut rec), &mut ffi, &root);
-            let run = Run { test: Some(t), steps: rec.totals[0], reached: golden::reached(&p, &rec) };
+            let run = Run { test: Some(t), steps: rec.totals[0], lines: golden::lines_run(&p, &rec) };
             out.push((r.failure.map(|_| r.name), run));
         }
         out
@@ -383,11 +397,11 @@ fn baseline(project: &Project, file: &str, program: Program) -> Result<Target, S
         runs.push(run);
     }
     if let Some((want, input)) = &golden {
-        let (got, counts, reached) = golden::interpret_reaching(program, None, &project.root, input)?;
+        let (got, counts, lines) = golden::interpret_reaching(program, None, &project.root, input)?;
         if golden::difference(want, &got).is_some() {
             return Err(format!("{file} does not match its golden before any change; fix it first"));
         }
-        runs.push(Run { test: None, steps: counts.steps, reached });
+        runs.push(Run { test: None, steps: counts.steps, lines });
     }
     runs.sort_by_key(|r| r.steps);
     Ok(Target { file: file.to_string(), golden, runs })
@@ -398,6 +412,8 @@ fn baseline(project: &Project, file: &str, program: Program) -> Result<Target, S
 struct Verdict {
     status: &'static str,
     by: Option<String>,
+    /// Whether any run runs the statement it is in.
+    reached: bool,
 }
 
 /// Runs one mutant against the targets that can see it.
@@ -417,26 +433,27 @@ fn try_mutant(
     if let Ok(t) = anvil_front::fmt::format(&SourceFile::new(file.to_string(), changed.clone())) {
         changed = t;
     }
+    let reached = targets.iter().any(|t| t.runs.iter().any(|r| r.sees(file, m.line)));
     let open: HashMap<String, String> = [(file.to_string(), changed)].into();
     let files = Files { root: &project.root, open: Some(&open) };
     for t in targets {
         // Whether the file still compiles is always asked; another program only if it can tell.
-        if t.file != file && !t.runs.iter().any(|r| r.sees(file, m.decl)) {
+        if t.file != file && !t.runs.iter().any(|r| r.sees(file, m.line)) {
             continue;
         }
         let program = match compile(files, &t.file) {
             Ok(p) => p,
-            Err(_) if t.file == file => return Ok(Verdict { status: "invalid", by: None }),
+            Err(_) if t.file == file => return Ok(Verdict { status: "invalid", by: None, reached }),
             // It compiles alone but breaks an importer: that importer noticed.
             Err(e) => {
-                return Ok(Verdict { status: "killed", by: Some(format!("{} no longer compiles ({e})", t.file)) })
+                return Ok(Verdict { status: "killed", by: Some(format!("{} no longer compiles ({e})", t.file)), reached })
             }
         };
-        if let Some(what) = judge(project, t, program, file, m.decl, max_steps)? {
-            return Ok(Verdict { status: "killed", by: Some(what) });
+        if let Some(what) = judge(project, t, program, file, m.line, max_steps)? {
+            return Ok(Verdict { status: "killed", by: Some(what), reached });
         }
     }
-    Ok(Verdict { status: "survived", by: None })
+    Ok(Verdict { status: "survived", by: None, reached })
 }
 
 /// Workers for the mutants: `ANVIL_THREADS` or the machine's cores, at most 8 (each may hold what
@@ -488,7 +505,7 @@ pub fn mutate(root: &Path, file: &str, only: Option<&str>, max_steps: Option<u64
     }
     let mut programs = Vec::new();
     for f in &names {
-        let program = match compile(disk, f) {
+        let program = match compile_lines(disk, f) {
             Ok(p) => p,
             Err(e) => return Report::usage(format!("{f} does not compile before any change ({e}); fix it first")),
         };
@@ -564,13 +581,12 @@ pub fn mutate(root: &Path, file: &str, only: Option<&str>, max_steps: Option<u64
             "allowed" => allowed_to_survive += 1,
             _ => {
                 survived += 1;
-                text.push_str(&format!(
-                    "{file}:{l}:{c} survived: `{}` to `{}` in `{}`; no test or golden noticed\n",
-                    m.from, m.to, m.function
-                ));
+                let why = if v.reached { "no test or golden noticed" } else { "no test or golden runs this statement" };
+                text.push_str(&format!("{file}:{l}:{c} survived: `{}` to `{}` in `{}`; {why}\n", m.from, m.to, m.function));
             }
         }
         result["status"] = json!(status);
+        result["reached"] = json!(v.reached);
         if let Some(b) = v.by {
             result["by"] = json!(b);
         }

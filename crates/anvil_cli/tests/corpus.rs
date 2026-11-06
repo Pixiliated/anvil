@@ -2716,3 +2716,124 @@ test "stops early" {
     assert!(open.iter().all(|f| f["check"] != "unreached" && f["check"] != "untested"), "{v}");
     assert!(open.iter().any(|f| f["check"] == "test"), "{v}");
 }
+
+#[test]
+fn a_failed_assert_on_values_says_what_they_were_in_a_test() {
+    let p = hello_project("compared");
+    p.write(
+        "src/rows.anv",
+        r#"struct P {
+    name: str,
+    at: i64,
+}
+
+fn rows() -> [i64] {
+    return [1, 2, 3, 4, 5, 6, 7, 8, 9, 10];
+}
+
+fn point() -> P {
+    return P { name: "a", at: 1 };
+}
+
+test "arrays part" {
+    assert(rows() == [1, 2, 3, 4, 5, 6, 7, 8, 9, 11]);
+}
+
+test "arrays of two lengths" {
+    assert(rows()[0..2] == [1]);
+}
+
+test "structs" {
+    assert(point() == P { name: "b", at: 1 });
+}
+
+test "options" {
+    assert("a".find("b") == Some(1));
+}
+"#,
+    );
+    let out = String::from_utf8_lossy(&p.anvil(&["test", "src/rows.anv"]).stdout).to_string();
+    assert!(out.contains("first difference at element 9: 10 and 11"), "{out}");
+    assert!(out.contains("lengths 2 and 1"), "{out}");
+    assert!(out.contains("left:  P { name: \"a\", at: 1 }") || out.contains("left:  P"), "{out}");
+    assert!(out.contains("right: Some(1)"), "{out}");
+    // The panic itself is the same natively; the values are the interpreter's to add.
+    let v = json_of(&p.anvil(&["test", "src/rows.anv", "--native", "--json"]));
+    for t in v["tests"].as_array().unwrap() {
+        assert!(!t["panic"].as_str().unwrap().contains("disagree"), "{v}");
+        assert!(t["sides"].is_string(), "{v}");
+    }
+}
+
+#[test]
+fn a_test_kit_is_not_an_api() {
+    let p = hello_project("kit");
+    p.write(
+        "src/testkit.anv",
+        r#"pub fn doubled(x: i64) -> i64 {
+    return x * 2;
+}
+
+test "it doubles" {
+    assert(doubled(2) == 4);
+}
+"#,
+    );
+    p.write(
+        "src/uses.anv",
+        r#"import testkit.{doubled};
+
+fn one() -> i64 {
+    return 1;
+}
+
+test "with a helper" {
+    assert(doubled(one()) == 2);
+}
+"#,
+    );
+    let v = json_of(&p.anvil(&["verify", "--json"]));
+    let open = v["open"].as_array().unwrap();
+    assert!(open.iter().all(|f| f["file"] != "src/testkit.anv" || (f["check"] != "api" && f["check"] != "undocumented")), "{v}");
+}
+
+#[test]
+fn mutants_of_statements_no_run_runs_are_told_apart() {
+    let p = hello_project("notrun");
+    p.write(
+        "src/maths.anv",
+        r#"fn f(a: i64) -> i64 {
+    if a > 0 {
+        return a + 1;
+    }
+    return a * 2;
+}
+
+test "it" {
+    assert(f(-2) == -4);
+}
+"#,
+    );
+    let v = json_of(&p.anvil(&["mutate", "src/maths.anv", "--json"]));
+    let m = v["mutants"].as_array().unwrap();
+    let inside = m.iter().find(|x| x["from"] == "+").unwrap();
+    assert_eq!(inside["status"], "survived", "{v}");
+    assert_eq!(inside["reached"], false, "{v}");
+    let run = m.iter().find(|x| x["from"] == ">").unwrap();
+    assert_eq!(run["reached"], true, "{v}");
+    let out = String::from_utf8_lossy(&p.anvil(&["mutate", "src/maths.anv"]).stdout).to_string();
+    assert!(out.contains("no test or golden runs this statement"), "{out}");
+}
+
+#[test]
+fn verify_says_the_same_on_one_thread_and_on_many() {
+    let run = |threads: &str| {
+        let mut c = std::process::Command::new(env!("CARGO_BIN_EXE_anvil"));
+        c.args(["verify", "--json"]).env("ANVIL_THREADS", threads);
+        let v: serde_json::Value = serde_json::from_slice(&c.output().unwrap().stdout).unwrap();
+        let files: Vec<serde_json::Value> = v["files"].as_array().unwrap().clone();
+        (files, v["open"].clone())
+    };
+    let one = run("1");
+    assert_eq!(one, run("8"));
+}

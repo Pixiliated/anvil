@@ -1,4 +1,4 @@
-# Anvil language specification (v0.39)
+# Anvil language specification (v0.40)
 
 Anvil is a small, compiled, general-purpose language designed to be written mostly by AI agents
 and read by humans. Its rules aim at three things: one obvious way to write each thing, code
@@ -541,6 +541,7 @@ either bound falls inside a character (`"héllo"[0..2]`).
 | `s.contains(t)` | `bool` |
 | `s.starts_with(t)`, `s.ends_with(t)` | `bool` |
 | `s.find(t)` | `Option[i64]`: the byte offset of the first `t` (`Some(0)` for `""`) |
+| `s.find_from(t: x, at: i)` | the same, from byte `i` on, so a scan is one pass; panics when `i` is outside `0..=s.len()` |
 | `s.split(sep)` | `[str]`: the pieces between occurrences of `sep`, left to right; `"a,,b"` gives `["a", "", "b"]`, `""` gives `[""]`; an empty `sep` panics |
 | `s.trim()` | `str` without the spaces, tabs, `\r` and `\n` at either end |
 | `s.parse_i64()` | `Option[i64]`: `Some` for an optional `-` and one or more ASCII digits in range (`"007"` is 7); nothing else, so no `+`, `_` or spaces |
@@ -812,7 +813,7 @@ target's bounds are checked.
 | `exit(code)` | ends the program with the code (0..=255, else a panic); nothing after it runs, so it ends a function's path like `return`; in a test it is a failure; needs `uses io` |
 | `env(name)` | `Option[str]`: the environment variable; names starting `ANVIL_` are the runtime's and read as `None`; needs `uses io` |
 | `list_dir(path)` | `Result[[str], FileError]`: the names in the directory, sorted bytewise; needs `uses fs` |
-| `assert(cond)` | panics if `cond` is false. A comparison of numbers, booleans or text also shows both sides, text quoted and, when long, cut to where the sides first differ |
+| `assert(cond)` | panics if `cond` is false. A comparison of numbers, booleans or text also shows both sides, text quoted and, when long, cut to where the sides first differ. In a test, a comparison of anything else is written out beside the panic, and two arrays say where they part |
 | `sqrt(x)` | square root of an `f64`, halving the unit |
 | `abs(x)` | absolute value of `i64` (panics on `i64` minimum) or `f64` |
 | `to_f64(i)` | `i64` to dimensionless `f64` |
@@ -1007,8 +1008,10 @@ files = ["src/*.anv", "tools/report.anv"]   # `*` matches within one directory
 dir = "golden"                              # optional; this is the default
 ```
 
-Unknown keys, patterns that match nothing and files listed twice are errors. Project commands
-find `anvil.toml` in the current directory or above:
+Unknown keys, patterns that match nothing and files listed twice are errors. A file named
+`testkit.anv` or `testkit_*.anv` holds helpers that tests share: what it makes `pub` needs no doc
+comment and no approved API, though it is tested like any file. Project commands find `anvil.toml`
+in the current directory or above:
 
 ```
 anvil list                                  files: functions, tests, main, golden
@@ -1141,7 +1144,9 @@ steps the unchanged one took (or `--max-steps`), so a mutant that loops is notic
 unchanged files must pass first. A mutant is **killed** when a test fails, a golden differs,
 a run runs out of steps or an importer no longer compiles (the JSON's `by` says which),
 **invalid** when FILE no longer compiles, and otherwise it **survives**: a test is missing or
-asserts too little. Any survivor fails the command.
+asserts too little. Any survivor fails the command. Only the runs that run the mutated statement run
+again, as the others cannot notice; a survivor says whether any did (`reached` in the JSON), since
+a statement nothing runs needs a test, and one that runs needs a test that looks.
 
 Some survivors change nothing a program can see, like `<` for `<=` in a `min`, where both pick
 the same value when the two are equal. `allow mutants "reason"` before the function, or before one
