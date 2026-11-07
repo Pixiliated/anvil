@@ -219,6 +219,83 @@ impl Walk<'_> {
     }
 }
 
+/// Whether `s` might leave the loop's round it is part of, other than by a panic.
+fn might_leave(s: &Stmt) -> bool {
+    fn expr(e: &Expr) -> bool {
+        matches!(e.kind, ExprKind::Try { .. }) || children(e).into_iter().any(expr)
+    }
+    fn path(p: &[Step]) -> bool {
+        p.iter().any(|step| matches!(step, Step::Index { index, .. } if expr(index)))
+    }
+    fn block(b: &[Stmt]) -> bool {
+        b.iter().any(might_leave)
+    }
+    match s {
+        Stmt::Return(_) | Stmt::Break | Stmt::Continue => true,
+        Stmt::Let(_, e) | Stmt::Expr(e) => expr(e),
+        Stmt::Assign(_, p, e, _) => path(p) || expr(e),
+        Stmt::If(c, t, e) => expr(c) || block(t) || block(e),
+        Stmt::While(c, b) => expr(c) || block(b),
+        Stmt::For(_, start, end, b) => expr(start) || expr(end) || block(b),
+        Stmt::ForEach { iter, body, .. } => expr(iter) || block(body),
+        Stmt::Match { scrutinee, arms, .. } => expr(scrutinee) || arms.iter().any(|a| block(&a.body)),
+        Stmt::Drop(_) | Stmt::Reached(_) | Stmt::Line(_) => false,
+    }
+}
+
+/// The scalar of local `l` that `path` writes into, with the array's type, if it goes through an
+/// array that fields alone reach.
+fn written_array(program: &Program, types: &[Ty], l: LocalId, path: &[Step]) -> Option<(Key, Ty)> {
+    let (mut ty, mut start) = (&types[l], 0);
+    for step in path {
+        match step {
+            Step::Field(i) => {
+                let Ty::Struct(sid) = ty else { unreachable!("field of {ty:?}") };
+                start += crate::field_range(program, *sid, *i).0;
+                ty = &program.structs[*sid].fields[*i].1;
+            }
+            Step::Index { .. } => break,
+        }
+    }
+    matches!(ty, Ty::Array(_)).then(|| ((l, start), ty.clone()))
+}
+
+/// The arrays a round of a loop is sure to write, once it starts. The check for a second owner can
+/// come before the loop, where any copy it makes is one the first round would have made anyway.
+pub(crate) fn surely_written(program: &Program, types: &[Ty], body: &[Stmt]) -> Vec<(Key, Ty)> {
+    let mut out = Vec::new();
+    for s in body {
+        if might_leave(s) {
+            break;
+        }
+        let place = match s {
+            Stmt::Assign(l, path, _, _) if path.iter().any(|step| matches!(step, Step::Index { .. })) => Some((*l, path)),
+            Stmt::Expr(Expr { kind: ExprKind::Push { local, path, .. }, .. }) => Some((*local, path)),
+            _ => None,
+        };
+        if let Some((key, ty)) = place.and_then(|(l, path)| written_array(program, types, l, path)) {
+            if !out.iter().any(|(k, _)| *k == key) {
+                out.push((key, ty));
+            }
+        }
+    }
+    out
+}
+
+/// Whether evaluating `e` again straight away gives the same value and does nothing else.
+pub(crate) fn repeats(e: &Expr) -> bool {
+    let plain = match &e.kind {
+        ExprKind::Int(_) | ExprKind::Float(_) | ExprKind::Bool(_) | ExprKind::Local(_) | ExprKind::Field(..) => true,
+        ExprKind::And(..) | ExprKind::Or(..) | ExprKind::Not(_) | ExprKind::BitNot(_) | ExprKind::FNeg(_) | ExprKind::FArith(..) => true,
+        ExprKind::IArith { .. } | ExprKind::INeg { .. } | ExprKind::Bits { .. } => true,
+        ExprKind::Cmp(_, l, _) => matches!(l.ty, Ty::I64 | Ty::F64(_) | Ty::Bool),
+        ExprKind::Index { plain, .. } => *plain,
+        ExprKind::Builtin(Builtin::Len, _) => true,
+        _ => false,
+    };
+    plain && children(e).into_iter().all(repeats)
+}
+
 /// Whether a block always ends by leaving it: what follows is not reached through its end.
 pub(crate) fn leaves(stmts: &[Stmt]) -> bool {
     let last = stmts.iter().rev().find(|s| !matches!(s, Stmt::Line(_) | Stmt::Reached(_)));

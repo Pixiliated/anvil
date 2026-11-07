@@ -2058,6 +2058,49 @@ fn heap_of(p: &Scratch, src: &str) -> (u64, u64, u64) {
 }
 
 #[test]
+fn workers_out_of_stack_at_once_say_so_once() {
+    // They reach the end of their stacks together. It happened in 4% of runs, and 10% on a busy machine.
+    let p = hello_project("overflow_once");
+    p.write(
+        "src/deep.anv",
+        "fn deep(n: i64) -> i64 {\n    return 1 + deep(n + 1);\n}\n\nfn main() uses io {\n    var xs: [i64] = [];\n    for i in 0..64 {\n        xs.push(i);\n    }\n    print(xs.parallel_map(deep).len());\n}\n",
+    );
+    let exe = p.0.join(format!("deep{}", std::env::consts::EXE_SUFFIX));
+    assert!(p.anvil(&["build", "src/deep.anv", "--out", exe.to_str().unwrap()]).status.success());
+    for _ in 0..60 {
+        let o = Command::new(&exe).output().unwrap();
+        assert_eq!(o.status.code(), Some(101));
+        assert_eq!(String::from_utf8_lossy(&o.stderr).trim_end(), "panic: stack overflow: calls nested too deeply");
+    }
+}
+
+#[test]
+fn a_loop_copies_only_what_it_would_have_written() {
+    // The check for a second owner moves ahead of a loop only when the first round is sure to write.
+    let p = hello_project("owner_ahead");
+    let bytes = |round: &str| {
+        heap_of(&p, &format!("fn main() uses io {{\n    var xs: [i64] = [];\n    for i in 0..100000 {{\n        xs.push(i);\n    }}\n    var ys: [i64] = xs;\n{round}    print(\"{{xs[0]}} {{ys[0]}} {{ys.len()}}\");\n}}\n")).0
+    };
+    let none = bytes("    if xs[0] > 5 {\n        ys[0] = 1;\n    }\n");
+    let wrote = bytes("    for i in 0..3 {\n        ys[i] = 1;\n    }\n");
+    assert!(wrote >= none + 700_000, "a sure write copies once: {none} then {wrote}");
+    assert!(wrote <= none + 1_000_000, "a sure write copies once: {none} then {wrote}");
+    for (what, round) in [
+        ("no rounds", "    for i in 0..0 {\n        ys[0] = i;\n    }\n"),
+        ("backwards", "    for i in 5..2 {\n        ys[0] = i;\n    }\n"),
+        ("nothing to walk", "    let e: [i64] = [];\n    for x in e {\n        ys[0] = x;\n    }\n"),
+        ("a false condition", "    var n: i64 = 0;\n    while n > 0 {\n        ys[0] = n;\n        n = n - 1;\n    }\n"),
+        ("continue first", "    for i in 0..3 {\n        if i >= 0 {\n            continue;\n        }\n        ys[0] = i;\n    }\n"),
+        ("break first", "    for i in 0..3 {\n        if i >= 0 {\n            break;\n        }\n        ys[0] = i;\n    }\n"),
+        ("a write not taken", "    for i in 0..3 {\n        if i > 5 {\n            ys[0] = i;\n        }\n    }\n"),
+    ] {
+        // An empty array of its own is a few bytes; a copy would be hundreds of thousands.
+        let got = bytes(round);
+        assert!(got < none + 1000, "{what} made a copy: {none} then {got}");
+    }
+}
+
+#[test]
 fn native_memory_is_measured() {
     let p = hello_project("measure");
     const ADD: &str = "fn add(xs: [i64], x: i64) -> [i64] {\n    var ys: [i64] = xs;\n    ys.push(x);\n    return ys;\n}\n\n";
@@ -2843,7 +2886,7 @@ fn hot_says_where_a_compiled_programs_time_goes() {
     let p = hello_project("hot");
     p.write(
         "src/spin.anv",
-        "fn churn(xs: [i64], n: i64) -> i64 {\n    var ys: [i64] = xs;\n    var total: i64 = 0;\n    for i in 0..n {\n        ys[i % 4] = i;\n        total = total + ys[(i + 1) % 4] % 7;\n    }\n    return total;\n}\n\nfn main() uses io {\n    let xs: [i64] = [1, 2, 3, 4];\n    let n: i64 = args()[0].parse_i64() else {\n        panic(\"a number\");\n    };\n    print(\"{churn(xs: xs, n: n)} {xs[0]}\");\n}\n",
+        "fn churn(xs: [i64], n: i64) -> i64 {\n    var ys: [i64] = xs;\n    var total: i64 = 0;\n    for i in 0..n {\n        if i % 3 != 9 {\n            ys[i % 4] = i;\n        }\n        total = total + ys[(i + 1) % 4] % 7;\n    }\n    return total;\n}\n\nfn main() uses io {\n    let xs: [i64] = [1, 2, 3, 4];\n    let n: i64 = args()[0].parse_i64() else {\n        panic(\"a number\");\n    };\n    print(\"{churn(xs: xs, n: n)} {xs[0]}\");\n}\n",
     );
     let v = json_of(&p.anvil(&["hot", "--json", "src/spin.anv", "--", "200000000"]));
     assert_eq!(v["ok"], true, "{v}");
@@ -2869,6 +2912,57 @@ fn hot_says_where_a_compiled_programs_time_goes() {
     // A program that fails to compile says so, as any command does.
     p.write("src/broken.anv", "fn main() {\n    let x: i64 = \"text\";\n}\n");
     assert!(!p.anvil(&["hot", "src/broken.anv"]).status.success());
+}
+
+#[test]
+fn compare_says_which_program_is_faster_and_when_it_cannot_tell() {
+    let p = hello_project("compare");
+    // Rounds taken from the arguments unless named, and the same output whatever the count.
+    let source = |rounds: &str, end: &str| {
+        format!("fn main() uses io {{\n    let argv: [str] = args();\n    let n: i64 = {rounds};\n    var total: i64 = argv.len();\n    for i in 0..n {{\n        total = (total + i * i) % 1000003;\n    }}\n    print(\"{end} {{total >= 0}}\");\n}}\n")
+    };
+    p.write("src/short.anv", &source("60000000", "same"));
+    p.write("src/long.anv", &source("240000000", "same"));
+    p.write("src/other.anv", &source("60000000", "not the same"));
+    p.write("src/given.anv", &source("argv[0].parse_i64() else {\n        panic(\"a number\");\n    }", "same"));
+
+    // A difference far beyond the noise is called, and named by file.
+    let v = json_of(&p.anvil(&["compare", "--json", "src/long.anv", "src/short.anv", "--rounds", "3"]));
+    assert_eq!(v["ok"], true, "{v}");
+    assert_eq!(v["faster"], "b", "{v}");
+    assert!(v["ratio"].as_f64().unwrap() > 1.5, "{v}");
+    assert_eq!(v["same_output"], true, "{v}");
+    assert_eq!(v["a"]["seconds"].as_array().unwrap().len(), 3, "{v}");
+    assert!(v["a"]["min"].as_f64().unwrap() > v["b"]["min"].as_f64().unwrap(), "{v}");
+    let out = String::from_utf8_lossy(&p.anvil(&["compare", "src/short.anv", "src/long.anv", "--rounds", "3"]).stdout).to_string();
+    assert!(out.contains("src/short.anv is ") && out.contains("as fast as src/long.anv"), "{out}");
+
+    // A program against itself is no difference, and arguments reach it.
+    let v = json_of(&p.anvil(&["compare", "--json", "src/given.anv", "src/given.anv", "--rounds", "5", "--", "60000000"]));
+    assert_eq!(v["ok"], true, "{v}");
+    assert!(v["faster"].is_null(), "the same program was called faster: {v}");
+    assert!(v["ratio"].is_null(), "{v}");
+    assert!(v["a"]["min"].as_f64().unwrap() > 0.01, "the argument did not reach it: {v}");
+    assert!(v["noise"].as_f64().unwrap() >= 0.02, "{v}");
+
+    // Programs that print different things are not two ways of doing one job: loud, with the times.
+    let o = p.anvil(&["compare", "src/short.anv", "src/other.anv", "--rounds", "3"]);
+    assert!(!o.status.success());
+    let text = String::from_utf8_lossy(&o.stderr).to_string() + &String::from_utf8_lossy(&o.stdout);
+    assert!(text.contains("output differs") && text.contains("s at best"), "{text}");
+
+    // A run that does not end is stopped at the limit, as an error, and takes nothing else with it.
+    p.write("src/stuck.anv", &source("9000000000000", "same"));
+    let o = p.anvil(&["compare", "src/short.anv", "src/stuck.anv", "--rounds", "3", "--limit", "1"]);
+    assert!(!o.status.success());
+    let err = String::from_utf8_lossy(&o.stderr).to_string() + &String::from_utf8_lossy(&o.stdout);
+    assert!(err.contains("src/stuck.anv ran past the limit of 1 s"), "{err}");
+
+    // Bad requests say so.
+    assert!(!p.anvil(&["compare", "src/short.anv", "src/long.anv", "--rounds", "2"]).status.success());
+    assert!(!p.anvil(&["compare", "src/short.anv", "src/long.anv", "--limit", "0"]).status.success());
+    assert!(!p.anvil(&["compare", "src/short.anv"]).status.success());
+    assert!(!p.anvil(&["compare", "src/short.anv", "src/absent.anv"]).status.success());
 }
 
 #[test]

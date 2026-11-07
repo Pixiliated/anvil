@@ -372,7 +372,16 @@ takes the next layer of cost out of plain code.
 - [x] Small arrays made at their full size are one allocation, with their elements beside their header
 - [x] A file is read straight into its text, at its known size
 
-## M42: Proving ground, third round (v0.43)
+## M42: Run speed, third pass (v0.43)
+Fewer checks repeated round after round, and a way for agents to tell a real gain from a lucky run.
+- [x] A loop sure to write an array checks for a second owner once, before it starts, and copies only
+  what its first round would have copied
+- [x] A map finds the key it just found without hashing it again
+- [x] `anvil compare A B`: which of two programs runs faster, on one fast core, and whether that is more
+  than the runs move on their own; output must match
+- [x] Workers running out of stack at once report it once
+
+## M43: Proving ground, third round (v0.44)
 - [ ] Fresh agents on new kinds of program, against the same log format: do `let ... else`, `if`
   values and constants get used, and is the loop faster for them?
 - [ ] What round two asked for and did not get: describing a valid struct to the contract lint, so it

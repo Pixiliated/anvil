@@ -239,6 +239,23 @@ pub struct MeasureArgs {
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct CompareArgs {
+    /// One program, relative to the server's root or absolute.
+    pub a: String,
+    /// The program to compare it with.
+    pub b: String,
+    /// How many times to time each, at least 3 (default 7).
+    pub rounds: Option<u64>,
+    /// Stop a run that takes longer than this many seconds, as an error (default 600).
+    pub limit: Option<u64>,
+    /// A file whose bytes are main's stdin (default: what a's golden input says).
+    pub input: Option<String>,
+    /// main's command-line arguments (default: what a's golden input says).
+    pub args: Option<Vec<String>>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
 pub struct ProfileArgs {
     /// Path of the .anv file, relative to the server's root or absolute.
     pub file: String,
@@ -551,6 +568,18 @@ impl AnvilServer {
         self.op(move |root| {
             let input = program_input(a.args, a.input);
             anvil_ops::hot(root, &a.file, &input)
+        })
+        .await
+    }
+
+    #[tool(description = "Which of two programs runs faster, measured so it can be trusted: each is built and \
+        run in turn on one fast core, and the time charged to it compared. `faster` is `a`, `b`, or null when \
+        the difference is no more than `noise`, what these runs move by on their own. Output or exit codes \
+        that differ between the two are a tool error, as they are then not doing the same work.")]
+    async fn compare(&self, Parameters(a): Parameters<CompareArgs>) -> Result<CallToolResult, ErrorData> {
+        self.op(move |root| {
+            let input = program_input(a.args, a.input);
+            anvil_ops::compare(root, &a.a, &a.b, a.rounds, a.limit, &input)
         })
         .await
     }

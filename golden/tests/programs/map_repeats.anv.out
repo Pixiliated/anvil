@@ -1,0 +1,33 @@
+exit: 0
+---
+set: 20 20
+set: 999 100
+remove: 20 true
+remove: -1 false 99
+remove: 5 true 100
+remove: 30 30
+remove: -1 31 99
+moves: 50
+moves: 50 -1
+moves: 50 2
+moves: 99
+moves: 99 9
+moves: -1 8
+miss: -1 -1 -1
+miss: 8 8
+zero: -1 -1
+zero: 77 77
+copy: 5
+copy: 5
+copy: 5 -1 6 400
+text: 49 49
+text: 500 100
+text: -1 -1 99
+text: 600 50 a first
+over: 99 false
+over: -1 98
+over: 50 key0 50
+over: -1 51 97
+over: 97 0
+reused: 398000 0
+loop: 20 20 24

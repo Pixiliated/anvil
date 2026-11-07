@@ -3,6 +3,16 @@
 Each version is one roadmap milestone (docs/ROADMAP.md); docs/DECISIONS.md says why things are
 the way they are.
 
+## 0.43.0
+- `anvil compare A B [-- ARGS]`: which of two programs runs faster, timed in turn on one fast core, and
+  named only when the difference is more than the runs move on their own. A program against itself says
+  no difference; output or exit codes that differ fail, with the times still shown.
+- Compiled programs are slightly faster: about 3% across the benchmark programs, against v0.42. Only one is
+  clearly faster, n-body written plainly, by 7% to 13%; the rest are within what runs move. Same memory.
+- A loop sure to write an array checks for a second owner once, before it starts. A map finds the key it
+  just found without hashing it again.
+- When several `parallel_map` workers ran out of stack at once, the panic could print twice.
+
 ## 0.42.0
 - `anvil hot FILE`: where a compiled program's time goes, by function and by what the runtime does,
   and which arrays a loop keeps checking.

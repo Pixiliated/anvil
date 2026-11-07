@@ -1,0 +1,178 @@
+// Past the size where maps find keys by hash, a map remembers where it last found a key. Whatever
+// happened to the map or the key since, it must answer as if it had looked again.
+
+fn at(m: Map[i64, i64], k: i64) -> i64 {
+    match m.get(k) {
+        Some(value: v) => { return v; }
+        None => { return -1; }
+    }
+}
+
+fn at_text(m: Map[str, i64], k: str) -> i64 {
+    match m.get(k) {
+        Some(value: v) => { return v; }
+        None => { return -1; }
+    }
+}
+
+fn numbers(n: i64) -> Map[i64, i64] {
+    var m: Map[i64, i64] = [:];
+    for i in 0..n {
+        m.set(key: i * 2, value: i);
+    }
+    return m;
+}
+
+fn texts(n: i64) -> Map[str, i64] {
+    var m: Map[str, i64] = [:];
+    for i in 0..n {
+        m.set(key: "key{i}", value: i);
+    }
+    return m;
+}
+
+fn set_after_get() uses io {
+    var m: Map[i64, i64] = numbers(100);
+    print("set: {at(m: m, k: 40)} {at(m: m, k: 40)}");
+    m.set(key: 40, value: 999);
+    print("set: {at(m: m, k: 40)} {m.len()}");
+}
+
+fn remove_after_get() uses io {
+    var m: Map[i64, i64] = numbers(100);
+    print("remove: {at(m: m, k: 40)} {m.has(40)}");
+    m.remove(40);
+    print("remove: {at(m: m, k: 40)} {m.has(40)} {m.len()}");
+    m.set(key: 40, value: 5);
+    print("remove: {at(m: m, k: 40)} {m.has(40)} {m.len()}");
+    // The key just found, then removed by the hash that finding it left behind.
+    print("remove: {at(m: m, k: 60)} {at(m: m, k: 60)}");
+    m.remove(60);
+    print("remove: {at(m: m, k: 60)} {at(m: m, k: 62)} {m.len()}");
+}
+
+fn places_move() uses io {
+    var m: Map[i64, i64] = numbers(100);
+    print("moves: {at(m: m, k: 100)}");
+    // Keys stay in order, so these shift the one just found.
+    m.set(key: -1, value: 1000);
+    print("moves: {at(m: m, k: 100)} {m.keys()[0]}");
+    m.remove(-1);
+    m.remove(0);
+    print("moves: {at(m: m, k: 100)} {m.keys()[0]}");
+    // The place remembered is now past the end.
+    print("moves: {at(m: m, k: 198)}");
+    for i in 0..90 {
+        m.remove(i * 2 + 2);
+    }
+    print("moves: {at(m: m, k: 198)} {m.len()}");
+    m.remove(198);
+    print("moves: {at(m: m, k: 198)} {m.len()}");
+}
+
+fn repeated_misses() uses io {
+    var m: Map[i64, i64] = numbers(100);
+    print("miss: {at(m: m, k: 41)} {at(m: m, k: 41)} {at(m: m, k: 41)}");
+    m.set(key: 41, value: 8);
+    print("miss: {at(m: m, k: 41)} {at(m: m, k: 41)}");
+    // A key of zero, which a map remembers nothing about when it is new.
+    var z: Map[i64, i64] = [:];
+    for i in 1..50 {
+        z.set(key: i, value: i);
+    }
+    print("zero: {at(m: z, k: 0)} {at(m: z, k: 0)}");
+    z.set(key: 0, value: 77);
+    print("zero: {at(m: z, k: 0)} {at(m: z, k: 0)}");
+}
+
+fn copies_part() uses io {
+    let m: Map[i64, i64] = numbers(100);
+    print("copy: {at(m: m, k: 10)}");
+    var c: Map[i64, i64] = m;
+    print("copy: {at(m: c, k: 10)}");
+    c.remove(10);
+    c.set(key: 12, value: 400);
+    print("copy: {at(m: m, k: 10)} {at(m: c, k: 10)} {at(m: m, k: 12)} {at(m: c, k: 12)}");
+}
+
+fn text_keys() uses io {
+    var m: Map[str, i64] = texts(100);
+    // The same text, as another object each time.
+    print("text: {at_text(m: m, k: "key{7 * 7}")} {at_text(m: m, k: "key{50 - 1}")}");
+    m.set(key: "key49", value: 500);
+    print("text: {at_text(m: m, k: "key{49}")} {m.len()}");
+    m.remove("key49");
+    print("text: {at_text(m: m, k: "key{49}")} {at_text(m: m, k: "key{49}")} {m.len()}");
+    m.set(key: "a first", value: 600);
+    print("text: {at_text(m: m, k: "a first")} {at_text(m: m, k: "key50")} {m.keys()[0]}");
+}
+
+// Removing moves the last key into the gap, and sorting moves them all: a new key object at the
+// old address may then be the key now at the remembered place.
+fn places_taken_over() uses io {
+    var m: Map[str, i64] = texts(100);
+    m.remove("key{10}");
+    print("over: {at_text(m: m, k: "key{99}")} {m.has("key{10}")}");
+    m.remove("key{99}");
+    print("over: {at_text(m: m, k: "key{99}")} {m.len()}");
+    print("over: {at_text(m: m, k: "key{50}")} {m.keys()[0]} {at_text(m: m, k: "key{50}")}");
+    m.remove("key{50}");
+    print("over: {at_text(m: m, k: "key{50}")} {at_text(m: m, k: "key{51}")} {m.len()}");
+    var gone: i64 = 0;
+    for i in 0..100 {
+        if m.has("key{i}") {
+            m.remove("key{i}");
+            gone = gone + 1;
+        }
+    }
+    print("over: {gone} {m.len()}");
+}
+
+// A looked-for key is freed at once, and the next one of the same size is likely to have its address.
+allow unreached "runs only if a map has gone wrong"
+fn addresses_reused() uses io {
+    let m: Map[str, i64] = texts(200);
+    var total: i64 = 0;
+    var wrong: i64 = 0;
+    for round in 0..4000 {
+        let i: i64 = round % 200;
+        let got: i64 = at_text(m: m, k: "key{i}");
+        total = total + got;
+        if got != i {
+            wrong = wrong + 1;
+        }
+        // Not in the map, and the same length as one that is.
+        if at_text(m: m, k: "kez{i}") != -1 {
+            wrong = wrong + 1;
+        }
+    }
+    print("reused: {total} {wrong}");
+}
+
+fn in_a_loop() uses io {
+    var counts: Map[i64, i64] = [:];
+    for i in 0..1000 {
+        let k: i64 = i % 40;
+        counts.set(key: k, value: at(m: counts, k: k) + 1);
+    }
+    var removed: i64 = 0;
+    for k in 0..40 {
+        if at(m: counts, k: k) == 24 && k % 2 == 0 {
+            counts.remove(k);
+            removed = removed + at(m: counts, k: k) + 2;
+        }
+    }
+    print("loop: {counts.len()} {removed} {at(m: counts, k: 1)}");
+}
+
+fn main() uses io {
+    set_after_get();
+    remove_after_get();
+    places_move();
+    repeated_misses();
+    copies_part();
+    text_keys();
+    places_taken_over();
+    addresses_reused();
+    in_a_loop();
+}

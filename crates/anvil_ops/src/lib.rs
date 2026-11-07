@@ -10,6 +10,7 @@ mod fuzz;
 pub mod golden;
 mod inspect;
 mod lsp;
+mod compare;
 mod hot;
 mod measure;
 mod mutate;
@@ -25,6 +26,7 @@ pub use docs::docs;
 pub use fuzz::{fuzz, program_for};
 pub use inspect::{profile, trace, TRACE_LIMIT};
 pub use lsp::lsp;
+pub use compare::compare;
 pub use hot::hot;
 pub use measure::measure;
 pub use mutate::mutate;
@@ -251,6 +253,16 @@ pub const COMMANDS: &[Command] = &[
         positionals: &["file", "args*"],
         options: &[INPUT],
         summary: "run a program natively and sample where its time goes: its functions and the runtime's work, and which arrays a loop keeps checking",
+    },
+    Command {
+        name: "compare",
+        positionals: &["a", "b", "args*"],
+        options: &[
+            ("rounds", "N", "how many times to time each, at least 3 (default 7)"),
+            ("limit", "SECONDS", "stop a run that takes longer than this, as an error (default 600)"),
+            INPUT,
+        ],
+        summary: "which of two programs runs faster: in turn, on one fast core, and only called a difference when it is more than the runs move on their own; output must match",
     },
     Command {
         name: "golden check",

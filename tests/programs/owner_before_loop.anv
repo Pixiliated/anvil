@@ -1,0 +1,276 @@
+// A loop that is sure to write an array checks for a second owner before it starts. Whoever else
+// holds the array must never see a write, and a loop that writes nothing must copy nothing.
+
+struct Bag {
+    items: [i64],
+    size: i64,
+}
+
+struct Tagged {
+    size: i64,
+    name: str,
+    items: [i64],
+}
+
+fn fresh(n: i64) -> [i64] {
+    var out: [i64] = [];
+    for i in 0..n {
+        out.push(i);
+    }
+    return out;
+}
+
+fn show(xs: [i64]) -> str {
+    var out: str = "";
+    for x in xs {
+        out = out + " {x}";
+    }
+    return out;
+}
+
+fn fill_param(xs: [i64]) -> [i64] {
+    var ys: [i64] = xs;
+    for i in 0..ys.len() {
+        ys[i] = ys[i] * 10;
+    }
+    return ys;
+}
+
+fn params_and_copies() uses io {
+    let a: [i64] = fresh(4);
+    let b: [i64] = fill_param(a);
+    print("param:{show(a)} /{show(b)}");
+    var c: [i64] = a;
+    for i in 0..2 {
+        c[i] = 50 + i;
+    }
+    print("copy:{show(a)} /{show(c)}");
+}
+
+fn while_loops() uses io {
+    let a: [i64] = fresh(3);
+    var b: [i64] = a;
+    var i: i64 = 0;
+    while i < 3 {
+        b[i] = 7;
+        i = i + 1;
+    }
+    print("while:{show(a)} /{show(b)}");
+    // The condition reads the array the loop writes.
+    var c: [i64] = a;
+    var j: i64 = 0;
+    while j < c.len() && c[j] < 2 {
+        c[j] = c[j] + 100;
+        j = j + 1;
+    }
+    print("reads:{show(a)} /{show(c)} {j}");
+}
+
+fn ticks(n: i64) -> bool uses io {
+    print("tick {n}");
+    return n < 2;
+}
+
+// A condition that does anything must not run an extra time to learn whether the loop will.
+fn conditions_run_once() uses io {
+    let a: [i64] = fresh(2);
+    var b: [i64] = a;
+    var i: i64 = 0;
+    while ticks(i) {
+        b[i] = 140;
+        i = i + 1;
+    }
+    print("ticks:{show(a)} /{show(b)}");
+}
+
+fn for_each_writes_another() uses io {
+    let a: [i64] = fresh(3);
+    var b: [i64] = a;
+    for x in a {
+        b[x] = x + 20;
+    }
+    print("foreach:{show(a)} /{show(b)}");
+}
+
+fn struct_fields() uses io {
+    let one: Bag = Bag { items: fresh(3), size: 3 };
+    var two: Bag = one;
+    for i in 0..two.size {
+        two.items[i] = 30 + i;
+    }
+    print("field:{show(one.items)} /{show(two.items)}");
+}
+
+// The array is not the first thing in the value.
+fn later_fields() uses io {
+    let one: Tagged = Tagged { size: 3, name: "one", items: fresh(3) };
+    var two: Tagged = one;
+    for i in 0..two.size {
+        two.items[i] = 150 + i;
+    }
+    print("later field: {one.size} {one.name}{show(one.items)} / {two.size} {two.name}{show(two.items)}");
+}
+
+allow unreached "these loops are here to not run: none of them may copy or write"
+fn no_rounds() uses io {
+    let a: [i64] = fresh(3);
+    var b: [i64] = a;
+    for i in 5..2 {
+        b[0] = i;
+    }
+    for i in 0..0 {
+        b[1] = i;
+    }
+    let none: [i64] = [];
+    for x in none {
+        b[2] = x;
+    }
+    var n: i64 = 0;
+    while n > 0 {
+        b[0] = 1;
+        n = n - 1;
+    }
+    print("none:{show(a)} /{show(b)}");
+}
+
+fn leaves_before_the_write() uses io {
+    let a: [i64] = fresh(3);
+    var b: [i64] = a;
+    for i in 0..3 {
+        if i >= 0 {
+            continue;
+        }
+        b[0] = i;
+    }
+    for i in 0..3 {
+        if i == 0 {
+            break;
+        }
+        b[1] = i;
+    }
+    print("leaves:{show(a)} /{show(b)}");
+    // A write after a round that continued still reaches only this array.
+    var c: [i64] = a;
+    for i in 0..3 {
+        if i == 0 {
+            continue;
+        }
+        c[i] = 40;
+    }
+    print("later:{show(a)} /{show(c)}");
+}
+
+fn shared_in_the_loop() uses io {
+    var a: [i64] = fresh(3);
+    var kept: [i64] = [];
+    for i in 0..3 {
+        a[0] = i + 1;
+        if i == 1 {
+            kept = a;
+        }
+        a[2] = 60 + i;
+    }
+    print("shared:{show(a)} /{show(kept)}");
+    // Shared once before the loop and again by each round, by another name.
+    var b: [i64] = fresh(2);
+    var c: [i64] = b;
+    for i in 0..2 {
+        b[i] = 70 + i;
+        c = b;
+        b[0] = 80 + i;
+    }
+    print("each:{show(b)} /{show(c)}");
+}
+
+fn replaced_in_the_loop() uses io {
+    let a: [i64] = fresh(2);
+    var b: [i64] = a;
+    for i in 0..3 {
+        b[0] = 90 + i;
+        if i == 1 {
+            b = a;
+        }
+    }
+    print("replaced:{show(a)} /{show(b)}");
+}
+
+fn reads_first() uses io {
+    let a: [i64] = fresh(3);
+    var b: [i64] = a;
+    var seen: i64 = 0;
+    for i in 0..3 {
+        seen = seen + b[i] + a[i];
+        b[i] = 100;
+        seen = seen + a[i];
+    }
+    print("first: {seen}{show(a)} /{show(b)}");
+}
+
+fn pushes() uses io {
+    let a: [i64] = fresh(2);
+    var b: [i64] = a;
+    for i in 0..3 {
+        b.push(i + 5);
+    }
+    print("push:{show(a)} /{show(b)}");
+    var c: [i64] = b;
+    var d: i64 = 0;
+    while d < 2 {
+        c.push(d);
+        d = d + 1;
+    }
+    print("push:{show(b)} /{show(c)}");
+}
+
+fn two_names_one_array() uses io {
+    var a: [i64] = fresh(3);
+    var b: [i64] = a;
+    for i in 0..3 {
+        a[i] = 110;
+        b[i] = 120;
+    }
+    print("names:{show(a)} /{show(b)}");
+}
+
+fn rows_inside_rows() uses io {
+    var rows: [[i64]] = [fresh(2), fresh(2)];
+    let held: [[i64]] = rows;
+    let row: [i64] = rows[1];
+    for i in 0..2 {
+        rows[1][i] = 130 + i;
+    }
+    print("rows:{show(held[1])} /{show(row)} /{show(rows[1])}");
+}
+
+fn nested() uses io {
+    let a: [i64] = fresh(2);
+    var b: [i64] = a;
+    var kept: [i64] = [];
+    for i in 0..2 {
+        for j in 0..2 {
+            b[j] = i * 10 + j;
+        }
+        if i == 0 {
+            kept = b;
+        }
+    }
+    print("nested:{show(a)} /{show(b)} /{show(kept)}");
+}
+
+fn main() uses io {
+    params_and_copies();
+    while_loops();
+    conditions_run_once();
+    for_each_writes_another();
+    struct_fields();
+    later_fields();
+    no_rounds();
+    leaves_before_the_write();
+    shared_in_the_loop();
+    replaced_in_the_loop();
+    reads_first();
+    pushes();
+    two_names_one_array();
+    rows_inside_rows();
+    nested();
+}

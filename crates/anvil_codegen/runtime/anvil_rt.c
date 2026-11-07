@@ -127,6 +127,8 @@ typedef struct {
     MapSlot *table;
     int64_t mask;
     uint32_t last_hash; /* of the key the last find on this map looked for */
+    int64_t last_key;   /* that key, and where it was: a `get` and then a `set` find one key twice */
+    int64_t last_at;
 } AnvMap;
 
 /* A function value: the layout of its captured values, its code, then the values. The code
@@ -607,6 +609,26 @@ typedef struct {
 
 static THREAD_LOCAL Job *current_job = NULL;
 
+/* Waits for the thread that is ending the program to end it. */
+static void park(void) {
+    for (;;) {
+#ifdef _WIN32
+        Sleep(0xFFFFFFFFul);
+#else
+        pause();
+#endif
+    }
+}
+
+/* Workers can run out of stack in the same moment: only the first says so. */
+static void end_alone(void) {
+    static int64_t ending = 0;
+    static THREAD_LOCAL int mine = 0;
+    if (mine) _Exit(ANVIL_PANIC_EXIT); /* failed while ending: say nothing more */
+    mine = 1;
+    if (ATOMIC_CAS(&ending, 0, 1) != 0) park();
+}
+
 /* A panic in a worker: keep it, and stop this thread here without unwinding (the program
  * panics once the other workers are done, with the panic of the smallest index). */
 static void worker_panic(const char *p, int64_t len) {
@@ -621,19 +643,14 @@ static void worker_panic(const char *p, int64_t len) {
     }
     current_job = NULL;
     ATOMIC_SET(&job->done, 1);
-    for (;;) {
-#ifdef _WIN32
-        Sleep(0xFFFFFFFFul);
-#else
-        pause();
-#endif
-    }
+    park();
 }
 
 /* ---- panics and exit ---- */
 
 static void panic_bytes(const char *p, int64_t len) {
     if (current_job) worker_panic(p, len);
+    end_alone();
     init_stdout();
     fflush(stdout);
     fputs("panic: ", stderr);
@@ -725,6 +742,7 @@ void anvil_panic_sides(const AnvStr *message, const AnvStr *left, const AnvStr *
 
 static void stack_overflow(void) {
     static const char text[] = "panic: stack overflow: calls nested too deeply\n";
+    end_alone();
     init_stdout();
     fflush(stdout);
     fwrite(text, 1, sizeof text - 1, stderr);
@@ -1105,6 +1123,8 @@ AnvArr *anvil_map_new(const AnvTypeInfo *ti, int64_t cap, int64_t key_is_str) {
     m->table = NULL;
     m->mask = 0;
     m->last_hash = 0;
+    m->last_key = 0;
+    m->last_at = INT64_MAX;
     return &m->a;
 }
 
@@ -1190,11 +1210,16 @@ int64_t anvil_map_find_i64(const AnvArr *a, int64_t key) {
     AnvMap *m = (AnvMap *)a;
     int64_t size = a->ti->elem_size;
     if (m->table) {
+        /* Keys are unique, so whatever else has happened, a key found at that place is the one. */
+        if (key == m->last_key && m->last_at < a->len && *(const int64_t *)(a->data + m->last_at * size) == key)
+            return m->last_at;
         uint32_t h = m->last_hash = hash_i64(key);
+        m->last_key = key;
+        m->last_at = INT64_MAX; /* a key not found has no place: last_hash is only theirs */
         for (int64_t i = (int64_t)h & m->mask;; i = (i + 1) & m->mask) {
             uint32_t where = m->table[i].where;
             if (!where) return -1;
-            if (m->table[i].hash == h && *(const int64_t *)(a->data + (int64_t)(where - 1) * size) == key) return where - 1;
+            if (m->table[i].hash == h && *(const int64_t *)(a->data + (int64_t)(where - 1) * size) == key) return m->last_at = where - 1;
         }
     }
     int64_t lo = 0, hi = a->len;
@@ -1212,12 +1237,17 @@ int64_t anvil_map_find_str(const AnvArr *a, const AnvStr *key) {
     AnvMap *m = (AnvMap *)a;
     int64_t size = a->ti->elem_size;
     if (m->table) {
+        /* The same object as last time, which may since be another text: the comparison decides. */
+        if ((int64_t)(intptr_t)key == m->last_key && m->last_at < a->len && anvil_str_eq(*(const AnvStr *const *)(a->data + m->last_at * size), key))
+            return m->last_at;
         uint32_t h = m->last_hash = hash_str(key);
+        m->last_key = (int64_t)(intptr_t)key;
+        m->last_at = INT64_MAX;
         for (int64_t i = (int64_t)h & m->mask;; i = (i + 1) & m->mask) {
             uint32_t where = m->table[i].where;
             if (!where) return -1;
             if (m->table[i].hash == h && anvil_str_eq(*(const AnvStr *const *)(a->data + (int64_t)(where - 1) * size), key))
-                return where - 1;
+                return m->last_at = where - 1;
         }
     }
     int64_t lo = 0, hi = a->len;
@@ -1297,6 +1327,7 @@ void anvil_map_remove_slot(AnvArr *a, int64_t pos) {
     }
     a->len = last;
     if (m->sorted > pos) m->sorted = pos;
+    m->last_at = INT64_MAX; /* another key is there now, and last_hash is not its hash */
 }
 
 static void sort_positions(const AnvMap *m, int64_t *order, int64_t *room, int64_t n) {
@@ -1319,6 +1350,7 @@ void anvil_map_settle(AnvArr *a) {
     while (s < n && (s == 0 || key_before(m, s - 1, s))) s++;
     m->sorted = n;
     if (s == n) return;
+    m->last_at = INT64_MAX; /* keys are about to change places */
     /* The new elements in order, then merged with the old ones. */
     int64_t t = n - s, size = a->ti->elem_size;
     int64_t *tail = xmalloc((size_t)(t * 2) * sizeof(int64_t));

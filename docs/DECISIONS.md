@@ -739,3 +739,22 @@ Short records of choices that are not obvious from the code. Newest last.
   now runs pinned to one fast core at high priority, with the core's other thread kept idle.
 - **Stdin is not sought.** Seeking discards what `read_line` left buffered: a golden caught it. Only a
   file just opened gets the size shortcut.
+- **A loop's sure writes check ownership ahead of it** (v0.43). If the first round is sure to write an
+  array, any copy would have happened anyway, so checking before the loop gives no program a copy it
+  would not have had. A write under an `if` or after a possible `continue` stays where it is, and so does
+  anything the loop shares or replaces, since a later round could then reach someone else's array.
+- **A map remembers the key it last found**, as a `get` and then a `set` find one key twice. The comparison
+  with the element decides, so a stale place or a reused address only misses. `last_hash` must be the
+  hash of the key at `last_at`, so removing and sorting forget the place.
+- **The register allocator is left alone.** Long-lived locals used in hot loops are spilled and reloaded at
+  each use, as regalloc2 weighs spills by the length of a range: this is the largest cost left in plain
+  code. Three ways to steer it from outside all lost: saving idle values around loops (no gain, fannkuch
+  0.90x), passing a loop's values through the stack (0.77x to 0.93x, matmul alone 1.10x), and new short
+  ranges from an opaque zero (0.97x overall, fannkuch 0.79x). The next try belongs in the allocator.
+- **One thread ends the program.** Workers overflow their stacks together, as they recurse alike, and each
+  printed the panic: 3% of runs, nearly 10% on a busy machine, seen as a golden that failed now and then.
+  The first thread to end it reports, and any other waits for the exit.
+- **`anvil compare` starts no helper process.** The script it replaces kept a core idle with one, which
+  outlived the script when a build failed and held its output pipe open: 3.5 hours of waiting for nothing.
+  An idle thread dies with the command, and every run has a time limit. Whether a difference counts comes
+  from the runs' own spread, so a program against itself says no difference.

@@ -1172,6 +1172,30 @@ impl<'a, 'b> Gen<'a, 'b> {
         }
     }
 
+    /// The arrays to give one owner before loop `s` with this `body`: those it is sure to write and
+    /// nothing in it shares or replaces.
+    fn owned_by_loop(&self, s: &Stmt, body: &[Stmt]) -> Vec<(unique::Key, Ty)> {
+        let changes = unique::changes(self.program, s);
+        let mut keys = unique::surely_written(self.program, &self.local_types, body);
+        keys.retain(|(key, _)| !changes.touched.contains(&key.0) && !self.known.unique.contains(key));
+        keys
+    }
+
+    /// Gives `keys` one owner if the loop is going to run, which `runs` says; the loop knows it.
+    fn own_before_loop(&mut self, keys: Vec<(unique::Key, Ty)>, runs: Value) {
+        let (first, go) = (self.b.create_block(), self.b.create_block());
+        self.b.ins().brif(runs, first, &[], go, &[]);
+        self.b.switch_to_block(first);
+        self.b.seal_block(first);
+        for ((l, start), ty) in keys {
+            self.own(&Loc::Vars(l, start, ty));
+            self.known.unique.insert((l, start));
+        }
+        self.b.ins().jump(go, &[]);
+        self.b.switch_to_block(go);
+        self.b.seal_block(go);
+    }
+
     /// What holds for the body of `for l in start..end`: a counter from a number not below 0 stays
     /// so; ending at an array's length, it is a good index of that array throughout.
     fn counter_facts(&mut self, s: &Stmt) {
@@ -1253,6 +1277,13 @@ impl<'a, 'b> Gen<'a, 'b> {
             Stmt::While(c, body) => {
                 // What the loop's body or condition learns need not hold when they have not run.
                 let known = self.known.clone();
+                let keys = if unique::repeats(c) { self.owned_by_loop(s, body) } else { Vec::new() };
+                if !keys.is_empty() {
+                    let runs = self.expr(c)[0];
+                    // What that evaluation learned is about this moment, not each round's.
+                    self.known = known.clone();
+                    self.own_before_loop(keys, runs);
+                }
                 let header = self.b.create_block();
                 let body_b = self.b.create_block();
                 let exit = self.b.create_block();
@@ -1277,6 +1308,11 @@ impl<'a, 'b> Gen<'a, 'b> {
                 let limit = self.b.declare_var(I);
                 self.b.def_var(limit, e0);
                 let known = self.known.clone();
+                let keys = self.owned_by_loop(s, body);
+                if !keys.is_empty() {
+                    let runs = self.b.ins().icmp(IntCC::SignedLessThan, s0, e0);
+                    self.own_before_loop(keys, runs);
+                }
                 self.counter_facts(s);
                 self.counted_loop(s0, limit, body, |g, i| {
                     g.b.def_var(g.vars[*l][0], i);
@@ -1296,6 +1332,11 @@ impl<'a, 'b> Gen<'a, 'b> {
                 let held = *held;
                 let var = *var;
                 let known = self.known.clone();
+                let keys = self.owned_by_loop(s, body);
+                if !keys.is_empty() {
+                    let runs = self.b.ins().icmp_imm_s(IntCC::SignedGreaterThan, len, 0);
+                    self.own_before_loop(keys, runs);
+                }
                 self.counted_loop(zero, limit, body, |g, i| {
                     // The snapshot in `held` is never written, so i < len is still in bounds.
                     let arr = g.b.use_var(g.vars[held][0]);
@@ -1515,6 +1556,11 @@ impl<'a, 'b> Gen<'a, 'b> {
                 self.known.unique.insert((*l, *start));
             }
         }
+        self.own(loc)
+    }
+
+    /// Gives the array stored at `loc` one owner, copying it if shared, and returns it.
+    fn own(&mut self, loc: &Loc) -> Value {
         let p = match loc {
             Loc::Vars(l, start, _) => self.b.use_var(self.vars[*l][*start]),
             Loc::Mem(addr, _) => self.b.ins().load(I, self.trusted, *addr, 0),

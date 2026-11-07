@@ -1026,6 +1026,8 @@ anvil measure [FILE]                        run programs natively: heap bytes, p
                                             and time, beside the interpreter's counts
 anvil hot FILE [-- ARGS]                    run a program natively and sample where its time
                                             goes, by function and by what the runtime does
+anvil compare A B [-- ARGS]                 which of two programs runs faster, and whether
+                                            that is more than the runs move on their own
 anvil verify [--native]                     check, test and golden-check every file;
                                             store the findings in the record
 anvil review [--native]                     verify, then write out/review.md for sign-off
@@ -1087,6 +1089,17 @@ could not prove they have one. The numbers differ from run to run and nothing co
 Windows only the main thread is sampled, so `parallel_map`'s workers show as waiting. `anvil profile`
 is the exact count, in the interpreter, of steps, bytes and copies; use `hot` first to see whether
 they are what costs.
+
+`anvil compare A B` says which of two programs runs faster, in a way that holds on a machine with
+other work and cores of different speeds, where separate timings can move by 2x. It builds both and
+runs each once untimed, to compare what they print and how they exit, then times them in turn on one
+logical processor of a fast core, at high priority on Windows, with the core's other one kept idle and
+one worker (`ANVIL_THREADS=1`), `--rounds` times (7 unless asked, at least 3). The time is what the system
+charged the process. A program is named as faster only when its best and its typical run both beat the
+other's by more than these runs move on their own, which is reported: at least 2%, and more for short
+runs, since Windows charges time in steps of about 16 ms, so give it an input that runs for a second or
+more. A run past `--limit` seconds (600 unless asked) is stopped, as an error. Output or exit codes that
+differ are a failure, with the times still shown, as the two are then not doing the same work.
 
 `anvil measure` builds a program (or every project file with a main) and runs it natively under
 its golden's input, with one `parallel_map` worker. It reports what the program's objects asked
