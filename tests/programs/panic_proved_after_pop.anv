@@ -1,0 +1,10 @@
+// A good index stops being one when the array gets shorter.
+fn main() uses io {
+    var a: [i64] = [1, 2, 3];
+    let i: i64 = 2;
+    print("{a[i]}");
+    let last: i64 = a.pop();
+    print("{last}");
+    print("{a[i]}");
+    print("{a.len()} {i}");
+}

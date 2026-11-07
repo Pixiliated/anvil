@@ -1,0 +1,9 @@
+// A new array in the local needs a new check.
+fn main() uses io {
+    var xs: [i64] = [1, 2, 3];
+    for i in 0..xs.len() {
+        print("{xs[i]}");
+        xs = [7];
+    }
+    print("{xs.len()}");
+}

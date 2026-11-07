@@ -1,0 +1,11 @@
+// A length kept in a local says nothing once the array is shorter.
+fn main() uses io {
+    var xs: [i64] = [1, 2, 3];
+    let n: i64 = xs.len();
+    let gone: i64 = xs.pop();
+    print("{gone}");
+    for i in 0..n {
+        print("{xs[i]}");
+    }
+    print("{xs.len()}");
+}

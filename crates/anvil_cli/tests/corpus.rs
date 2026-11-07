@@ -2837,3 +2837,61 @@ fn verify_says_the_same_on_one_thread_and_on_many() {
     let one = run("1");
     assert_eq!(one, run("8"));
 }
+
+#[test]
+fn hot_says_where_a_compiled_programs_time_goes() {
+    let p = hello_project("hot");
+    p.write(
+        "src/spin.anv",
+        "fn churn(xs: [i64], n: i64) -> i64 {\n    var ys: [i64] = xs;\n    var total: i64 = 0;\n    for i in 0..n {\n        ys[i % 4] = i;\n        total = total + ys[(i + 1) % 4] % 7;\n    }\n    return total;\n}\n\nfn main() uses io {\n    let xs: [i64] = [1, 2, 3, 4];\n    let n: i64 = args()[0].parse_i64() else {\n        panic(\"a number\");\n    };\n    print(\"{churn(xs: xs, n: n)} {xs[0]}\");\n}\n",
+    );
+    let v = json_of(&p.anvil(&["hot", "--json", "src/spin.anv", "--", "200000000"]));
+    assert_eq!(v["ok"], true, "{v}");
+    assert_eq!(v["exit"], 0, "{v}");
+    assert!(v["samples"].as_u64().unwrap() > 0, "{v}");
+    let rows = v["rows"].as_array().unwrap();
+    // `churn` may be compiled into `main`; either way the program's own code leads.
+    assert_eq!(rows[0]["kind"], "function", "{v}");
+    assert!(["churn", "main"].contains(&rows[0]["what"].as_str().unwrap()), "{v}");
+    assert!(rows[0]["percent"].as_f64().unwrap() > 50.0, "{v}");
+    let unproved = v["unproved"].as_array().unwrap();
+    assert!(unproved.iter().any(|n| n["local"] == "ys" && n["function"] == "churn"), "{v}");
+    let out = String::from_utf8_lossy(&p.anvil(&["hot", "src/spin.anv", "--", "20000000"]).stdout).to_string();
+    assert!(out.contains("samples over") && out.contains("`ys` in churn"), "{out}");
+    // Writing to a shared array shows as copying.
+    p.write(
+        "src/copies.anv",
+        "fn main() uses io {\n    var xs: [i64] = [];\n    for i in 0..4000 {\n        xs.push(i);\n    }\n    var total: i64 = 0;\n    for i in 0..40000 {\n        var ys: [i64] = xs;\n        ys[0] = i;\n        total = total + ys[0];\n    }\n    print(\"{total} {xs[0]}\");\n}\n",
+    );
+    let v = p.json(&["hot", "src/copies.anv"]);
+    let rows = v["rows"].as_array().unwrap();
+    assert!(rows.iter().any(|r| r["kind"] == "runtime" && r["what"] == "copying arrays and maps" || r["what"] == "copying and comparing bytes"), "{v}");
+    // A program that fails to compile says so, as any command does.
+    p.write("src/broken.anv", "fn main() {\n    let x: i64 = \"text\";\n}\n");
+    assert!(!p.anvil(&["hot", "src/broken.anv"]).status.success());
+}
+
+#[test]
+fn files_of_any_size_read_back_whole() {
+    // Text around the pools' largest block, and bytes that are not text, from disk and from stdin.
+    let p = hello_project("read_rest");
+    let body = "fn main() uses io, fs {\n    let argv: [str] = args();\n    let n: i64 = argv.len();\n    for i in 0..n {\n        match read_bytes(argv[i]) {\n            Ok(value: b) => { print(\"{b.len()} {b.hex().len()}\"); }\n            Err(error: _e) => { print(\"no {argv[i]}\"); }\n        }\n    }\n    let rest: bytes = read_stdin();\n    print(\"stdin {rest.len()}\");\n}\n";
+    p.write("src/reader.anv", body);
+    let names = ["a", "b", "c", "d", "e"];
+    let sizes = [0usize, 1, 975, 1200, 300_000];
+    for (n, s) in names.iter().zip(sizes) {
+        p.write(&format!("src/{n}.dat"), &"x".repeat(s));
+    }
+    let args: Vec<String> = names.iter().map(|n| format!("src/{n}.dat")).chain(["src/missing.dat".to_string()]).collect();
+    let mut cmd: Vec<&str> = vec!["run", "src/reader.anv", "--"];
+    cmd.extend(args.iter().map(String::as_str));
+    let ran = p.anvil(&cmd);
+    let interp = String::from_utf8_lossy(&ran.stdout).to_string();
+    assert!(interp.contains("300000 600000"), "{ran:?}");
+    let exe = p.0.join(format!("reader_out{}", std::env::consts::EXE_SUFFIX));
+    let built = p.anvil(&["build", "src/reader.anv", "--out", exe.to_str().unwrap()]);
+    assert!(built.status.success(), "{built:?}");
+    let run = std::process::Command::new(&exe).current_dir(&p.0).args(&args).env("ANVIL_CHECK_LEAKS", "1").stdin(std::process::Stdio::null()).output().unwrap();
+    assert_eq!(String::from_utf8_lossy(&run.stdout), interp, "{run:?}");
+    assert!(run.status.success(), "{run:?}");
+}

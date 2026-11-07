@@ -3,6 +3,15 @@
 Each version is one roadmap milestone (docs/ROADMAP.md); docs/DECISIONS.md says why things are
 the way they are.
 
+## 0.42.0
+- `anvil hot FILE`: where a compiled program's time goes, by function and by what the runtime does,
+  and which arrays a loop keeps checking.
+- Compiled programs use less memory where they make small arrays or read files, and most run a little
+  faster: about 5% across the benchmark programs, up to 16%, though matrix multiplication is 12% slower.
+  Peak memory fell 23% in the word count and 38% in the calculator.
+- Fewer bounds and overflow checks where they can be proved unnecessary, nothing checked differently where
+  they cannot. Small arrays are one allocation. Files are read without a second copy.
+
 ## 0.41.0
 - Compiled programs run faster, with the same output. On a benchmark of eight programs: from about 2.5x
   behind Rust to about 1.6x, and from 1.4x behind Java to a little ahead; allocation-heavy code is ahead

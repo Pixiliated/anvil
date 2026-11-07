@@ -1,0 +1,10 @@
+// A check in the right of && proves nothing after it.
+fn main() uses io {
+    let a: [i64] = [1, 2, 3];
+    let i: i64 = 9;
+    let look: bool = a.len() > 5;
+    let seen: bool = look && a[i] > 0;
+    print("{seen}");
+    print("{a[i]}");
+    print("{a.len()} {i}");
+}

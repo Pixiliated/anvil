@@ -1024,6 +1024,8 @@ anvil usage [FILE]                          each run's steps, bytes and copies a
 anvil usage approve [FILE]                  approve a file's usage (or every changed one)
 anvil measure [FILE]                        run programs natively: heap bytes, peak, objects
                                             and time, beside the interpreter's counts
+anvil hot FILE [-- ARGS]                    run a program natively and sample where its time
+                                            goes, by function and by what the runtime does
 anvil verify [--native]                     check, test and golden-check every file;
                                             store the findings in the record
 anvil review [--native]                     verify, then write out/review.md for sign-off
@@ -1074,6 +1076,17 @@ failing test, or a main whose golden does not match, is not measured (it is a fi
 own). `anvil usage approve FILE` stores the current numbers after the changes have been read;
 without a file it does so for every file whose usage changed, skipping those that cannot be
 measured.
+
+`anvil hot FILE` shows where a compiled program's time really goes. It builds the program and runs
+it natively (writes stay in memory), under its golden's input or the `--input` and arguments it is
+given, looking at where it is about every millisecond. It reports the share of each of its functions, and
+of what the runtime does for them: copying arrays and maps, making and freeing objects, maps, sorting,
+text, printing, files and the system. Small functions are compiled into their callers and show
+there. It lists the arrays that a loop checks for a second owner on every round, as the compiler
+could not prove they have one. The numbers differ from run to run and nothing compares them; on
+Windows only the main thread is sampled, so `parallel_map`'s workers show as waiting. `anvil profile`
+is the exact count, in the interpreter, of steps, bytes and copies; use `hot` first to see whether
+they are what costs.
 
 `anvil measure` builds a program (or every project file with a main) and runs it natively under
 its golden's input, with one `parallel_map` worker. It reports what the program's objects asked

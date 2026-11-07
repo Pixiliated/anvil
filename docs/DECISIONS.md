@@ -723,3 +723,19 @@ Short records of choices that are not obvious from the code. Newest last.
 - **Not done:** signed add and subtract still set a byte and test it, as Cranelift folds that only
   for multiply and unsigned add; no vectorizing, which is most of what is left on matrix code; spilling in
   very large functions.
+- **`anvil hot` samples the real run** (v0.42). `profile` is exact but counts steps in the interpreter,
+  and agents in the benchmark rebuilt and timed their way to speed: 54 tool calls for one ledger. So the
+  command names the program's functions and what the runtime does in plain words, with what to do about
+  it. Its numbers differ per run and nothing compares them, which is why it is not part of `measure`.
+- **Proofs are about locals, not values.** "This local is a good index of that array" is simple to keep
+  right around statements, arms and loops, by the same rules as one owner. Reasoning about `i + 1` or
+  `while i < n` would catch more and could be wrong in more ways.
+- **Loops do not read array lengths and storage ahead.** It was built, looked like 19% run after run, and
+  gave nothing once measured properly (none 1.059x, innermost 1.040x, all loops 1.050x against v0.41), as
+  the held values take registers from what is hotter. Removed. A checked access costs little on a wide
+  CPU: what is left is cache misses, chains of float additions, and locals the allocator keeps on the stack.
+- **Timing needs one fast core.** This CPU has fast and slow cores, and other work shares a core's second
+  thread, so even builds run in turn moved by 2x and agreed on a gain that was not there. A comparison
+  now runs pinned to one fast core at high priority, with the core's other thread kept idle.
+- **Stdin is not sought.** Seeking discards what `read_line` left buffered: a golden caught it. Only a
+  file just opened gets the size shortcut.

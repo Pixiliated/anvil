@@ -1,0 +1,144 @@
+// What a loop can leave out when it knows an array will not change under it.
+
+struct Grid {
+    cells: [i64],
+    width: i64,
+}
+
+fn fresh(n: i64) -> [i64] {
+    var out: [i64] = [];
+    for i in 0..n {
+        out.push(i);
+    }
+    return out;
+}
+
+fn read_while_another_writes() uses io {
+    let a: [i64] = fresh(3);
+    var b: [i64] = a;
+    var total: i64 = 0;
+    for i in 0..3 {
+        b[i] = 9;
+        total = total + a[i];
+    }
+    print("{total} {a[0]} {b[0]}");
+}
+
+fn written_after_a_copy_in_the_loop() uses io {
+    let a: [i64] = fresh(3);
+    var b: [i64] = a;
+    var total: i64 = 0;
+    for i in 0..b.len() {
+        total = total + b[i];
+        b[i] = i * 10;
+        total = total + b[i];
+    }
+    print("{total} {a[1]} {b[1]}");
+}
+
+fn grows_while_read() uses io {
+    var a: [i64] = fresh(2);
+    var i: i64 = 0;
+    while i < 6 {
+        a.push(a[i] + 1);
+        i = i + 1;
+    }
+    print("{a.len()} {a[7]}");
+}
+
+fn replaced_inside_a_loop() uses io {
+    var a: [i64] = fresh(3);
+    var total: i64 = 0;
+    for round in 0..3 {
+        for i in 0..a.len() {
+            total = total + a[i];
+        }
+        a = fresh(round + 1);
+    }
+    print("{total} {a.len()}");
+}
+
+fn shrinks_between_inner_loops() uses io {
+    var a: [i64] = fresh(5);
+    var total: i64 = 0;
+    while a.len() > 0 {
+        for i in 0..a.len() {
+            total = total + a[i];
+        }
+        total = total + a.pop();
+    }
+    print("{total}");
+}
+
+fn fields_of_a_struct() uses io {
+    var g: Grid = Grid { cells: fresh(6), width: 3 };
+    var total: i64 = 0;
+    for i in 0..g.cells.len() {
+        total = total + g.cells[i] * g.width;
+        g.cells[i] = total;
+    }
+    let kept: Grid = g;
+    for i in 0..g.cells.len() {
+        g.cells[i] = 0;
+    }
+    print("{total} {kept.cells[5]} {g.cells[5]}");
+}
+
+fn rows_of_rows() uses io {
+    var rows: [[i64]] = [fresh(2), fresh(3)];
+    let first: [i64] = rows[0];
+    var total: i64 = 0;
+    for r in 0..rows.len() {
+        for c in 0..rows[r].len() {
+            total = total + rows[r][c];
+            rows[r][c] = 7;
+        }
+    }
+    print("{total} {first[1]} {rows[0][1]}");
+    rows[0] = [rows[0][0] + 1];
+    print("{rows[0][0]} {rows[0].len()} {rows[rows.pop()[0] - 7].len()}");
+}
+
+fn text_bytes() uses io {
+    var b: bytes = "abc".to_bytes();
+    var total: i64 = 0;
+    for round in 0..2 {
+        for i in 0..b.len() {
+            total = total + b[i];
+        }
+        b = "z".to_bytes();
+        print("{round}");
+    }
+    print("{total}");
+}
+
+fn counters_at_their_edges() uses io {
+    for i in 0..2 {
+        print("{i - 1} {i + 1} {i - 5}");
+    }
+    let big: i64 = 9223372036854775807;
+    for i in big - 2..big {
+        print("{i + 1}");
+    }
+}
+
+fn numbers_on_the_right() uses io {
+    var x: i64 = 5;
+    x = x + 3;
+    x = x - 10;
+    let y: i64 = 3 + x;
+    print("{x} {y} {x + -4} {x - -4}");
+}
+
+fn main() uses io {
+    read_while_another_writes();
+    written_after_a_copy_in_the_loop();
+    grows_while_read();
+    replaced_inside_a_loop();
+    shrinks_between_inner_loops();
+    fields_of_a_struct();
+    rows_of_rows();
+    text_bytes();
+    counters_at_their_edges();
+    numbers_on_the_right();
+}

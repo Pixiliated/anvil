@@ -214,6 +214,17 @@ pub struct TraceArgs {
 
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
+pub struct HotArgs {
+    /// Path of the .anv file, relative to the server's root or absolute.
+    pub file: String,
+    /// A file whose bytes are main's stdin (default: what the golden's input says).
+    pub input: Option<String>,
+    /// main's command-line arguments (default: what the golden's input says).
+    pub args: Option<Vec<String>>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct MeasureArgs {
     /// One project file (default: every file with a main).
     pub file: Option<String>,
@@ -528,6 +539,18 @@ impl AnvilServer {
         self.op(move |root| {
             let input = program_input(a.args, a.input);
             anvil_ops::measure(root, a.file.as_deref(), Some(steps(a.max_steps)), &input, a.native_only.unwrap_or(false))
+        })
+        .await
+    }
+
+    #[tool(description = "Where a compiled program's time goes: it is built and run natively, sampled about \
+        every millisecond. Returns the share of each of its functions (small ones are compiled into their \
+        callers) and of the runtime's work, largest first, and which arrays a loop checks for a second \
+        owner on every round. Numbers differ from run to run; `profile` counts exactly, in the interpreter.")]
+    async fn hot(&self, Parameters(a): Parameters<HotArgs>) -> Result<CallToolResult, ErrorData> {
+        self.op(move |root| {
+            let input = program_input(a.args, a.input);
+            anvil_ops::hot(root, &a.file, &input)
         })
         .await
     }

@@ -1,0 +1,6 @@
+exit: 101
+panic: index 5 out of bounds for length 3 at tests/programs/panic_proved_one_arm.anv:6:13
+---
+2
+2
+3 1

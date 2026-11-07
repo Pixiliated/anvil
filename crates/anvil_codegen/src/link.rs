@@ -40,8 +40,9 @@ pub fn supported() -> Result<(), String> {
     Ok(())
 }
 
-/// `objects` are the compiled C files of extern functions (see `compile_c`).
-pub fn link_exe(object: &[u8], objects: &[PathBuf], out: &Path, work_dir: &Path) -> Result<(), String> {
+/// `objects` are the compiled C files of extern functions (see `compile_c`). With `map`, the
+/// linker also writes the addresses of the executable's symbols there (MSVC only).
+pub fn link_exe(object: &[u8], objects: &[PathBuf], out: &Path, work_dir: &Path, map: Option<&Path>) -> Result<(), String> {
     supported()?;
     std::fs::create_dir_all(work_dir).map_err(|e| format!("cannot create {}: {e}", work_dir.display()))?;
     let (obj_name, rt_name) =
@@ -55,6 +56,9 @@ pub fn link_exe(object: &[u8], objects: &[PathBuf], out: &Path, work_dir: &Path)
     let (mut cmd, name) =
         if cfg!(windows) { msvc(&obj_path, &rt_path, &out_abs)? } else { unix(&obj_path, &rt_path, &out_abs) };
     cmd.args(objects);
+    if let (Some(map), true) = (map, cfg!(windows)) {
+        cmd.arg(format!("/MAP:{}", map.display()));
+    }
     let output = cmd.output().map_err(|e| format!("cannot run {name}: {e}"))?;
     if !output.status.success() {
         return Err(format!(
@@ -65,6 +69,40 @@ pub fn link_exe(object: &[u8], objects: &[PathBuf], out: &Path, work_dir: &Path)
         ));
     }
     Ok(())
+}
+
+/// The executable's symbols, by address: from the linker's map on Windows, from `nm` elsewhere.
+pub fn symbols(exe: &Path, map: &Path) -> Result<Vec<(u64, String)>, String> {
+    let mut out = Vec::new();
+    if cfg!(windows) {
+        let text = std::fs::read(map).map_err(|e| format!("cannot read {}: {e}", map.display()))?;
+        for line in String::from_utf8_lossy(&text).lines() {
+            // ` 0001:00000010  name  0000000140001010 f   program.obj`
+            let mut words = line.split_whitespace();
+            let (Some(place), Some(name), Some(address)) = (words.next(), words.next(), words.next()) else { continue };
+            if !place.contains(':') || address.len() != 16 {
+                continue;
+            }
+            if let Ok(a) = u64::from_str_radix(address, 16) {
+                out.push((a, name.to_string()));
+            }
+        }
+    } else {
+        let listed = Command::new("nm").arg("-n").arg(exe).output().map_err(|e| format!("cannot run nm: {e}"))?;
+        if !listed.status.success() {
+            return Err(format!("nm failed on {}: {}", exe.display(), String::from_utf8_lossy(&listed.stderr)));
+        }
+        for line in String::from_utf8_lossy(&listed.stdout).lines() {
+            let words: Vec<&str> = line.split_whitespace().collect();
+            if let [address, _, name] = words[..] {
+                if let Ok(a) = u64::from_str_radix(address, 16) {
+                    out.push((a, name.to_string()));
+                }
+            }
+        }
+    }
+    out.sort();
+    Ok(out)
 }
 
 fn msvc(obj: &Path, rt: &Path, out: &Path) -> Result<(Command, String), String> {

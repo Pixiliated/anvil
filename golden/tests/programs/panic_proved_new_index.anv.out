@@ -1,0 +1,4 @@
+exit: 101
+panic: index 5 out of bounds for length 3 at tests/programs/panic_proved_new_index.anv:7:13
+---
+2

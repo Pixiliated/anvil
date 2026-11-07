@@ -1,0 +1,14 @@
+// A counter up to the length is no good index if the array shrinks inside the loop.
+fn main() uses io {
+    var xs: [i64] = [1, 2, 3, 4];
+    for i in 0..xs.len() {
+        print("{xs[i]}");
+        if i == 0 {
+            let a: i64 = xs.pop();
+            let b: i64 = xs.pop();
+            let c: i64 = xs.pop();
+            print("{a + b + c}");
+        }
+    }
+    print("{xs.len()}");
+}

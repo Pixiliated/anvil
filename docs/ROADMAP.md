@@ -360,7 +360,19 @@ slowest programs, and agents spending their effort working around that.
 - [x] Small functions are inlined
 - [x] `find`, `split` and turning integers into text are faster, and output goes out in larger pieces
 
-## M41: Proving ground, third round (v0.42)
+## M41: Run speed, second pass (v0.42)
+Agents in the benchmark tried speed-ups blind, build after build. This gives them the measurement, and
+takes the next layer of cost out of plain code.
+- [x] `anvil hot FILE`: a compiled program's time by function and by what the runtime does for it, from
+  samples of the real run, and which arrays a loop keeps checking for a second owner
+- [x] A local that passed a bounds check stays a good index until it or the array changes, and a counter
+  up to an array's length needs no check at all
+- [x] A counter plus 1 cannot overflow; adding a number takes one compare-and-branch
+- [x] `rows[i][j]` reads without touching the reference count of the row
+- [x] Small arrays made at their full size are one allocation, with their elements beside their header
+- [x] A file is read straight into its text, at its known size
+
+## M42: Proving ground, third round (v0.43)
 - [ ] Fresh agents on new kinds of program, against the same log format: do `let ... else`, `if`
   values and constants get used, and is the loop faster for them?
 - [ ] What round two asked for and did not get: describing a valid struct to the contract lint, so it

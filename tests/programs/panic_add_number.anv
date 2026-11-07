@@ -1,0 +1,8 @@
+// Adding a number to the largest value overflows, and subtracting does not.
+fn main() uses io {
+    var x: i64 = 9223372036854775807;
+    print("{x - 1}");
+    print("{x + 0}");
+    x = x + 1;
+    print("{x}");
+}

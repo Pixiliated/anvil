@@ -1,0 +1,14 @@
+// A check in one arm proves nothing after the `if`.
+fn show(a: [i64], i: i64, look: bool) uses io {
+    if look {
+        print("{a[i]}");
+    }
+    print("{a[i]}");
+    print("{a.len()} {i}");
+}
+
+fn main() uses io {
+    let a: [i64] = [1, 2, 3];
+    show(a: a, i: 1, look: true);
+    show(a: a, i: 5, look: false);
+}

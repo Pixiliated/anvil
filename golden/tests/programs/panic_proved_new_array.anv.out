@@ -1,0 +1,4 @@
+exit: 101
+panic: index 1 out of bounds for length 1 at tests/programs/panic_proved_new_array.anv:5:17
+---
+1

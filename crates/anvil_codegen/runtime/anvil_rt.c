@@ -4,7 +4,9 @@
  * Heap objects (str, arrays and maps; a map is an array of key-value elements, see Maps below)
  * are reference counted. The layout is shared with the code
  * generator (anvil_codegen/src/lib.rs): rc at offset 0, kind at 8, length at 16; arrays keep
- * their capacity at 24, element layout at 32 and element storage at 40. Static strings have
+ * their capacity at 24, element layout at 32 and element storage at 40, which for a small array
+ * made at its full size is the object's own end (above its kind's low byte, the kind field keeps
+ * how many bytes the object has there). Static strings have
  * rc -1 and are never freed. Functions taking objects borrow them; returned objects are owned. */
 #define _CRT_SECURE_NO_WARNINGS
 #ifndef _WIN32
@@ -38,6 +40,14 @@ __declspec(dllimport) unsigned long __stdcall GetActiveProcessorCount(unsigned s
 __declspec(dllimport) void __stdcall Sleep(unsigned long ms);
 __declspec(dllimport) int __stdcall CloseHandle(void *handle);
 __declspec(dllimport) void *__stdcall AddVectoredExceptionHandler(unsigned long first, long(__stdcall *handler)(void *));
+__declspec(dllimport) void *__stdcall OpenThread(unsigned long access, int inherit, unsigned long id);
+__declspec(dllimport) unsigned long __stdcall GetCurrentThreadId(void);
+__declspec(dllimport) unsigned long __stdcall SuspendThread(void *thread);
+__declspec(dllimport) unsigned long __stdcall ResumeThread(void *thread);
+__declspec(dllimport) int __stdcall GetThreadContext(void *thread, void *context);
+__declspec(dllimport) void *__stdcall CreateWaitableTimerExW(void *attributes, const wchar_t *name, unsigned long flags, unsigned long access);
+__declspec(dllimport) int __stdcall SetWaitableTimer(void *timer, const int64_t *due, long period, void *routine, void *arg, int resume);
+__declspec(dllimport) unsigned long __stdcall WaitForSingleObject(void *handle, unsigned long ms);
 __declspec(dllimport) int __stdcall SetThreadStackGuarantee(unsigned long *size);
 #define ATOMIC_ADD(p, v) _InterlockedExchangeAdd64((volatile long long *)(p), (v))
 #define ATOMIC_CAS(p, expected, desired) _InterlockedCompareExchange64((volatile long long *)(p), (desired), (expected))
@@ -50,6 +60,8 @@ __declspec(dllimport) int __stdcall SetThreadStackGuarantee(unsigned long *size)
 #include <pthread.h>
 #include <signal.h>
 #include <unistd.h>
+#include <sys/time.h>
+#include <ucontext.h>
 #define ATOMIC_ADD(p, v) __atomic_fetch_add((p), (v), __ATOMIC_SEQ_CST)
 static int64_t atomic_cas(int64_t *p, int64_t expected, int64_t desired) {
     __atomic_compare_exchange_n(p, &expected, desired, 0, __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST);
@@ -59,6 +71,8 @@ static int64_t atomic_cas(int64_t *p, int64_t expected, int64_t desired) {
 #define ATOMIC_SET(p, v) __atomic_store_n((p), (v), __ATOMIC_SEQ_CST)
 #define THREAD_LOCAL _Thread_local
 #endif
+
+extern void anvil_program(void);
 
 #define ANVIL_PANIC_EXIT 101
 #define ANVIL_RUNTIME_ERROR_EXIT 70
@@ -130,6 +144,10 @@ typedef struct {
  * not: workers never share an object). */
 static int leak_checking = 0;
 static int64_t live_objects = 0;
+/* Elements up to this many bytes can live inside their array's object. */
+#define ARR_INSIDE_LARGEST 64
+#define KIND_OF(o) ((o)->kind & 255)
+
 #define COUNT_OBJECTS(change)                                  \
     do {                                                       \
         if (leak_checking) ATOMIC_ADD(&live_objects, (change)); \
@@ -331,7 +349,7 @@ void anvil_release(AnvObj *o) {
     if (o->rc == 0) runtime_error("release of a freed object");
     if (--o->rc > 0) return;
     COUNT_OBJECTS(-1);
-    if (o->kind == KIND_ARR || o->kind == KIND_MAP) {
+    if (KIND_OF(o) == KIND_ARR || KIND_OF(o) == KIND_MAP) {
         AnvArr *a = (AnvArr *)o;
         int64_t size = a->ti->elem_size, nptrs = a->ti->nptrs;
         if (nptrs) {
@@ -340,15 +358,15 @@ void anvil_release(AnvObj *o) {
                 for (int64_t k = 0; k < nptrs; k++) anvil_release(*(AnvObj **)(elem + a->ti->offsets[k]));
             }
         }
-        int64_t header = o->kind == KIND_MAP ? (int64_t)sizeof(AnvMap) : (int64_t)sizeof(AnvArr);
+        int64_t header = KIND_OF(o) == KIND_MAP ? (int64_t)sizeof(AnvMap) : (int64_t)sizeof(AnvArr);
         mem_note(0, -header - a->cap * size);
-        if (a->data) pool_free(a->data, (size_t)(a->cap * size));
-        if (o->kind == KIND_MAP && ((AnvMap *)o)->table) {
+        if (a->data && a->data != (char *)(a + 1)) pool_free(a->data, (size_t)(a->cap * size));
+        if (KIND_OF(o) == KIND_MAP && ((AnvMap *)o)->table) {
             AnvMap *m = (AnvMap *)o;
             mem_note(0, -(m->mask + 1) * (int64_t)sizeof(MapSlot));
             free(m->table);
         }
-        pool_free(o, (size_t)header);
+        pool_free(o, (size_t)header + (size_t)(o->kind >> 8));
     } else if (o->kind == KIND_FN) {
         AnvFn *f = (AnvFn *)o;
         for (int64_t k = 0; k < f->ti->nptrs; k++) anvil_release(*(AnvObj **)(f->env + f->ti->offsets[k]));
@@ -773,6 +791,104 @@ void anvil_panic_index(int64_t index, int64_t len, const AnvStr *site) {
 }
 
 /* Called by the generated main after anvil_main returns, so buffered output is never lost. */
+/* ---- sampling: `anvil hot` sets ANVIL_SAMPLE to a file, which gets the address `anvil_program` has
+ * and then where the program was about every millisecond, in hexadecimal, a line each. On Windows a
+ * thread stops the main thread to look (it must not allocate: the main thread may hold the heap's
+ * lock); elsewhere a profiling timer interrupts whichever thread is running. ---- */
+
+#define SAMPLES_MAX (1 << 21)
+static uint64_t *samples = NULL;
+static volatile int64_t sample_count = 0;
+static const char *sample_file = NULL;
+
+static void write_samples(void) {
+    FILE *f = fopen(sample_file, "w");
+    if (!f) {
+        fprintf(stderr, "anvil runtime error: cannot write %s\n", sample_file);
+        fflush(stderr);
+        _Exit(ANVIL_RUNTIME_ERROR_EXIT);
+    }
+    fprintf(f, "%llx\n", (unsigned long long)(uintptr_t)&anvil_program);
+    for (int64_t i = 0; i < sample_count; i++) fprintf(f, "%llx\n", (unsigned long long)samples[i]);
+    fclose(f);
+}
+
+#ifdef _WIN32
+static volatile int64_t sampling_stops = 0, sampling_stopped = 0;
+
+static unsigned __stdcall sample_main(void *main_thread) {
+    /* An x64 CONTEXT: its flags at 0x30, the instruction pointer at 0xF8. */
+    __declspec(align(16)) static char context[1232];
+    void *timer = CreateWaitableTimerExW(NULL, NULL, 2 /* high resolution */, 0x1F0003);
+    while (!ATOMIC_ADD(&sampling_stops, 0)) {
+        int64_t due = -10000;
+        if (timer && SetWaitableTimer(timer, &due, 0, NULL, NULL, 0)) WaitForSingleObject(timer, 100);
+        else Sleep(1);
+        if (SuspendThread(main_thread) == 0xFFFFFFFFul) break;
+        *(unsigned long *)(context + 0x30) = 0x100001; /* CONTEXT_CONTROL */
+        int got = GetThreadContext(main_thread, context);
+        ResumeThread(main_thread);
+        if (got && sample_count < SAMPLES_MAX) samples[sample_count++] = *(uint64_t *)(context + 0xF8);
+    }
+    ATOMIC_SET(&sampling_stopped, 1);
+    return 0;
+}
+
+static void finish_sampling(void) {
+    ATOMIC_SET(&sampling_stops, 1);
+    while (!ATOMIC_ADD(&sampling_stopped, 0)) Sleep(1);
+    write_samples();
+}
+
+static void init_sampling(void) {
+    sample_file = getenv("ANVIL_SAMPLE");
+    if (!sample_file) return;
+    samples = xmalloc(sizeof(uint64_t) * SAMPLES_MAX);
+    void *me = OpenThread(0x1FFFFF, 0, GetCurrentThreadId());
+    if (!me || !_beginthreadex(NULL, 0, sample_main, me, 0, NULL)) runtime_error("cannot start sampling");
+    atexit(finish_sampling);
+}
+#elif defined(__linux__) && (defined(__x86_64__) || defined(__aarch64__))
+static void on_sample(int sig, siginfo_t *info, void *context) {
+    (void)sig;
+    (void)info;
+    ucontext_t *u = context;
+    int64_t at = sample_count;
+    if (at >= SAMPLES_MAX) return;
+    sample_count = at + 1;
+#ifdef __x86_64__
+    samples[at] = (uint64_t)u->uc_mcontext.gregs[16]; /* REG_RIP */
+#else
+    samples[at] = (uint64_t)u->uc_mcontext.pc;
+#endif
+}
+
+static void finish_sampling(void) {
+    struct itimerval off = {{0, 0}, {0, 0}};
+    setitimer(ITIMER_PROF, &off, NULL);
+    write_samples();
+}
+
+static void init_sampling(void) {
+    sample_file = getenv("ANVIL_SAMPLE");
+    if (!sample_file) return;
+    samples = xmalloc(sizeof(uint64_t) * SAMPLES_MAX);
+    struct sigaction action;
+    memset(&action, 0, sizeof action);
+    action.sa_sigaction = on_sample;
+    action.sa_flags = SA_SIGINFO | SA_RESTART;
+    sigemptyset(&action.sa_mask);
+    struct itimerval every = {{0, 1000}, {0, 1000}};
+    if (sigaction(SIGPROF, &action, NULL) != 0 || setitimer(ITIMER_PROF, &every, NULL) != 0) runtime_error("cannot start sampling");
+    atexit(finish_sampling);
+}
+#else
+static void init_sampling(void) {
+    sample_file = getenv("ANVIL_SAMPLE");
+    if (sample_file) runtime_error("sampling is not available on this platform");
+}
+#endif
+
 void anvil_exit(int64_t code) {
     fflush(stdout);
     if (leak_checking && live_objects != 0) {
@@ -806,6 +922,19 @@ static void arr_init(AnvArr *a, const AnvTypeInfo *ti, int64_t cap, int64_t kind
 }
 
 AnvArr *anvil_arr_new(const AnvTypeInfo *ti, int64_t cap) {
+    int64_t bytes = cap * ti->elem_size;
+    if (cap > 0 && bytes <= ARR_INSIDE_LARGEST) {
+        AnvArr *a = pool_alloc(sizeof(AnvArr) + (size_t)bytes);
+        a->rc = 1;
+        a->kind = KIND_ARR | (bytes << 8);
+        a->len = 0;
+        a->cap = cap;
+        a->ti = ti;
+        a->data = (char *)(a + 1);
+        mem_object((int64_t)sizeof(AnvArr) + bytes);
+        COUNT_OBJECTS(1);
+        return a;
+    }
     AnvArr *a = pool_alloc(sizeof(AnvArr));
     arr_init(a, ti, cap, KIND_ARR, (int64_t)sizeof(AnvArr));
     return a;
@@ -817,7 +946,7 @@ static AnvMap *map_clone(const AnvMap *m);
  * no other owners, otherwise a copy (and `a` loses the reference). */
 AnvArr *anvil_arr_unique(AnvArr *a) {
     if (a->rc == 1) return a;
-    AnvArr *b = a->kind == KIND_MAP ? &map_clone((const AnvMap *)a)->a : anvil_arr_new(a->ti, a->len);
+    AnvArr *b = KIND_OF(a) == KIND_MAP ? &map_clone((const AnvMap *)a)->a : anvil_arr_new(a->ti, a->len);
     b->len = a->len;
     if (a->len) memcpy(b->data, a->data, (size_t)(a->len * a->ti->elem_size));
     for (int64_t i = 0; i < b->len; i++) {
@@ -835,7 +964,14 @@ char *anvil_arr_push_slot(AnvArr *a) {
         if (a->cap > INT64_MAX / 2 / (a->ti->elem_size ? a->ti->elem_size : 1)) runtime_error("array too large");
         int64_t cap = a->cap ? a->cap * 2 : 4;
         mem_note(cap * a->ti->elem_size, (cap - a->cap) * a->ti->elem_size);
-        a->data = pool_resize(a->data, (size_t)(a->cap * a->ti->elem_size), (size_t)(cap * a->ti->elem_size));
+        if (a->data == (char *)(a + 1)) {
+            /* The object keeps its size; the elements move out of it for good. */
+            char *data = pool_alloc((size_t)(cap * a->ti->elem_size));
+            memcpy(data, a->data, (size_t)(a->len * a->ti->elem_size));
+            a->data = data;
+        } else {
+            a->data = pool_resize(a->data, (size_t)(a->cap * a->ti->elem_size), (size_t)(cap * a->ti->elem_size));
+        }
         a->cap = cap;
     }
     return a->data + a->len++ * a->ti->elem_size;
@@ -1277,7 +1413,6 @@ double anvil_random_f64(void) { return (double)(random_next() >> 11) * (1.0 / 90
 /* ---- the entry point ---- */
 
 /* Generated: the program's main, or (in a test executable) the test argv[1] names. */
-extern void anvil_program(void);
 
 static int saved_argc = 0;
 static char **saved_argv = NULL;
@@ -1363,25 +1498,56 @@ static void init_stdin(void) {
     fflush(stdout); /* a prompt shows before the program waits */
 }
 
-AnvStr *anvil_read_stdin(void) {
-    init_stdin();
-    fflush(stdout); /* a prompt shows before the program waits */
-    size_t cap = 4096, len = 0;
-    char *buf = xmalloc(cap);
+/* The size of a file just opened, or 0 when it cannot say. Not for stdin: moving around in it can
+ * lose what is buffered. */
+static size_t size_to_read(FILE *f) {
+    int64_t end = 0;
+#ifdef _WIN32
+    if (_fseeki64(f, 0, SEEK_END) == 0) end = _ftelli64(f);
+    if (_fseeki64(f, 0, SEEK_SET) != 0) runtime_error("cannot rewind a file");
+#else
+    if (fseeko(f, 0, SEEK_END) == 0) end = (int64_t)ftello(f);
+    if (fseeko(f, 0, SEEK_SET) != 0) runtime_error("cannot rewind a file");
+#endif
+    clearerr(f);
+    return end > 0 ? (size_t)end : 0;
+}
+
+/* All that is left to read from `f` as new text, read straight into it: with `expected` right, no
+ * growing, and no second copy of what may be most of the program's memory. */
+static AnvStr *read_rest(FILE *f, size_t expected) {
+    size_t cap = expected ? expected + 1 : 4096, len = 0;
+    AnvStr *s = xmalloc(sizeof(AnvStr) + cap + 1);
     for (;;) {
         if (len == cap) {
             cap *= 2;
-            char *grown = realloc(buf, cap);
+            AnvStr *grown = realloc(s, sizeof(AnvStr) + cap + 1);
             if (!grown) runtime_error("out of memory");
-            buf = grown;
+            s = grown;
         }
-        size_t got = fread(buf + len, 1, cap - len, stdin);
+        size_t got = fread(s->bytes + len, 1, cap - len, f);
         len += got;
         if (got == 0) break;
     }
-    AnvStr *s = str_from(buf, (int64_t)len);
-    free(buf);
+    /* Too small for the pools' sizes to matter only above their largest: anvil_release frees those. */
+    if (sizeof(AnvStr) + len + 1 <= POOL_LARGEST) {
+        AnvStr *small = str_from(s->bytes, (int64_t)len);
+        free(s);
+        return small;
+    }
+    s->rc = 1;
+    s->kind = KIND_STR;
+    s->len = (int64_t)len;
+    s->bytes[len] = 0;
+    mem_object((int64_t)sizeof(AnvStr) + (int64_t)len + 1);
+    COUNT_OBJECTS(1);
     return s;
+}
+
+AnvStr *anvil_read_stdin(void) {
+    init_stdin();
+    fflush(stdout); /* a prompt shows before the program waits */
+    return read_rest(stdin, 0);
 }
 
 AnvStr *anvil_read_line(const AnvStr *message) {
@@ -1529,27 +1695,14 @@ static AnvStr *read_any(const AnvStr *path, int text) {
         last_file_error = errno_file_error();
         return NULL;
     }
-    size_t cap = 4096, len = 0;
-    char *buf = xmalloc(cap);
-    for (;;) {
-        if (len == cap) {
-            cap *= 2;
-            char *grown = realloc(buf, cap);
-            if (!grown) runtime_error("out of memory");
-            buf = grown;
-        }
-        size_t got = fread(buf + len, 1, cap - len, f);
-        len += got;
-        if (got == 0) break;
-    }
+    AnvStr *s = read_rest(f, size_to_read(f));
     int failed = ferror(f);
     fclose(f);
-    AnvStr *s = NULL;
     if (failed) last_file_error = FILE_FAILED;
-    else if (text && !utf8_valid((const unsigned char *)buf, (int64_t)len)) last_file_error = FILE_NOT_TEXT;
-    else s = str_from(buf, (int64_t)len);
-    free(buf);
-    return s;
+    else if (text && !utf8_valid((const unsigned char *)s->bytes, s->len)) last_file_error = FILE_NOT_TEXT;
+    else return s;
+    anvil_release((AnvObj *)s);
+    return NULL;
 }
 
 AnvStr *anvil_read_file(const AnvStr *path) { return read_any(path, 1); }
@@ -1756,9 +1909,9 @@ static AnvObj *deep_copy(AnvObj *o) {
         const AnvStr *s = (const AnvStr *)o;
         return (AnvObj *)str_from(s->bytes, s->len);
     }
-    if (o->kind == KIND_ARR || o->kind == KIND_MAP) {
+    if (KIND_OF(o) == KIND_ARR || KIND_OF(o) == KIND_MAP) {
         const AnvArr *a = (const AnvArr *)o;
-        AnvArr *b = o->kind == KIND_MAP ? &map_clone((const AnvMap *)a)->a : anvil_arr_new(a->ti, a->len);
+        AnvArr *b = KIND_OF(o) == KIND_MAP ? &map_clone((const AnvMap *)a)->a : anvil_arr_new(a->ti, a->len);
         b->len = a->len;
         if (b->len) memcpy(b->data, a->data, (size_t)(b->len * a->ti->elem_size));
         for (int64_t i = 0; i < b->len; i++) {
@@ -2229,6 +2382,7 @@ int wmain(int argc, wchar_t **wargv) {
     init_clock();
     init_files();
     init_measure();
+    init_sampling();
     init_stack_guard();
     guard_stack();
     anvil_program();
@@ -2250,6 +2404,7 @@ int main(int argc, char **argv) {
     init_clock();
     init_files();
     init_measure();
+    init_sampling();
     init_stack_guard();
     pthread_attr_t attr;
     pthread_t thread;

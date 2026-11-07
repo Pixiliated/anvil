@@ -1,0 +1,10 @@
+// A counter from below 0 is not a good index, whatever it counts up to.
+const START: i64 = -1;
+
+fn main() uses io {
+    let a: [i64] = [1, 2, 3];
+    for i in START..a.len() {
+        print("{a[i]}");
+    }
+    print("{a.len()}");
+}

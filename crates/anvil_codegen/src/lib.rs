@@ -47,8 +47,34 @@ use std::path::Path;
 pub fn build_exe(program: &Program, out: &Path, work_dir: &Path, asm: bool) -> Result<String, String> {
     let (object, listing) = compile_object(program, asm)?;
     let objects = link::compile_c(&program.c_files, work_dir)?;
-    link::link_exe(&object, &objects, out, work_dir)?;
+    link::link_exe(&object, &objects, out, work_dir, None)?;
     Ok(listing)
+}
+
+/// An array the compiler could not prove has one owner where a loop writes to it.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub struct Unproved {
+    pub function: String,
+    pub at: String,
+    pub local: String,
+}
+
+/// An executable as `build_exe` makes it, and what looking at its running needs.
+pub struct Built {
+    /// Its symbols by address, ascending.
+    pub symbols: Vec<(u64, String)>,
+    pub notes: Vec<Unproved>,
+}
+
+/// Like `build_exe`, also returning the executable's symbols and what the compiler could not prove.
+pub fn build_exe_with_symbols(program: &Program, out: &Path, work_dir: &Path) -> Result<Built, String> {
+    let (object, _, mut notes) = compile(program, false, Entry::Main)?;
+    let objects = link::compile_c(&program.c_files, work_dir)?;
+    let map = work_dir.join("program.map");
+    link::link_exe(&object, &objects, out, work_dir, Some(&map))?;
+    notes.sort();
+    notes.dedup_by(|a, b| a.function == b.function && a.local == b.local);
+    Ok(Built { symbols: link::symbols(out, &map)?, notes })
 }
 
 /// Builds the program's plain tests (property tests run in the interpreter) into one
@@ -80,9 +106,9 @@ pub fn build_test_exe(program: &Program, out: &Path, work_dir: &Path) -> Result<
         });
         entries.push((i, p.funcs.len() - 1));
     }
-    let (object, _) = compile(&p, false, Entry::Tests(&entries))?;
+    let (object, _, _) = compile(&p, false, Entry::Tests(&entries))?;
     let objects = link::compile_c(&program.c_files, work_dir)?;
-    link::link_exe(&object, &objects, out, work_dir)?;
+    link::link_exe(&object, &objects, out, work_dir, None)?;
     Ok(entries.iter().map(|(i, _)| *i).collect())
 }
 
@@ -193,6 +219,7 @@ const KIND_FN: i64 = 2;
 struct Backend {
     /// Which functions always return an array or map with one reference (see `unique`).
     fresh: Vec<bool>,
+    notes: Vec<Unproved>,
     module: ObjectModule,
     funcs: Vec<ClFuncId>,
     runtime: HashMap<&'static str, ClFuncId>,
@@ -212,10 +239,11 @@ struct Backend {
 }
 
 pub fn compile_object(program: &Program, asm: bool) -> Result<(Vec<u8>, String), String> {
-    compile(program, asm, Entry::Main)
+    let (object, listing, _) = compile(program, asm, Entry::Main)?;
+    Ok((object, listing))
 }
 
-fn compile(program: &Program, asm: bool, entry: Entry) -> Result<(Vec<u8>, String), String> {
+fn compile(program: &Program, asm: bool, entry: Entry) -> Result<(Vec<u8>, String, Vec<Unproved>), String> {
     let mut listing = String::new();
     let mut flags = settings::builder();
     let set = |f: &mut settings::Builder, k: &str, v: &str| f.set(k, v).map_err(|e| format!("cranelift flag {k}: {e}"));
@@ -233,6 +261,7 @@ fn compile(program: &Program, asm: bool, entry: Entry) -> Result<(Vec<u8>, Strin
     let builder = ObjectBuilder::new(isa, "anvil_program", default_libcall_names()).map_err(|e| e.to_string())?;
     let mut be = Backend {
         fresh: unique::fresh_functions(program),
+        notes: Vec::new(),
         module: ObjectModule::new(builder),
         funcs: Vec::new(),
         runtime: HashMap::new(),
@@ -367,8 +396,9 @@ fn compile(program: &Program, asm: bool, entry: Entry) -> Result<(Vec<u8>, Strin
         }
         Entry::Tests(tests) => be.c_test_main(tests, &mut fbc)?,
     }
+    let notes = std::mem::take(&mut be.notes);
     let product = be.module.finish();
-    Ok((product.emit().map_err(|e| e.to_string())?, listing))
+    Ok((product.emit().map_err(|e| e.to_string())?, listing, notes))
 }
 
 /// A call is replaced by the callee's code when that code has at most this many instructions.
@@ -741,8 +771,12 @@ struct Gen<'a, 'b> {
     trusted: MemFlagsData,
     header: MemFlagsData,
     counts: MemFlagsData,
-    /// Scalars of locals holding an array known to have one owner here (see `unique`).
-    unique: HashSet<(LocalId, usize)>,
+    /// The function being generated, and its locals' names, for `Unproved`.
+    function: String,
+    local_names: Vec<String>,
+    /// What is known at this point of the function (see `unique`).
+    known: unique::Known,
+    /// Length and storage of arrays that keep them for the whole of a loop being generated.
     /// Above 0 inside a part of an expression that may not run: a check there proves nothing later.
     branching: u32,
 }
@@ -784,7 +818,9 @@ impl<'a, 'b> Gen<'a, 'b> {
             trusted,
             header,
             counts,
-            unique: HashSet::new(),
+            function: String::new(),
+            local_names: locals.iter().map(|l| l.name.clone()).collect(),
+            known: unique::Known::default(),
             branching: 0,
         }
     }
@@ -951,6 +987,7 @@ impl<'a, 'b> Gen<'a, 'b> {
     }
 
     fn function(mut self, f: &Func) {
+        self.function = f.name.clone();
         let entry = self.b.create_block();
         self.b.append_block_params_for_function_params(entry);
         self.b.switch_to_block(entry);
@@ -1074,8 +1111,23 @@ impl<'a, 'b> Gen<'a, 'b> {
         }
     }
 
-    /// Address of element `index` of array `arr`, after a bounds check that panics at `site`.
-    fn elem_addr(&mut self, arr: Value, index: Value, elem: &Ty, site: &str) -> Value {
+    /// Address of element `index` of array `arr`, after a bounds check that panics at `site`,
+    /// unless what is known already proves it. `key` says which local holds the array, if one does,
+    /// and `named` which local the index is, if one is.
+    fn elem_addr(&mut self, arr: Value, index: Value, elem: &Ty, site: &str, key: Option<unique::Key>, named: Option<LocalId>) -> Value {
+        self.bounds_check(arr, index, site, key, named);
+        let data = self.b.ins().load(I, self.header, arr, ARR_DATA);
+        let size = flat_len(self.program, elem) as i64 * SLOT;
+        let offset = self.b.ins().imul_imm_s(index, size);
+        self.b.ins().iadd(data, offset)
+    }
+
+    /// Panics at `site` unless `index` is in bounds of `arr`, which needs no code if already proved.
+    fn bounds_check(&mut self, arr: Value, index: Value, site: &str, key: Option<unique::Key>, named: Option<LocalId>) {
+        let fact = key.zip(named);
+        if fact.is_some_and(|f| self.known.in_bounds.contains(&f)) {
+            return;
+        }
         let len = self.b.ins().load(I, self.header, arr, OBJ_LEN);
         // Unsigned comparison also catches negative indices.
         let oob = self.b.ins().icmp(IntCC::UnsignedGreaterThanOrEqual, index, len);
@@ -1090,29 +1142,57 @@ impl<'a, 'b> Gen<'a, 'b> {
         self.b.ins().trap(TrapCode::user(1).unwrap());
         self.b.switch_to_block(cont);
         self.b.seal_block(cont);
-        let data = self.b.ins().load(I, self.header, arr, ARR_DATA);
-        let size = flat_len(self.program, elem) as i64 * SLOT;
-        let offset = self.b.ins().imul_imm_s(index, size);
-        self.b.ins().iadd(data, offset)
+        if let (Some(f), 0) = (fact, self.branching) {
+            self.known.in_bounds.insert(f);
+        }
     }
 
     fn stmt(&mut self, s: &Stmt) {
         if let Stmt::Line(_) | Stmt::Reached(_) = s {
             return;
         }
-        let mut touched = HashSet::new();
-        unique::touched(self.program, s, &mut touched);
-        self.unique.retain(|(l, _)| !touched.contains(l));
+        let changes = unique::changes(self.program, s);
+        self.known.forget(&changes);
         self.emit(s);
-        self.unique.retain(|(l, _)| !touched.contains(l));
+        self.known.forget(&changes);
         if let Stmt::Let(l, e) = s {
             if unique::is_fresh(e, &self.be.fresh) {
-                self.unique.insert((*l, 0));
+                self.known.unique.insert((*l, 0));
+            }
+            if let ExprKind::Builtin(Builtin::Len, len_args) = &e.kind {
+                if let Some(key) = unique::key_of(self.program, &len_args[0]) {
+                    self.known.lengths.insert(*l, key);
+                }
             }
         }
         if let Stmt::Assign(l, path, e, _) = s {
             if path.is_empty() && unique::is_fresh(e, &self.be.fresh) {
-                self.unique.insert((*l, 0));
+                self.known.unique.insert((*l, 0));
+            }
+        }
+    }
+
+    /// What holds for the body of `for l in start..end`: a counter from a number not below 0 stays
+    /// so; ending at an array's length, it is a good index of that array throughout.
+    fn counter_facts(&mut self, s: &Stmt) {
+        let Stmt::For(l, start, end, body) = s else { unreachable!() };
+        let ExprKind::Int(from) = start.kind else { return };
+        let mut in_body = unique::Changes::default();
+        for b in body {
+            in_body.merge(unique::changes(self.program, b));
+        }
+        if from < 0 || in_body.touched.contains(l) {
+            return;
+        }
+        self.known.counters.insert(*l);
+        let key = match &end.kind {
+            ExprKind::Builtin(Builtin::Len, len_args) => unique::key_of(self.program, &len_args[0]),
+            ExprKind::Local(n) => self.known.lengths.get(n).copied(),
+            _ => None,
+        };
+        if let Some(key) = key {
+            if !in_body.touched.contains(&key.0) && !in_body.shrunk.contains(&key.0) {
+                self.known.in_bounds.insert((key, *l));
             }
         }
     }
@@ -1151,23 +1231,28 @@ impl<'a, 'b> Gen<'a, 'b> {
                 let else_b = self.b.create_block();
                 let merge = self.b.create_block();
                 self.b.ins().brif(cond, then_b, &[], else_b, &[]);
-                let known = self.unique.clone();
+                let known = self.known.clone();
                 self.b.switch_to_block(then_b);
                 self.b.seal_block(then_b);
                 self.block(t);
                 self.b.ins().jump(merge, &[]);
-                let after_then = std::mem::replace(&mut self.unique, known);
+                let after_then = std::mem::replace(&mut self.known, known);
                 self.b.switch_to_block(else_b);
                 self.b.seal_block(else_b);
                 self.block(e);
                 self.b.ins().jump(merge, &[]);
                 self.b.switch_to_block(merge);
                 self.b.seal_block(merge);
-                self.unique.retain(|k| after_then.contains(k));
+                // A block that ends by leaving says nothing about what follows the `if`.
+                if unique::leaves(e) {
+                    self.known = after_then;
+                } else if !unique::leaves(t) {
+                    self.known.meet(&after_then);
+                }
             }
             Stmt::While(c, body) => {
                 // What the loop's body or condition learns need not hold when they have not run.
-                let known = self.unique.clone();
+                let known = self.known.clone();
                 let header = self.b.create_block();
                 let body_b = self.b.create_block();
                 let exit = self.b.create_block();
@@ -1184,18 +1269,19 @@ impl<'a, 'b> Gen<'a, 'b> {
                 self.b.seal_block(header);
                 self.b.switch_to_block(exit);
                 self.b.seal_block(exit);
-                self.unique = known;
+                self.known = known;
             }
             Stmt::For(l, start, end, body) => {
                 let s0 = self.expr(start)[0];
                 let e0 = self.expr(end)[0];
                 let limit = self.b.declare_var(I);
                 self.b.def_var(limit, e0);
-                let known = self.unique.clone();
+                let known = self.known.clone();
+                self.counter_facts(s);
                 self.counted_loop(s0, limit, body, |g, i| {
                     g.b.def_var(g.vars[*l][0], i);
                 });
-                self.unique = known;
+                self.known = known;
             }
             Stmt::ForEach { var, held, iter, body } => {
                 let arr = self.expr(iter);
@@ -1209,7 +1295,7 @@ impl<'a, 'b> Gen<'a, 'b> {
                 let elem = (**elem).clone();
                 let held = *held;
                 let var = *var;
-                let known = self.unique.clone();
+                let known = self.known.clone();
                 self.counted_loop(zero, limit, body, |g, i| {
                     // The snapshot in `held` is never written, so i < len is still in bounds.
                     let arr = g.b.use_var(g.vars[held][0]);
@@ -1244,7 +1330,7 @@ impl<'a, 'b> Gen<'a, 'b> {
                     }
                     g.store_local(var, 0, &vals);
                 });
-                self.unique = known;
+                self.known = known;
             }
             Stmt::Match { held, scrutinee, arms } => {
                 let vals = self.expr(scrutinee);
@@ -1252,10 +1338,10 @@ impl<'a, 'b> Gen<'a, 'b> {
                 let Ty::Enum(eid) = scrutinee.ty else { unreachable!("match on {:?}", scrutinee.ty) };
                 let tag = self.b.use_var(self.vars[*held][0]);
                 let merge = self.b.create_block();
-                let known = self.unique.clone();
-                let mut after_arms: Option<HashSet<(LocalId, usize)>> = None;
+                let known = self.known.clone();
+                let mut after_arms: Option<unique::Known> = None;
                 for (k, arm) in arms.iter().enumerate() {
-                    self.unique = known.clone();
+                    self.known = known.clone();
                     let next = if k + 1 < arms.len() {
                         let this = self.b.create_block();
                         for v in &arm.also {
@@ -1283,17 +1369,19 @@ impl<'a, 'b> Gen<'a, 'b> {
                     }
                     self.block(&arm.body);
                     self.b.ins().jump(merge, &[]);
-                    let here = std::mem::take(&mut self.unique);
-                    after_arms = Some(match after_arms {
-                        Some(before) => before.intersection(&here).copied().collect(),
-                        None => here,
-                    });
+                    let mut here = std::mem::take(&mut self.known);
+                    if !unique::leaves(&arm.body) {
+                        if let Some(before) = &after_arms {
+                            here.meet(before);
+                        }
+                        after_arms = Some(here);
+                    }
                     if let Some(next) = next {
                         self.b.switch_to_block(next);
                         self.b.seal_block(next);
                     }
                 }
-                self.unique = after_arms.unwrap_or(known);
+                self.known = after_arms.unwrap_or(known);
                 self.b.switch_to_block(merge);
                 self.b.seal_block(merge);
             }
@@ -1319,7 +1407,7 @@ impl<'a, 'b> Gen<'a, 'b> {
             Stmt::Reached(_) | Stmt::Line(_) => {}
             // Left null, as a move leaves it: the function's exit releases every local.
             Stmt::Drop(l) => {
-                self.unique.retain(|(local, _)| local != l);
+                self.known.unique.retain(|(local, _)| local != l);
                 let vals = self.use_local(*l);
                 let lay = self.layouts[*l].clone();
                 self.release(&lay, &vals);
@@ -1396,14 +1484,16 @@ impl<'a, 'b> Gen<'a, 'b> {
                         Loc::Mem(addr, _) => Loc::Mem(self.b.ins().iadd_imm_s(addr, start as i64 * SLOT), fty),
                     }
                 }
-                Step::Index { site, .. } => {
+                Step::Index { site, index: index_expr } => {
                     let index = *next_index.next().unwrap();
-                    let arr = self.unique_at(&loc);
+                    let arr = self.unique_at(&loc, site);
                     let (Loc::Vars(_, _, Ty::Array(elem)) | Loc::Mem(_, Ty::Array(elem))) = &loc else {
                         unreachable!("index into a non-array place")
                     };
                     let elem = (**elem).clone();
-                    let addr = self.elem_addr(arr, index, &elem, site);
+                    let key = if let Loc::Vars(l, start, _) = &loc { Some((*l, *start)) } else { None };
+                    let named = unique::local_of(index_expr);
+                    let addr = self.elem_addr(arr, index, &elem, site, key, named);
                     Loc::Mem(addr, elem)
                 }
             };
@@ -1412,13 +1502,17 @@ impl<'a, 'b> Gen<'a, 'b> {
     }
 
     /// Makes the array stored at `loc` unique (copying it if shared), stores it back, returns it.
-    fn unique_at(&mut self, loc: &Loc) -> Value {
+    fn unique_at(&mut self, loc: &Loc, site: &str) -> Value {
         if let Loc::Vars(l, start, _) = loc {
-            if self.unique.contains(&(*l, *start)) {
+            if self.known.unique.contains(&(*l, *start)) {
                 return self.b.use_var(self.vars[*l][*start]);
             }
+            if !self.loops.is_empty() {
+                let note = Unproved { function: self.function.clone(), at: site.to_string(), local: self.local_names[*l].clone() };
+                self.be.notes.push(note);
+            }
             if self.branching == 0 {
-                self.unique.insert((*l, *start));
+                self.known.unique.insert((*l, *start));
             }
         }
         let p = match loc {
@@ -1505,6 +1599,11 @@ impl<'a, 'b> Gen<'a, 'b> {
                 };
                 (vals, true)
             }
+            // An element of an array a local holds: the array keeps it alive, and `plain` says the
+            // index cannot change the array.
+            ExprKind::Index { base, index, site, plain: true } if self.is_borrowed_index(e) => {
+                (self.element(base, index, &e.ty, site), false)
+            }
             ExprKind::Field(base, idx) => {
                 let (vals, owned) = self.borrow(base);
                 let Ty::Struct(sid) = base.ty else { unreachable!() };
@@ -1528,8 +1627,41 @@ impl<'a, 'b> Gen<'a, 'b> {
         }
     }
 
+    fn is_borrowed_index(&self, e: &Expr) -> bool {
+        let ExprKind::Index { base, .. } = &e.kind else { return false };
+        base.ty != Ty::Bytes && !matches!(e.ty, Ty::Fn(_)) && self.reads_in_place(base)
+    }
+
+    /// Whether `base` is an array reached from a local through fields and index-free reads alone,
+    /// so reading from it needs no reference of its own.
+    fn reads_in_place(&self, base: &Expr) -> bool {
+        match &base.kind {
+            ExprKind::Local(_) => true,
+            ExprKind::Field(b, _) => self.reads_in_place(b),
+            ExprKind::Index { base: b, plain: true, .. } => self.reads_in_place(b),
+            _ => false,
+        }
+    }
+
+    /// The values of `base[index]`, borrowed from the array.
+    fn element(&mut self, base: &Expr, index: &Expr, ty: &Ty, site: &str) -> Vec<Value> {
+        let key = unique::key_of(self.program, base);
+        let arr = self.borrow(base).0[0];
+        let i = self.expr(index)[0];
+        let named = unique::local_of(index);
+        let lay = self.layout(ty);
+        let addr = self.elem_addr(arr, i, ty, site, key, named);
+        self.load(addr, &lay)
+    }
+
     fn expr(&mut self, e: &Expr) -> Vec<Value> {
         match &e.kind {
+            ExprKind::Index { plain: true, .. } if self.is_borrowed_index(e) => {
+                let (vals, _) = self.borrow(e);
+                let lay = self.layout(&e.ty);
+                self.retain(&lay, &vals);
+                vals
+            }
             ExprKind::Int(v) => vec![self.b.ins().iconst(I, *v)],
             ExprKind::Float(v) => vec![self.b.ins().f64const(*v)],
             ExprKind::Bool(v) => vec![self.b.ins().iconst(types::I8, *v as i64)],
@@ -1622,21 +1754,12 @@ impl<'a, 'b> Gen<'a, 'b> {
                 self.enum_value(*enum_id, *variant, &given)
             }
             ExprKind::Index { base, index, site, .. } if base.ty == Ty::Bytes => {
-                let (b, owned) = if mutates(index) { (self.expr(base), true) } else { self.borrow(base) };
+                let plain = !mutates(index);
+                let key = if plain { unique::key_of(self.program, base) } else { None };
+                let (b, owned) = if plain { self.borrow(base) } else { (self.expr(base), true) };
                 let i = self.expr(index)[0];
-                let len = self.b.ins().load(I, self.header, b[0], OBJ_LEN);
-                // Unsigned comparison also catches negative indices.
-                let oob = self.b.ins().icmp(IntCC::UnsignedGreaterThanOrEqual, i, len);
-                let (bad, fine) = (self.b.create_block(), self.b.create_block());
-                self.b.set_cold_block(bad);
-                self.b.ins().brif(oob, bad, &[], fine, &[]);
-                self.b.switch_to_block(bad);
-                self.b.seal_block(bad);
-                let s = self.str_obj(site);
-                self.call_rt("anvil_panic_index", &[i, len, s]);
-                self.b.ins().trap(TrapCode::user(1).unwrap());
-                self.b.switch_to_block(fine);
-                self.b.seal_block(fine);
+                let named = unique::local_of(index);
+                self.bounds_check(b[0], i, site, key, named);
                 let at = self.b.ins().iadd(b[0], i);
                 let v = self.b.ins().uload8(I, self.trusted, at, STR_BYTES);
                 if owned {
@@ -1678,7 +1801,7 @@ impl<'a, 'b> Gen<'a, 'b> {
                 let (arr, owned) = if mutates(index) { (self.expr(base), true) } else { self.borrow(base) };
                 let i = self.expr(index)[0];
                 let lay = self.layout(&e.ty);
-                let addr = self.elem_addr(arr[0], i, &e.ty, site);
+                let addr = self.elem_addr(arr[0], i, &e.ty, site, None, None);
                 let vals = self.load(addr, &lay);
                 self.retain(&lay, &vals);
                 if owned {
@@ -1724,12 +1847,12 @@ impl<'a, 'b> Gen<'a, 'b> {
                 }
                 vec![m]
             }
-            ExprKind::MapSet { local, path, key, value, .. } => {
+            ExprKind::MapSet { local, path, key, value, at: site } => {
                 let k = self.expr(key)[0];
                 let vals = self.expr(value);
                 let indices = self.indices(path);
                 let loc = self.locate(*local, path, &indices);
-                let m = self.unique_at(&loc);
+                let m = self.unique_at(&loc, site);
                 let at = self.map_find(m, &key.ty, k);
                 let size = self.pair_size(&value.ty);
                 let found = self.b.ins().icmp_imm_s(IntCC::SignedGreaterThanOrEqual, at, 0);
@@ -1761,7 +1884,7 @@ impl<'a, 'b> Gen<'a, 'b> {
                 self.b.seal_block(merge);
                 Vec::new()
             }
-            ExprKind::MapRemove { local, path, key, missing, .. } => {
+            ExprKind::MapRemove { local, path, key, missing, at: site } => {
                 let k = self.expr(key)[0];
                 let indices = self.indices(path);
                 let loc = self.locate(*local, path, &indices);
@@ -1769,7 +1892,7 @@ impl<'a, 'b> Gen<'a, 'b> {
                     unreachable!("remove on a non-map place")
                 };
                 let vt = (**vt).clone();
-                let m = self.unique_at(&loc);
+                let m = self.unique_at(&loc, site);
                 let at = self.map_find(m, &key.ty, k);
                 let klay = self.layout(&key.ty);
                 self.release(&klay, &[k]);
@@ -1817,19 +1940,19 @@ impl<'a, 'b> Gen<'a, 'b> {
                 self.release_one(c);
                 vec![joined]
             }
-            ExprKind::Push { local, path, value, .. } => {
+            ExprKind::Push { local, path, value, at: site } => {
                 let vals = self.expr(value);
                 let indices = self.indices(path);
                 let loc = self.locate(*local, path, &indices);
-                let arr = self.unique_at(&loc);
+                let arr = self.unique_at(&loc, site);
                 let slot = self.push_slot(arr, flat_len(self.program, &value.ty) as i64 * SLOT);
                 self.store(slot, &vals);
                 Vec::new()
             }
-            ExprKind::Pop { local, path, message, .. } => {
+            ExprKind::Pop { local, path, message, at: site } => {
                 let indices = self.indices(path);
                 let loc = self.locate(*local, path, &indices);
-                let arr = self.unique_at(&loc);
+                let arr = self.unique_at(&loc, site);
                 let len = self.b.ins().load(I, self.header, arr, OBJ_LEN);
                 let empty = self.b.ins().icmp_imm_s(IntCC::Equal, len, 0);
                 self.panic_if(empty, message);
@@ -1869,6 +1992,28 @@ impl<'a, 'b> Gen<'a, 'b> {
                 let lay = self.layouts[*held][start..start + n].to_vec();
                 self.retain(&lay, &vals);
                 vals
+            }
+            // A counter plus 1 is at most its limit, and minus a number at least its start less it.
+            ExprKind::IArith { op: op @ (IOp::Add | IOp::Sub), l, r, .. }
+                if unique::local_of(l).is_some_and(|i| self.known.counters.contains(&i))
+                    && matches!((&r.kind, op), (ExprKind::Int(1), IOp::Add) | (ExprKind::Int(0..), IOp::Sub)) =>
+            {
+                let a = self.expr(l)[0];
+                let ExprKind::Int(c) = r.kind else { unreachable!() };
+                let c = if *op == IOp::Add { c } else { -c };
+                vec![self.b.ins().iadd_imm_s(a, c)]
+            }
+            // With a number on the right, overflow shows in how the result compares with the left,
+            // which takes one compare-and-branch.
+            ExprKind::IArith { op: op @ (IOp::Add | IOp::Sub), l, r, overflow, .. } if matches!(r.kind, ExprKind::Int(c) if c != i64::MIN) => {
+                let a = self.expr(l)[0];
+                let ExprKind::Int(c) = r.kind else { unreachable!() };
+                let c = if *op == IOp::Add { c } else { -c };
+                let v = self.b.ins().iadd_imm_s(a, c);
+                let cc = if c >= 0 { IntCC::SignedLessThan } else { IntCC::SignedGreaterThan };
+                let wrapped = self.b.ins().icmp(cc, v, a);
+                self.panic_if(wrapped, overflow);
+                vec![v]
             }
             ExprKind::IArith { op, l, r, overflow, div_zero } => {
                 let a = self.expr(l)[0];

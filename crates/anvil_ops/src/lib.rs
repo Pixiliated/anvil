@@ -10,6 +10,7 @@ mod fuzz;
 pub mod golden;
 mod inspect;
 mod lsp;
+mod hot;
 mod measure;
 mod mutate;
 pub(crate) mod proj;
@@ -24,6 +25,7 @@ pub use docs::docs;
 pub use fuzz::{fuzz, program_for};
 pub use inspect::{profile, trace, TRACE_LIMIT};
 pub use lsp::lsp;
+pub use hot::hot;
 pub use measure::measure;
 pub use mutate::mutate;
 pub use proj::{
@@ -243,6 +245,12 @@ pub const COMMANDS: &[Command] = &[
         positionals: &["file?", "args*"],
         options: &[STEPS, INPUT, ("native-only", "", "do not run the interpreter too: no steps, nothing compared")],
         summary: "run programs natively: heap bytes asked for, the most held at once, objects and time, beside the interpreter's counts",
+    },
+    Command {
+        name: "hot",
+        positionals: &["file", "args*"],
+        options: &[INPUT],
+        summary: "run a program natively and sample where its time goes: its functions and the runtime's work, and which arrays a loop keeps checking",
     },
     Command {
         name: "golden check",

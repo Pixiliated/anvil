@@ -1,0 +1,4 @@
+exit: 101
+panic: index 9 out of bounds for length 3 at tests/programs/panic_proved_part_of_expression.anv:8:13
+---
+false

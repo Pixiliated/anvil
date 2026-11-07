@@ -5,11 +5,15 @@
 //! check: nothing can get at an array without going through its one reference. Skipping the check
 //! also leaves no call on the way through a loop, so the loop's values stay in registers.
 //!
-//! `touched` says which locals a statement might share or give a new value; `Gen::stmt` forgets
-//! what it knew about them around that statement.
+//! `changes` says which locals a statement might share or give a new value, and which arrays it
+//! might shorten; `Gen::stmt` forgets what it knew about them around that statement.
+//!
+//! The same goes for indices. A local used as an index that has passed a bounds check stays good
+//! until the local or the array changes, so a swap checks each index once, and a counter up to an
+//! array's length never needs one.
 
 use anvil_front::ir::*;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 /// The local an expression reads through fields alone, if it does.
 fn root(e: &Expr) -> Option<LocalId> {
@@ -24,9 +28,82 @@ fn holds_heap(program: &Program, ty: &Ty) -> bool {
     crate::layout(program, ty).iter().any(|s| s.heap)
 }
 
+/// A scalar of a local that holds an array or bytes.
+pub(crate) type Key = (LocalId, usize);
+
+/// What is known at one point of a function.
+#[derive(Clone, Default)]
+pub(crate) struct Known {
+    /// Arrays with one owner.
+    pub unique: HashSet<Key>,
+    /// Which locals are good indices of which arrays.
+    pub in_bounds: HashSet<(Key, LocalId)>,
+    /// Locals that hold an array's length, or less.
+    pub lengths: HashMap<LocalId, Key>,
+    /// Counters of `for` loops from a number not below 0, which nothing else changes.
+    pub counters: HashSet<LocalId>,
+}
+
+impl Known {
+    pub fn forget(&mut self, changes: &Changes) {
+        let gone = |l: &LocalId| changes.touched.contains(l);
+        let cut = |l: &LocalId| gone(l) || changes.shrunk.contains(l);
+        self.unique.retain(|(l, _)| !gone(l));
+        self.in_bounds.retain(|((a, _), i)| !cut(a) && !gone(i));
+        self.lengths.retain(|n, (a, _)| !gone(n) && !cut(a));
+        self.counters.retain(|i| !gone(i));
+    }
+
+    /// Keeps what also holds in `other`: where two paths join.
+    pub fn meet(&mut self, other: &Known) {
+        self.unique.retain(|k| other.unique.contains(k));
+        self.in_bounds.retain(|k| other.in_bounds.contains(k));
+        self.lengths.retain(|n, a| other.lengths.get(n) == Some(a));
+        self.counters.retain(|i| other.counters.contains(i));
+    }
+}
+
+/// What a statement might do to locals.
+#[derive(Default)]
+pub(crate) struct Changes {
+    /// Shared with something else, or given a new value.
+    pub touched: HashSet<LocalId>,
+    /// Holding an array that may get shorter.
+    pub shrunk: HashSet<LocalId>,
+}
+
+impl Changes {
+    pub fn merge(&mut self, other: Changes) {
+        self.touched.extend(other.touched);
+        self.shrunk.extend(other.shrunk);
+    }
+}
+
+/// Which local's scalar an expression reads through fields alone, if it does.
+pub(crate) fn key_of(program: &Program, e: &Expr) -> Option<Key> {
+    match &e.kind {
+        ExprKind::Local(l) => Some((*l, 0)),
+        ExprKind::Field(base, i) => {
+            let (l, start) = key_of(program, base)?;
+            let Ty::Struct(sid) = base.ty else { return None };
+            Some((l, start + crate::field_range(program, sid, *i).0))
+        }
+        _ => None,
+    }
+}
+
+/// The number local an index or an operand is, if it is one (`Move` being its last read).
+pub(crate) fn local_of(e: &Expr) -> Option<LocalId> {
+    match e.kind {
+        ExprKind::Local(l) | ExprKind::Move(l) => Some(l),
+        _ => None,
+    }
+}
+
 struct Walk<'a> {
     program: &'a Program,
     out: &'a mut HashSet<LocalId>,
+    shrunk: Option<&'a mut HashSet<LocalId>>,
 }
 
 impl Walk<'_> {
@@ -113,8 +190,19 @@ impl Walk<'_> {
             ExprKind::Builtin(Builtin::MapKeys | Builtin::MapValues, args) if root(&args[0]).is_some() => {}
             // The last read: nothing reads the local again until it is written, as after a drop.
             ExprKind::Move(_) => {}
+            // Takes an element, after the check a write makes: the array stays where it is.
+            ExprKind::Take { path, .. } if path.iter().any(|step| matches!(step, Step::Index { .. })) => {
+                for c in children(e) {
+                    self.expr(c);
+                }
+            }
             // Changes the array the local holds in place, after a check of its own.
             ExprKind::Push { .. } | ExprKind::Pop { .. } | ExprKind::MapSet { .. } | ExprKind::MapRemove { .. } => {
+                if let (ExprKind::Pop { local, path, .. } | ExprKind::MapRemove { local, path, .. }, Some(shrunk)) = (&e.kind, self.shrunk.as_deref_mut()) {
+                    if !path.iter().any(|step| matches!(step, Step::Index { .. })) {
+                        shrunk.insert(*local);
+                    }
+                }
                 for c in children(e) {
                     self.expr(c);
                 }
@@ -131,9 +219,17 @@ impl Walk<'_> {
     }
 }
 
-/// The locals that `s` might share with something else or give a new value.
-pub(crate) fn touched(program: &Program, s: &Stmt, out: &mut HashSet<LocalId>) {
-    Walk { program, out }.stmt(s);
+/// Whether a block always ends by leaving it: what follows is not reached through its end.
+pub(crate) fn leaves(stmts: &[Stmt]) -> bool {
+    let last = stmts.iter().rev().find(|s| !matches!(s, Stmt::Line(_) | Stmt::Reached(_)));
+    matches!(last, Some(Stmt::Return(_) | Stmt::Break | Stmt::Continue))
+}
+
+/// What `s` might do to locals.
+pub(crate) fn changes(program: &Program, s: &Stmt) -> Changes {
+    let mut c = Changes::default();
+    Walk { program, out: &mut c.touched, shrunk: Some(&mut c.shrunk) }.stmt(s);
+    c
 }
 
 /// Whether `e` always gives an array or map with one reference, the one it hands over.
@@ -187,33 +283,33 @@ fn gather<'a>(stmts: &'a [Stmt], returns: &mut Vec<&'a Expr>, defs: &mut Vec<(Lo
 fn other_uses(program: &Program, stmts: &[Stmt], out: &mut HashSet<LocalId>) {
     for s in stmts {
         match s {
-            Stmt::Let(_, e) => Walk { program, out: &mut *out }.expr(e),
-            Stmt::Assign(_, path, e, _) if path.is_empty() => Walk { program, out: &mut *out }.expr(e),
+            Stmt::Let(_, e) => Walk { program, out: &mut *out, shrunk: None }.expr(e),
+            Stmt::Assign(_, path, e, _) if path.is_empty() => Walk { program, out: &mut *out, shrunk: None }.expr(e),
             Stmt::Return(Some(e)) if matches!(e.kind, ExprKind::Local(_) | ExprKind::Move(_)) => {}
             Stmt::If(c, t, e) => {
-                Walk { program, out: &mut *out }.expr(c);
+                Walk { program, out: &mut *out, shrunk: None }.expr(c);
                 other_uses(program, t, out);
                 other_uses(program, e, out);
             }
             Stmt::While(c, b) => {
-                Walk { program, out: &mut *out }.expr(c);
+                Walk { program, out: &mut *out, shrunk: None }.expr(c);
                 other_uses(program, b, out);
             }
             Stmt::For(l, start, end, b) => {
                 out.insert(*l);
-                Walk { program, out: &mut *out }.expr(start);
-                Walk { program, out: &mut *out }.expr(end);
+                Walk { program, out: &mut *out, shrunk: None }.expr(start);
+                Walk { program, out: &mut *out, shrunk: None }.expr(end);
                 other_uses(program, b, out);
             }
             Stmt::ForEach { var, held, iter, body } => {
                 out.insert(*var);
                 out.insert(*held);
-                Walk { program, out: &mut *out }.expr(iter);
+                Walk { program, out: &mut *out, shrunk: None }.expr(iter);
                 other_uses(program, body, out);
             }
             Stmt::Match { held, scrutinee, arms } => {
                 out.insert(*held);
-                Walk { program, out: &mut *out }.expr(scrutinee);
+                Walk { program, out: &mut *out, shrunk: None }.expr(scrutinee);
                 for arm in arms {
                     for (_, local) in &arm.bindings {
                         out.insert(*local);
@@ -221,7 +317,7 @@ fn other_uses(program: &Program, stmts: &[Stmt], out: &mut HashSet<LocalId>) {
                     other_uses(program, &arm.body, out);
                 }
             }
-            s => Walk { program, out: &mut *out }.stmt(s),
+            s => Walk { program, out: &mut *out, shrunk: None }.stmt(s),
         }
     }
 }
