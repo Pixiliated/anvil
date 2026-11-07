@@ -347,7 +347,20 @@ green and the interpreter and native backend agreeing on every program in `tests
 - [x] A failed `assert` on arrays, structs and the like says what they were, in a test
 - [x] `s.find_from(t: x, at: i)`; a `testkit.anv` shares test helpers without being an API
 
-## M40: Proving ground, third round (v0.41)
+## M40: Run speed (v0.41)
+What the benchmark against Rust, C++ and Java found: right answers everywhere, the fastest builds, the
+slowest programs, and agents spending their effort working around that.
+- [x] Big maps find keys by hash and stay sorted for whoever looks: a map with 312,527 keys built in
+  a fraction of the time; order, equality and value semantics as before
+- [x] Small objects come from per-thread pools, so a program that allocates is no longer limited by
+  the system's allocator; objects are counted for leak checks only when those run
+- [x] Reference counts, array growth, shifts and byte reads are inline, with the runtime on a cold path
+- [x] An array known to have one owner needs no check before a write, which also keeps a loop's
+  values in registers; length and storage are not read again after a write to an element
+- [x] Small functions are inlined
+- [x] `find`, `split` and turning integers into text are faster, and output goes out in larger pieces
+
+## M41: Proving ground, third round (v0.42)
 - [ ] Fresh agents on new kinds of program, against the same log format: do `let ... else`, `if`
   values and constants get used, and is the loop faster for them?
 - [ ] What round two asked for and did not get: describing a valid struct to the contract lint, so it

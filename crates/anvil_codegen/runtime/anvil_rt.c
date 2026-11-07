@@ -1,7 +1,7 @@
 /* Anvil runtime: the only code a compiled Anvil program links besides the C runtime.
  * Text formatting here has twins in anvil_front (ir.rs); the parity tests keep them identical.
  *
- * Heap objects (str, arrays and maps; a map is an array of key-value elements sorted by key)
+ * Heap objects (str, arrays and maps; a map is an array of key-value elements, see Maps below)
  * are reference counted. The layout is shared with the code
  * generator (anvil_codegen/src/lib.rs): rc at offset 0, kind at 8, length at 16; arrays keep
  * their capacity at 24, element layout at 32 and element storage at 40. Static strings have
@@ -10,6 +10,7 @@
 #ifndef _WIN32
 #define _POSIX_C_SOURCE 200809L /* clock_gettime */
 #define _XOPEN_SOURCE 700       /* sigaltstack, SA_ONSTACK */
+#define _DEFAULT_SOURCE         /* fwrite_unlocked */
 #endif
 #ifdef _MSC_VER
 #pragma warning(disable : 4200) /* flexible array members are standard C99 */
@@ -64,7 +65,7 @@ static int64_t atomic_cas(int64_t *p, int64_t expected, int64_t desired) {
 
 /* KIND_TEXT: a str or bytes allocated with room to grow (text_room), which an append to the only
  * reference fills in place. It is a str like any other everywhere else. */
-enum { KIND_STR = 0, KIND_ARR = 1, KIND_FN = 2, KIND_TEXT = 3 };
+enum { KIND_STR = 0, KIND_ARR = 1, KIND_FN = 2, KIND_TEXT = 3, KIND_MAP = 4 };
 
 typedef struct {
     int64_t rc;
@@ -94,6 +95,26 @@ typedef struct {
     char *data;
 } AnvArr;
 
+/* One place in a big map's table: the key's hash and its element's position + 1 (0 = empty). */
+typedef struct {
+    uint32_t hash;
+    uint32_t where;
+} MapSlot;
+
+/* A map is an array of (key, value) elements, the key in the first slot, and starts out sorted by
+ * key. From MAP_SMALL elements on it also has a table finding a key by its hash, and new elements
+ * go on the end: only the first `sorted` are in order until anvil_map_settle, which anything that
+ * walks the elements calls first. Elements keep their order otherwise, so what a program sees
+ * never depends on the table or the hash. */
+typedef struct {
+    AnvArr a;
+    int64_t key_is_str;
+    int64_t sorted;
+    MapSlot *table;
+    int64_t mask;
+    uint32_t last_hash; /* of the key the last find on this map looked for */
+} AnvMap;
+
 /* A function value: the layout of its captured values, its code, then the values. The code
  * takes the object itself first; static objects (refcount -1) capture nothing. */
 typedef struct {
@@ -104,10 +125,15 @@ typedef struct {
     char env[];
 } AnvFn;
 
-/* Objects allocated and not yet freed; checked at exit when ANVIL_CHECK_LEAKS is set. Counted
- * atomically, since parallel_map's workers allocate at once (reference counts are not: workers
- * never share an object). */
+/* Objects allocated and not yet freed, counted and checked at exit only when ANVIL_CHECK_LEAKS is
+ * set. Counted atomically, since parallel_map's workers allocate at once (reference counts are
+ * not: workers never share an object). */
+static int leak_checking = 0;
 static int64_t live_objects = 0;
+#define COUNT_OBJECTS(change)                                  \
+    do {                                                       \
+        if (leak_checking) ATOMIC_ADD(&live_objects, (change)); \
+    } while (0)
 
 /* What the program's objects ask of the heap, counted when ANVIL_MEASURE names a file (`anvil
  * measure`), which gets the totals at exit: bytes asked for, the most held at once, and objects
@@ -144,6 +170,7 @@ static void mem_report(void) {
 }
 
 static void init_measure(void) {
+    leak_checking = getenv("ANVIL_CHECK_LEAKS") != NULL;
     mem_file = getenv("ANVIL_MEASURE");
     if (mem_file) {
         mem_measuring = 1;
@@ -151,7 +178,17 @@ static void init_measure(void) {
     }
 }
 
-/* Output is byte-exact on every platform: no newline translation. */
+/* Only the main thread prints (a worker's function is pure), so streams need no locks. */
+#ifdef _WIN32
+#define WRITE_BYTES _fwrite_nolock
+#define WRITE_CHAR _fputc_nolock
+#else
+#define WRITE_BYTES fwrite_unlocked
+#define WRITE_CHAR putc_unlocked
+#endif
+
+/* Output is byte-exact on every platform: no newline translation. Output that goes to a file or a
+ * pipe is written in larger pieces; everything that must show first flushes it. */
 static void init_stdout(void) {
     static int done = 0;
     if (done) return;
@@ -159,6 +196,9 @@ static void init_stdout(void) {
 #ifdef _WIN32
     _setmode(_fileno(stdout), _O_BINARY);
     _setmode(_fileno(stderr), _O_BINARY);
+    if (!_isatty(_fileno(stdout))) setvbuf(stdout, NULL, _IOFBF, 1 << 16);
+#else
+    if (!isatty(fileno(stdout))) setvbuf(stdout, NULL, _IOFBF, 1 << 16);
 #endif
 }
 
@@ -177,6 +217,107 @@ static void *xmalloc(size_t n) {
     return p;
 }
 
+/* Small objects and small element storage come from per-thread pools: a free list per size, 16
+ * bytes apart, refilled from chunks that are never given back, so asking for memory is a few
+ * instructions. Whoever frees a block keeps it. A worker's pool goes back to the spares when it
+ * finishes, for the next worker. Every block's size is known when it is freed (see the callers).
+ * A freed object's rc stays 0, so the checks in anvil_retain and anvil_release still see it. */
+#define POOL_STEP 16
+#define POOL_LARGEST 1024
+#define POOL_CHUNK (256 * 1024)
+
+typedef struct PoolFree {
+    int64_t rc;
+    struct PoolFree *next;
+} PoolFree;
+
+typedef struct Pool {
+    char *bump, *end;
+    PoolFree *free[POOL_LARGEST / POOL_STEP + 1];
+    struct Pool *next_spare;
+} Pool;
+
+static THREAD_LOCAL Pool *my_pool = NULL;
+static Pool *spare_pools = NULL;
+static int64_t spare_lock = 0;
+
+static void lock_spares(void) {
+    while (ATOMIC_CAS(&spare_lock, 0, 1) != 0) {
+    }
+}
+
+static Pool *pool_claim(void) {
+    lock_spares();
+    Pool *p = spare_pools;
+    if (p) spare_pools = p->next_spare;
+    ATOMIC_SET(&spare_lock, 0);
+    if (!p) {
+        p = xmalloc(sizeof(Pool));
+        memset(p, 0, sizeof(Pool));
+    }
+    my_pool = p;
+    return p;
+}
+
+static void pool_give_back(void) {
+    Pool *p = my_pool;
+    if (!p) return;
+    my_pool = NULL;
+    lock_spares();
+    p->next_spare = spare_pools;
+    spare_pools = p;
+    ATOMIC_SET(&spare_lock, 0);
+}
+
+static size_t pool_class(size_t n) { return n ? (n + POOL_STEP - 1) / POOL_STEP : 1; }
+
+static void *pool_alloc(size_t n) {
+    if (n > POOL_LARGEST) return xmalloc(n);
+    size_t c = pool_class(n);
+    Pool *p = my_pool ? my_pool : pool_claim();
+    PoolFree *f = p->free[c];
+    if (f) {
+        p->free[c] = f->next;
+        return f;
+    }
+    size_t size = c * POOL_STEP;
+    if ((size_t)(p->end - p->bump) < size) {
+        p->bump = xmalloc(POOL_CHUNK);
+        p->end = p->bump + POOL_CHUNK;
+    }
+    void *block = p->bump;
+    p->bump += size;
+    return block;
+}
+
+static void pool_free(void *block, size_t n) {
+    if (n > POOL_LARGEST) {
+        free(block);
+        return;
+    }
+    size_t c = pool_class(n);
+    Pool *p = my_pool ? my_pool : pool_claim();
+    PoolFree *f = block;
+    f->rc = 0;
+    f->next = p->free[c];
+    p->free[c] = f;
+}
+
+/* `block` (may be NULL when old is 0) resized from `old` to `new_size` bytes. */
+static void *pool_resize(void *block, size_t old, size_t new_size) {
+    if (!block) return pool_alloc(new_size);
+    if (old > POOL_LARGEST && new_size > POOL_LARGEST) {
+        void *grown = realloc(block, new_size);
+        if (!grown) runtime_error("out of memory");
+        return grown;
+    }
+    if (old <= POOL_LARGEST && new_size <= POOL_LARGEST && pool_class(old) == pool_class(new_size)) return block;
+    void *grown = pool_alloc(new_size);
+    memcpy(grown, block, old < new_size ? old : new_size);
+    pool_free(block, old);
+    return grown;
+}
+
 static int64_t text_room(int64_t len);
 
 void anvil_retain(AnvObj *o) {
@@ -189,48 +330,60 @@ void anvil_release(AnvObj *o) {
     if (!o || o->rc < 0) return;
     if (o->rc == 0) runtime_error("release of a freed object");
     if (--o->rc > 0) return;
-    if (o->kind == KIND_ARR) {
+    COUNT_OBJECTS(-1);
+    if (o->kind == KIND_ARR || o->kind == KIND_MAP) {
         AnvArr *a = (AnvArr *)o;
-        for (int64_t i = 0; i < a->len; i++) {
-            char *elem = a->data + i * a->ti->elem_size;
-            for (int64_t k = 0; k < a->ti->nptrs; k++) anvil_release(*(AnvObj **)(elem + a->ti->offsets[k]));
+        int64_t size = a->ti->elem_size, nptrs = a->ti->nptrs;
+        if (nptrs) {
+            for (int64_t i = 0; i < a->len; i++) {
+                char *elem = a->data + i * size;
+                for (int64_t k = 0; k < nptrs; k++) anvil_release(*(AnvObj **)(elem + a->ti->offsets[k]));
+            }
         }
-        mem_note(0, -(int64_t)sizeof(AnvArr) - a->cap * a->ti->elem_size);
-        free(a->data);
+        int64_t header = o->kind == KIND_MAP ? (int64_t)sizeof(AnvMap) : (int64_t)sizeof(AnvArr);
+        mem_note(0, -header - a->cap * size);
+        if (a->data) pool_free(a->data, (size_t)(a->cap * size));
+        if (o->kind == KIND_MAP && ((AnvMap *)o)->table) {
+            AnvMap *m = (AnvMap *)o;
+            mem_note(0, -(m->mask + 1) * (int64_t)sizeof(MapSlot));
+            free(m->table);
+        }
+        pool_free(o, (size_t)header);
     } else if (o->kind == KIND_FN) {
         AnvFn *f = (AnvFn *)o;
         for (int64_t k = 0; k < f->ti->nptrs; k++) anvil_release(*(AnvObj **)(f->env + f->ti->offsets[k]));
         mem_note(0, -(int64_t)sizeof(AnvFn) - f->ti->elem_size);
+        pool_free(o, sizeof(AnvFn) + (size_t)f->ti->elem_size);
     } else {
         const AnvStr *s = (const AnvStr *)o;
-        mem_note(0, -(int64_t)sizeof(AnvStr) - (o->kind == KIND_TEXT ? text_room(s->len) : s->len + 1));
+        int64_t size = (int64_t)sizeof(AnvStr) + (o->kind == KIND_TEXT ? text_room(s->len) : s->len + 1);
+        mem_note(0, -size);
+        pool_free(o, (size_t)size);
     }
-    ATOMIC_ADD(&live_objects, -1);
-    free(o);
 }
 
 /* A closure: the generated code stores the captured values into env. */
 AnvFn *anvil_fn_new(const AnvTypeInfo *ti, void *code) {
-    AnvFn *f = xmalloc(sizeof(AnvFn) + (size_t)ti->elem_size);
+    AnvFn *f = pool_alloc(sizeof(AnvFn) + (size_t)ti->elem_size);
     f->rc = 1;
     f->kind = KIND_FN;
     f->ti = ti;
     f->code = code;
     mem_object((int64_t)sizeof(AnvFn) + ti->elem_size);
-    ATOMIC_ADD(&live_objects, 1);
+    COUNT_OBJECTS(1);
     return f;
 }
 
 /* ---- strings ---- */
 
 static AnvStr *str_new(int64_t len) {
-    AnvStr *s = xmalloc(sizeof(AnvStr) + (size_t)len + 1);
+    AnvStr *s = pool_alloc(sizeof(AnvStr) + (size_t)len + 1);
     s->rc = 1;
     s->kind = KIND_STR;
     s->len = len;
     s->bytes[len] = 0;
     mem_object((int64_t)sizeof(AnvStr) + len + 1);
-    ATOMIC_ADD(&live_objects, 1);
+    COUNT_OBJECTS(1);
     return s;
 }
 
@@ -258,19 +411,18 @@ AnvStr *anvil_str_append(AnvStr *a, AnvStr *b) {
     if (a->rc == 1 && a->kind == KIND_TEXT) {
         if (len + 1 > text_room(a->len)) {
             mem_note((int64_t)sizeof(AnvStr) + text_room(len), text_room(len) - text_room(a->len));
-            s = realloc(a, sizeof(AnvStr) + (size_t)text_room(len));
+            s = pool_resize(a, sizeof(AnvStr) + (size_t)text_room(a->len), sizeof(AnvStr) + (size_t)text_room(len));
         } else {
             s = a;
         }
-        if (!s) runtime_error("out of memory");
     } else {
-        s = xmalloc(sizeof(AnvStr) + (size_t)text_room(len));
+        s = pool_alloc(sizeof(AnvStr) + (size_t)text_room(len));
         s->rc = 1;
         s->kind = KIND_TEXT;
         s->len = a->len;
         memcpy(s->bytes, a->bytes, (size_t)a->len);
         mem_object((int64_t)sizeof(AnvStr) + text_room(len));
-        ATOMIC_ADD(&live_objects, 1);
+        COUNT_OBJECTS(1);
         anvil_release((AnvObj *)a);
     }
     memcpy(s->bytes + s->len, b->bytes, (size_t)b->len);
@@ -309,10 +461,21 @@ int64_t anvil_str_cmp(const AnvStr *a, const AnvStr *b) {
     return 0;
 }
 
+/* The digits of `v` end at `end`; returns where they start. */
+static char *i64_digits(int64_t v, char *end) {
+    uint64_t u = v < 0 ? 0 - (uint64_t)v : (uint64_t)v;
+    do {
+        *--end = (char)('0' + u % 10);
+        u /= 10;
+    } while (u);
+    if (v < 0) *--end = '-';
+    return end;
+}
+
 AnvStr *anvil_str_from_i64(int64_t v) {
     char buf[32];
-    int n = snprintf(buf, sizeof buf, "%lld", (long long)v);
-    return str_from(buf, n);
+    char *start = i64_digits(v, buf + sizeof buf);
+    return str_from(start, buf + sizeof buf - start);
 }
 
 AnvStr *anvil_str_from_bool(int64_t v) { return v ? str_from("true", 4) : str_from("false", 5); }
@@ -375,17 +538,22 @@ static FILE *stream_of(int64_t stream) {
 
 void anvil_print_raw(const AnvStr *s) {
     init_stdout();
-    fwrite(s->bytes, 1, (size_t)s->len, stdout);
+    WRITE_BYTES(s->bytes, 1, (size_t)s->len, stdout);
 }
 
 void anvil_print_line(const AnvStr *s, int64_t stream) {
     FILE *f = stream_of(stream);
-    fwrite(s->bytes, 1, (size_t)s->len, f);
-    fputc('\n', f);
+    WRITE_BYTES(s->bytes, 1, (size_t)s->len, f);
+    WRITE_CHAR('\n', f);
 }
 
 /* print of a number or a bool writes its text straight out: print never allocates. */
-void anvil_print_i64(int64_t v, int64_t stream) { fprintf(stream_of(stream), "%lld\n", (long long)v); }
+void anvil_print_i64(int64_t v, int64_t stream) {
+    char buf[32];
+    buf[31] = '\n';
+    char *start = i64_digits(v, buf + 31);
+    WRITE_BYTES(start, 1, (size_t)(buf + sizeof buf - start), stream_of(stream));
+}
 
 void anvil_print_bool(int64_t v, int64_t stream) { fputs(v ? "true\n" : "false\n", stream_of(stream)); }
 
@@ -607,7 +775,7 @@ void anvil_panic_index(int64_t index, int64_t len, const AnvStr *site) {
 /* Called by the generated main after anvil_main returns, so buffered output is never lost. */
 void anvil_exit(int64_t code) {
     fflush(stdout);
-    if (getenv("ANVIL_CHECK_LEAKS") && live_objects != 0) {
+    if (leak_checking && live_objects != 0) {
         char buf[64];
         snprintf(buf, sizeof buf, "%lld objects leaked", (long long)live_objects);
         runtime_error(buf);
@@ -626,24 +794,30 @@ void anvil_check_exit(int64_t code) {
 
 /* ---- arrays ---- */
 
-AnvArr *anvil_arr_new(const AnvTypeInfo *ti, int64_t cap) {
-    AnvArr *a = xmalloc(sizeof(AnvArr));
+static void arr_init(AnvArr *a, const AnvTypeInfo *ti, int64_t cap, int64_t kind, int64_t header) {
     a->rc = 1;
-    a->kind = KIND_ARR;
+    a->kind = kind;
     a->len = 0;
     a->cap = cap;
     a->ti = ti;
-    a->data = cap ? xmalloc((size_t)(cap * ti->elem_size)) : NULL;
-    mem_object((int64_t)sizeof(AnvArr) + cap * ti->elem_size);
-    ATOMIC_ADD(&live_objects, 1);
+    a->data = cap ? pool_alloc((size_t)(cap * ti->elem_size)) : NULL;
+    mem_object(header + cap * ti->elem_size);
+    COUNT_OBJECTS(1);
+}
+
+AnvArr *anvil_arr_new(const AnvTypeInfo *ti, int64_t cap) {
+    AnvArr *a = pool_alloc(sizeof(AnvArr));
+    arr_init(a, ti, cap, KIND_ARR, (int64_t)sizeof(AnvArr));
     return a;
 }
+
+static AnvMap *map_clone(const AnvMap *m);
 
 /* Takes one reference to `a` and returns an array with a single owner: `a` itself if it has
  * no other owners, otherwise a copy (and `a` loses the reference). */
 AnvArr *anvil_arr_unique(AnvArr *a) {
     if (a->rc == 1) return a;
-    AnvArr *b = anvil_arr_new(a->ti, a->len);
+    AnvArr *b = a->kind == KIND_MAP ? &map_clone((const AnvMap *)a)->a : anvil_arr_new(a->ti, a->len);
     b->len = a->len;
     if (a->len) memcpy(b->data, a->data, (size_t)(a->len * a->ti->elem_size));
     for (int64_t i = 0; i < b->len; i++) {
@@ -661,18 +835,10 @@ char *anvil_arr_push_slot(AnvArr *a) {
         if (a->cap > INT64_MAX / 2 / (a->ti->elem_size ? a->ti->elem_size : 1)) runtime_error("array too large");
         int64_t cap = a->cap ? a->cap * 2 : 4;
         mem_note(cap * a->ti->elem_size, (cap - a->cap) * a->ti->elem_size);
-        char *data = realloc(a->data, (size_t)(cap * a->ti->elem_size) + 1);
-        if (!data) runtime_error("out of memory");
-        a->data = data;
+        a->data = pool_resize(a->data, (size_t)(a->cap * a->ti->elem_size), (size_t)(cap * a->ti->elem_size));
         a->cap = cap;
     }
     return a->data + a->len++ * a->ti->elem_size;
-}
-
-/* Removes the last element of a uniquely owned, non-empty array; its references pass to the caller. */
-char *anvil_arr_pop_slot(AnvArr *a) {
-    if (a->rc != 1 || a->len == 0) runtime_error("pop from a shared or empty array");
-    return a->data + --a->len * a->ti->elem_size;
 }
 
 static void retain_elements(AnvArr *a) {
@@ -683,7 +849,7 @@ static void retain_elements(AnvArr *a) {
 }
 
 /* Inserts an uninitialised slot at `pos` of a uniquely owned array and returns its address. */
-char *anvil_arr_insert_slot(AnvArr *a, int64_t pos) {
+static char *arr_insert_slot(AnvArr *a, int64_t pos) {
     if (pos < 0 || pos > a->len) runtime_error("insert outside an array");
     anvil_arr_push_slot(a);
     int64_t size = a->ti->elem_size;
@@ -693,7 +859,7 @@ char *anvil_arr_insert_slot(AnvArr *a, int64_t pos) {
 }
 
 /* Removes element `pos` of a uniquely owned array; the caller has released its references. */
-void anvil_arr_remove_slot(AnvArr *a, int64_t pos) {
+static void arr_remove_slot(AnvArr *a, int64_t pos) {
     if (a->rc != 1 || pos < 0 || pos >= a->len) runtime_error("remove from a shared array or outside it");
     int64_t size = a->ti->elem_size;
     char *at = a->data + pos * size;
@@ -735,13 +901,22 @@ AnvStr *anvil_str_slice(const AnvStr *s, int64_t from, int64_t to, const AnvStr 
 
 /* ---- str search and split ---- */
 
-/* Byte offset of the first occurrence of t in s, or -1; an empty t is found at 0. */
-int64_t anvil_str_find(const AnvStr *s, const AnvStr *t) {
-    for (int64_t i = 0; i + t->len <= s->len; i++) {
-        if (memcmp(s->bytes + i, t->bytes, (size_t)t->len) == 0) return i;
+/* Byte offset of the first occurrence of t in s at or after `at`, or -1; an empty t is found at
+ * once. Looks for t's first byte, then compares the rest. */
+static int64_t find_at(const AnvStr *s, const AnvStr *t, int64_t at) {
+    if (at + t->len > s->len) return -1;
+    if (t->len == 0) return at;
+    const char *p = s->bytes + at, *last = s->bytes + s->len - t->len;
+    while (p <= last) {
+        p = memchr(p, (unsigned char)t->bytes[0], (size_t)(last - p) + 1);
+        if (!p) return -1;
+        if (memcmp(p + 1, t->bytes + 1, (size_t)t->len - 1) == 0) return p - s->bytes;
+        p++;
     }
     return -1;
 }
+
+int64_t anvil_str_find(const AnvStr *s, const AnvStr *t) { return find_at(s, t, 0); }
 
 int64_t anvil_str_find_from(const AnvStr *s, const AnvStr *t, int64_t at, const AnvStr *site) {
     if (at < 0 || at > s->len) {
@@ -751,10 +926,7 @@ int64_t anvil_str_find_from(const AnvStr *s, const AnvStr *t, int64_t at, const 
         if (n >= (int)sizeof buf) n = (int)sizeof buf - 1;
         panic_bytes(buf, n);
     }
-    for (int64_t i = at; i + t->len <= s->len; i++) {
-        if (memcmp(s->bytes + i, t->bytes, (size_t)t->len) == 0) return i;
-    }
-    return -1;
+    return find_at(s, t, at);
 }
 
 int64_t anvil_str_starts(const AnvStr *s, const AnvStr *t) {
@@ -770,14 +942,9 @@ AnvArr *anvil_str_split(const AnvStr *s, const AnvStr *sep, const AnvTypeInfo *t
     if (sep->len == 0) anvil_panic(message);
     AnvArr *out = anvil_arr_new(ti, 4);
     int64_t start = 0;
-    for (int64_t i = 0; i + sep->len <= s->len;) {
-        if (memcmp(s->bytes + i, sep->bytes, (size_t)sep->len) == 0) {
-            *(AnvStr **)anvil_arr_push_slot(out) = str_from(s->bytes + start, i - start);
-            i += sep->len;
-            start = i;
-        } else {
-            i++;
-        }
+    for (int64_t i = find_at(s, sep, 0); i >= 0; i = find_at(s, sep, start)) {
+        *(AnvStr **)anvil_arr_push_slot(out) = str_from(s->bytes + start, i - start);
+        start = i + sep->len;
     }
     *(AnvStr **)anvil_arr_push_slot(out) = str_from(s->bytes + start, s->len - start);
     return out;
@@ -790,14 +957,114 @@ int64_t anvil_str_eq(const AnvStr *a, const AnvStr *b) {
     return a->len == b->len && memcmp(a->bytes, b->bytes, (size_t)a->len) == 0;
 }
 
-/* ---- maps: an array of (key, value) elements sorted by key, the key in the first slot ---- */
+/* ---- maps (see AnvMap) ---- */
 
-/* Index of `key`, or -(insertion point) - 1. */
-int64_t anvil_map_find_i64(const AnvArr *m, int64_t key) {
-    int64_t lo = 0, hi = m->len;
+#define MAP_SMALL 32
+
+AnvArr *anvil_map_new(const AnvTypeInfo *ti, int64_t cap, int64_t key_is_str) {
+    AnvMap *m = pool_alloc(sizeof(AnvMap));
+    arr_init(&m->a, ti, cap, KIND_MAP, (int64_t)sizeof(AnvMap));
+    m->key_is_str = key_is_str;
+    m->sorted = 0;
+    m->table = NULL;
+    m->mask = 0;
+    m->last_hash = 0;
+    return &m->a;
+}
+
+static uint32_t hash_i64(int64_t key) {
+    uint64_t h = (uint64_t)key;
+    h ^= h >> 32;
+    h *= 0x9E3779B97F4A7C15ull;
+    return (uint32_t)(h ^ (h >> 29));
+}
+
+static uint32_t hash_str(const AnvStr *key) {
+    const uint64_t k = 0x9FB21C651E98DF25ull;
+    uint64_t h = (uint64_t)key->len * k;
+    const char *p = key->bytes;
+    int64_t n = key->len;
+    for (; n >= 8; n -= 8, p += 8) {
+        uint64_t word;
+        memcpy(&word, p, 8);
+        h = (h ^ word) * k;
+        h ^= h >> 47;
+    }
+    if (n) {
+        uint64_t word = 0;
+        memcpy(&word, p, (size_t)n);
+        h = (h ^ word) * k;
+        h ^= h >> 47;
+    }
+    h *= k;
+    return (uint32_t)(h ^ (h >> 32));
+}
+
+static uint32_t hash_at(const AnvMap *m, int64_t pos) {
+    const char *key = m->a.data + pos * m->a.ti->elem_size;
+    return m->key_is_str ? hash_str(*(const AnvStr *const *)key) : hash_i64(*(const int64_t *)key);
+}
+
+static int key_before(const AnvMap *m, int64_t i, int64_t j) {
+    const char *a = m->a.data + i * m->a.ti->elem_size, *b = m->a.data + j * m->a.ti->elem_size;
+    if (m->key_is_str) return anvil_str_cmp(*(const AnvStr *const *)a, *(const AnvStr *const *)b) < 0;
+    return *(const int64_t *)a < *(const int64_t *)b;
+}
+
+static void table_put(MapSlot *table, int64_t mask, uint32_t hash, uint32_t where) {
+    int64_t i = (int64_t)hash & mask;
+    while (table[i].where) i = (i + 1) & mask;
+    table[i].hash = hash;
+    table[i].where = where;
+}
+
+static MapSlot *table_new(int64_t slots) {
+    mem_note(slots * (int64_t)sizeof(MapSlot), slots * (int64_t)sizeof(MapSlot));
+    MapSlot *table = xmalloc((size_t)slots * sizeof(MapSlot));
+    memset(table, 0, (size_t)slots * sizeof(MapSlot));
+    return table;
+}
+
+/* Table with room for twice the elements. */
+static void table_grow(AnvMap *m) {
+    int64_t slots = (m->mask + 1) * 2;
+    MapSlot *table = table_new(slots);
+    for (int64_t i = 0; i <= m->mask; i++)
+        if (m->table[i].where) table_put(table, slots - 1, m->table[i].hash, m->table[i].where);
+    mem_note(0, -(m->mask + 1) * (int64_t)sizeof(MapSlot));
+    free(m->table);
+    m->table = table;
+    m->mask = slots - 1;
+}
+
+/* A copy of the map without its elements' contents; the caller fills `len` elements. */
+static AnvMap *map_clone(const AnvMap *m) {
+    AnvMap *b = (AnvMap *)anvil_map_new(m->a.ti, m->a.len, m->key_is_str);
+    b->sorted = m->sorted;
+    if (m->table) {
+        b->table = table_new(m->mask + 1);
+        memcpy(b->table, m->table, (size_t)(m->mask + 1) * sizeof(MapSlot));
+        b->mask = m->mask;
+    }
+    return b;
+}
+
+/* Index of `key`, or a negative number: -(insertion point) - 1 while the map is small. */
+int64_t anvil_map_find_i64(const AnvArr *a, int64_t key) {
+    AnvMap *m = (AnvMap *)a;
+    int64_t size = a->ti->elem_size;
+    if (m->table) {
+        uint32_t h = m->last_hash = hash_i64(key);
+        for (int64_t i = (int64_t)h & m->mask;; i = (i + 1) & m->mask) {
+            uint32_t where = m->table[i].where;
+            if (!where) return -1;
+            if (m->table[i].hash == h && *(const int64_t *)(a->data + (int64_t)(where - 1) * size) == key) return where - 1;
+        }
+    }
+    int64_t lo = 0, hi = a->len;
     while (lo < hi) {
         int64_t mid = lo + (hi - lo) / 2;
-        int64_t k = *(const int64_t *)(m->data + mid * m->ti->elem_size);
+        int64_t k = *(const int64_t *)(a->data + mid * size);
         if (k == key) return mid;
         if (k < key) lo = mid + 1;
         else hi = mid;
@@ -805,16 +1072,140 @@ int64_t anvil_map_find_i64(const AnvArr *m, int64_t key) {
     return -lo - 1;
 }
 
-int64_t anvil_map_find_str(const AnvArr *m, const AnvStr *key) {
-    int64_t lo = 0, hi = m->len;
+int64_t anvil_map_find_str(const AnvArr *a, const AnvStr *key) {
+    AnvMap *m = (AnvMap *)a;
+    int64_t size = a->ti->elem_size;
+    if (m->table) {
+        uint32_t h = m->last_hash = hash_str(key);
+        for (int64_t i = (int64_t)h & m->mask;; i = (i + 1) & m->mask) {
+            uint32_t where = m->table[i].where;
+            if (!where) return -1;
+            if (m->table[i].hash == h && anvil_str_eq(*(const AnvStr *const *)(a->data + (int64_t)(where - 1) * size), key))
+                return where - 1;
+        }
+    }
+    int64_t lo = 0, hi = a->len;
     while (lo < hi) {
         int64_t mid = lo + (hi - lo) / 2;
-        int64_t c = anvil_str_cmp(*(const AnvStr **)(m->data + mid * m->ti->elem_size), key);
+        int64_t c = anvil_str_cmp(*(const AnvStr *const *)(a->data + mid * size), key);
         if (c == 0) return mid;
         if (c < 0) lo = mid + 1;
         else hi = mid;
     }
     return -lo - 1;
+}
+
+/* A slot for a new key, right after a find on this map did not find it (`pos` from that find);
+ * the caller fills it. `key` is the key (an i64, or a str pointer). */
+char *anvil_map_insert_slot(AnvArr *a, int64_t pos, int64_t key) {
+    AnvMap *m = (AnvMap *)a;
+    uint32_t hash;
+    if (!m->table) {
+        if (a->len < MAP_SMALL) return arr_insert_slot(a, pos);
+        int64_t slots = 128;
+        while (slots < a->len * 4) slots *= 2;
+        m->table = table_new(slots);
+        m->mask = slots - 1;
+        for (int64_t i = 0; i < a->len; i++) table_put(m->table, m->mask, hash_at(m, i), (uint32_t)(i + 1));
+        m->sorted = a->len;
+        hash = m->key_is_str ? hash_str((const AnvStr *)(intptr_t)key) : hash_i64(key);
+    } else {
+        hash = m->last_hash;
+    }
+    if (a->len >= 0xFFFFFFFELL) runtime_error("map too large");
+    if ((a->len + 1) * 2 > m->mask + 1) table_grow(m);
+    int64_t at = a->len;
+    if (m->sorted == at) {
+        const char *last = at ? a->data + (at - 1) * a->ti->elem_size : NULL;
+        int after = !last || (m->key_is_str ? anvil_str_cmp(*(const AnvStr *const *)last, (const AnvStr *)(intptr_t)key) < 0
+                                            : *(const int64_t *)last < key);
+        if (after) m->sorted = at + 1;
+    }
+    table_put(m->table, m->mask, hash, (uint32_t)(at + 1));
+    return anvil_arr_push_slot(a);
+}
+
+/* The table place of element `pos`, whose key has `hash`. */
+static int64_t table_place(const AnvMap *m, uint32_t hash, int64_t pos) {
+    for (int64_t i = (int64_t)hash & m->mask;; i = (i + 1) & m->mask)
+        if (m->table[i].where == (uint32_t)(pos + 1)) return i;
+}
+
+/* Removes element `pos`, right after a find on this map found it; the caller has released its
+ * references. */
+void anvil_map_remove_slot(AnvArr *a, int64_t pos) {
+    AnvMap *m = (AnvMap *)a;
+    if (!m->table) {
+        arr_remove_slot(a, pos);
+        return;
+    }
+    if (a->rc != 1 || pos < 0 || pos >= a->len) runtime_error("remove from a shared map or outside it");
+    /* Empty its place, moving later entries of the run back so a search still reaches them. */
+    int64_t hole = table_place(m, m->last_hash, pos), j = hole;
+    for (;;) {
+        j = (j + 1) & m->mask;
+        if (!m->table[j].where) break;
+        int64_t home = (int64_t)m->table[j].hash & m->mask;
+        if (((j - home) & m->mask) >= ((j - hole) & m->mask)) {
+            m->table[hole] = m->table[j];
+            hole = j;
+        }
+    }
+    m->table[hole].where = 0;
+    /* The last element fills the gap. */
+    int64_t last = a->len - 1;
+    if (pos != last) {
+        int64_t size = a->ti->elem_size;
+        m->table[table_place(m, hash_at(m, last), last)].where = (uint32_t)(pos + 1);
+        memcpy(a->data + pos * size, a->data + last * size, (size_t)size);
+    }
+    a->len = last;
+    if (m->sorted > pos) m->sorted = pos;
+}
+
+static void sort_positions(const AnvMap *m, int64_t *order, int64_t *room, int64_t n) {
+    if (n < 2) return;
+    int64_t half = n / 2, i = 0, j = half, k = 0;
+    sort_positions(m, order, room, half);
+    sort_positions(m, order + half, room, n - half);
+    while (i < half && j < n) room[k++] = key_before(m, order[j], order[i]) ? order[j++] : order[i++];
+    while (i < half) room[k++] = order[i++];
+    while (j < n) room[k++] = order[j++];
+    memcpy(order, room, (size_t)n * sizeof(int64_t));
+}
+
+/* Puts the elements in key order. Changes nothing a program can see, so a shared map may be
+ * settled; reference counts stay as they are. */
+void anvil_map_settle(AnvArr *a) {
+    AnvMap *m = (AnvMap *)a;
+    if (!m->table) return;
+    int64_t n = a->len, s = m->sorted;
+    while (s < n && (s == 0 || key_before(m, s - 1, s))) s++;
+    m->sorted = n;
+    if (s == n) return;
+    /* The new elements in order, then merged with the old ones. */
+    int64_t t = n - s, size = a->ti->elem_size;
+    int64_t *tail = xmalloc((size_t)(t * 2) * sizeof(int64_t));
+    for (int64_t i = 0; i < t; i++) tail[i] = s + i;
+    sort_positions(m, tail, tail + t, t);
+    int64_t *order = xmalloc((size_t)n * sizeof(int64_t));
+    for (int64_t i = 0, j = 0, k = 0; k < n; k++) {
+        if (i < s && (j == t || key_before(m, i, tail[j]))) order[k] = i++;
+        else order[k] = tail[j++];
+    }
+    char *data = pool_alloc((size_t)(a->cap * size));
+    uint32_t *place = xmalloc((size_t)n * sizeof(uint32_t));
+    for (int64_t k = 0; k < n; k++) {
+        memcpy(data + k * size, a->data + order[k] * size, (size_t)size);
+        place[order[k]] = (uint32_t)(k + 1);
+    }
+    for (int64_t i = 0; i <= m->mask; i++)
+        if (m->table[i].where) m->table[i].where = place[m->table[i].where - 1];
+    pool_free(a->data, (size_t)(a->cap * size));
+    a->data = data;
+    free(place);
+    free(order);
+    free(tail);
 }
 
 /* ---- the clock and the random sequence (docs/SPEC.md, Effects) ---- */
@@ -974,6 +1365,7 @@ static void init_stdin(void) {
 
 AnvStr *anvil_read_stdin(void) {
     init_stdin();
+    fflush(stdout); /* a prompt shows before the program waits */
     size_t cap = 4096, len = 0;
     char *buf = xmalloc(cap);
     for (;;) {
@@ -1209,11 +1601,6 @@ AnvArr *anvil_bytes_to_array(const AnvStr *b, const AnvTypeInfo *ti) {
     return out;
 }
 
-int64_t anvil_bytes_at(const AnvStr *b, int64_t i, const AnvStr *site) {
-    if (i < 0 || i >= b->len) anvil_panic_index(i, b->len, site);
-    return (unsigned char)b->bytes[i];
-}
-
 AnvStr *anvil_bytes_slice(const AnvStr *b, int64_t from, int64_t to, const AnvStr *site) {
     if (from < 0 || to > b->len || from > to) panic_slice("out of bounds for length", from, to, b->len, site);
     return str_from(b->bytes + from, to - from);
@@ -1369,9 +1756,9 @@ static AnvObj *deep_copy(AnvObj *o) {
         const AnvStr *s = (const AnvStr *)o;
         return (AnvObj *)str_from(s->bytes, s->len);
     }
-    if (o->kind == KIND_ARR) {
+    if (o->kind == KIND_ARR || o->kind == KIND_MAP) {
         const AnvArr *a = (const AnvArr *)o;
-        AnvArr *b = anvil_arr_new(a->ti, a->len);
+        AnvArr *b = o->kind == KIND_MAP ? &map_clone((const AnvMap *)a)->a : anvil_arr_new(a->ti, a->len);
         b->len = a->len;
         if (b->len) memcpy(b->data, a->data, (size_t)(b->len * a->ti->elem_size));
         for (int64_t i = 0; i < b->len; i++) {
@@ -1428,6 +1815,7 @@ static void *job_main(void *arg) {
     guard_stack();
     job->work(job->f, job->in, job->out, job->base);
     current_job = NULL;
+    pool_give_back();
     ATOMIC_SET(&job->done, 1);
     return 0;
 }

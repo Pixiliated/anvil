@@ -3,7 +3,7 @@
 //! Every value is flattened into scalars: i64 -> I64, f64 -> F64, bool -> I8, structs -> their
 //! fields in order, enums -> a tag then the fields of every variant (unused ones zero). str,
 //! arrays and maps are one pointer to a reference-counted object in the C runtime (anvil_rt.c);
-//! a map is an array of (key, value) elements sorted by key.
+//! a map is an array of (key, value) elements, in key order whenever anything walks them.
 //!
 //! `==` on arrays, structs, enums and maps is structural: structs and enums compare inline (the
 //! unused fields of an enum are zero on both sides), arrays and maps call a generated helper.
@@ -14,24 +14,32 @@
 //! - Every local owns its pointers. Locals start null, a store releases the old value, and all
 //!   locals are released when the function returns.
 //! - Arrays are copied on write: before a change, anvil_arr_unique gives the storage one owner.
+//! - The common cases of reference counting and array growth are inline, with the runtime called
+//!   on a cold path. An object's length, capacity and storage pointer are in the `header` alias
+//!   region, its reference count in `counts` and everything else in `trusted`'s, so writing
+//!   elements or counts does not make the optimizer read an array's length and storage again.
 //! - Array elements are stored as 8-byte slots, one per scalar, so an element of type T is
 //!   `8 * flat_len(T)` bytes.
 
 pub mod ffi;
 pub mod link;
+mod unique;
 
 use anvil_front::ir::*;
 use cranelift_codegen::ir::condcodes::{FloatCC, IntCC};
+use cranelift_codegen::inline::{Inline, InlineCommand};
+use cranelift_codegen::ir::function::FunctionParameters;
 use cranelift_codegen::ir::{
-    types, AbiParam, Block, BlockArg, FuncRef, InstBuilder, MemFlagsData, Signature, TrapCode, Type, UserFuncName,
-    Value,
+    types, AbiParam, AliasRegionData, Block, BlockArg, ExternalName, FuncRef, Function, GlobalValueData,
+    Inst, InstBuilder, MemFlagsData, Opcode, Signature, TrapCode, Type, UserExternalName, UserFuncName, Value,
 };
 use cranelift_codegen::settings::{self, Configurable};
 use cranelift_codegen::Context;
 use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext, Variable};
 use cranelift_module::{default_libcall_names, DataDescription, DataId, FuncId as ClFuncId, Linkage, Module};
 use cranelift_object::{ObjectBuilder, ObjectModule};
-use std::collections::HashMap;
+use std::borrow::Cow;
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::path::Path;
 
 /// Compiles and links `program` into a native executable at `out`. With `asm`, also returns the
@@ -131,7 +139,6 @@ const RUNTIME: &[(&str, &[Type], &[Type])] = &[
     ("anvil_bytes_to_str", &[I], &[I]),
     ("anvil_bytes_hex", &[I], &[I]),
     ("anvil_bytes_to_array", &[I, I], &[I]),
-    ("anvil_bytes_at", &[I, I, I], &[I]),
     ("anvil_bytes_slice", &[I, I, I, I], &[I]),
     ("anvil_check_shift", &[I, I], &[I]),
     ("anvil_str_replace", &[I, I, I, I], &[I]),
@@ -148,9 +155,6 @@ const RUNTIME: &[(&str, &[Type], &[Type])] = &[
     ("anvil_arr_new", &[I, I], &[I]),
     ("anvil_arr_unique", &[I], &[I]),
     ("anvil_arr_push_slot", &[I], &[I]),
-    ("anvil_arr_pop_slot", &[I], &[I]),
-    ("anvil_arr_insert_slot", &[I, I], &[I]),
-    ("anvil_arr_remove_slot", &[I, I], &[]),
     ("anvil_arr_slice", &[I, I, I, I], &[I]),
     ("anvil_str_slice", &[I, I, I, I], &[I]),
     ("anvil_str_find", &[I, I], &[I]),
@@ -160,6 +164,10 @@ const RUNTIME: &[(&str, &[Type], &[Type])] = &[
     ("anvil_str_eq", &[I, I], &[I]),
     ("anvil_map_find_i64", &[I, I], &[I]),
     ("anvil_map_find_str", &[I, I], &[I]),
+    ("anvil_map_new", &[I, I, I], &[I]),
+    ("anvil_map_insert_slot", &[I, I, I], &[I]),
+    ("anvil_map_remove_slot", &[I, I], &[]),
+    ("anvil_map_settle", &[I], &[]),
     ("anvil_test_index", &[], &[I]),
     ("anvil_no_test", &[I], &[]),
     ("anvil_exit", &[I], &[]),
@@ -172,6 +180,8 @@ const ENTRY: &str = "anvil_program";
 /// Object layout shared with anvil_rt.c.
 const OBJ_RC: i32 = 0;
 const OBJ_LEN: i32 = 16;
+const STR_BYTES: i32 = 24;
+const ARR_CAP: i32 = 24;
 const ARR_DATA: i32 = 40;
 const SLOT: i64 = 8;
 /// A function value: rc, kind, the layout of its captures (at 16), its code (at 24), then the
@@ -181,6 +191,8 @@ const FN_ENV: i64 = 32;
 const KIND_FN: i64 = 2;
 
 struct Backend {
+    /// Which functions always return an array or map with one reference (see `unique`).
+    fresh: Vec<bool>,
     module: ObjectModule,
     funcs: Vec<ClFuncId>,
     runtime: HashMap<&'static str, ClFuncId>,
@@ -220,6 +232,7 @@ fn compile(program: &Program, asm: bool, entry: Entry) -> Result<(Vec<u8>, Strin
         .map_err(|e| e.to_string())?;
     let builder = ObjectBuilder::new(isa, "anvil_program", default_libcall_names()).map_err(|e| e.to_string())?;
     let mut be = Backend {
+        fresh: unique::fresh_functions(program),
         module: ObjectModule::new(builder),
         funcs: Vec::new(),
         runtime: HashMap::new(),
@@ -259,21 +272,44 @@ fn compile(program: &Program, asm: bool, entry: Entry) -> Result<(Vec<u8>, Strin
     }
 
     let mut fbc = FunctionBuilderContext::new();
+    // Every function's code first, so that calls can be replaced by the code of what they call.
+    let mut bodies = HashMap::new();
     for (i, f) in program.funcs.iter().enumerate().filter(|(_, f)| f.external.is_none()) {
         let mut ctx = Context::new();
-        ctx.set_disasm(asm);
         ctx.func.signature = be.func_signature(program, f);
         ctx.func.name = UserFuncName::user(0, be.funcs[i].as_u32());
         {
             let b = FunctionBuilder::new(&mut ctx.func, &mut fbc);
             Gen::new(&mut be, program, b, &f.locals).function(f);
         }
-        be.module
-            .define_function(be.funcs[i], &mut ctx)
-            .map_err(|e| format!("codegen of `{}` failed: {e:?}", f.name))?;
+        bodies.insert(be.funcs[i].as_u32(), ctx.func);
+    }
+    share_names(&mut bodies);
+    let (mut seen, mut order) = (HashSet::new(), Vec::new());
+    for (i, _) in program.funcs.iter().enumerate().filter(|(_, f)| f.external.is_none()) {
+        callees_first(be.funcs[i].as_u32(), &bodies, &mut seen, &mut order);
+    }
+    let mut inlined = HashMap::new();
+    let names: HashMap<u32, &str> = program
+        .funcs
+        .iter()
+        .enumerate()
+        .filter(|(_, f)| f.external.is_none())
+        .map(|(i, f)| (be.funcs[i].as_u32(), f.name.as_str()))
+        .collect();
+    for id in order {
+        let mut ctx = Context::new();
+        ctx.set_disasm(asm);
+        ctx.func = bodies.remove(&id).unwrap();
+        ctx.inline(SmallCallees { bodies: &inlined }).map_err(|e| format!("codegen of `{}` failed: {e:?}", names[&id]))?;
+        if ctx.func.dfg.num_insts() <= INLINE_LARGEST {
+            inlined.insert(id, ctx.func.clone());
+        }
+        let decl = ClFuncId::from_u32(id);
+        be.module.define_function(decl, &mut ctx).map_err(|e| format!("codegen of `{}` failed: {e:?}", names[&id]))?;
         if asm {
             let code = ctx.compiled_code().and_then(|c| c.vcode.clone()).unwrap_or_default();
-            listing.push_str(&format!("; fn {}\n{code}\n", f.name));
+            listing.push_str(&format!("; fn {}\n{code}\n", names[&id]));
         }
     }
     while let Some((id, elem, ret)) = be.pending_workers.pop() {
@@ -333,6 +369,80 @@ fn compile(program: &Program, asm: bool, entry: Entry) -> Result<(Vec<u8>, Strin
     }
     let product = be.module.finish();
     Ok((product.emit().map_err(|e| e.to_string())?, listing))
+}
+
+/// A call is replaced by the callee's code when that code has at most this many instructions.
+const INLINE_LARGEST: usize = 150;
+/// A function this large takes no more code from what it calls.
+const INLINE_CALLER_LARGEST: usize = 30_000;
+
+/// Gives every function the same table of external names. Cranelift's inliner copies a callee's
+/// references to data symbols as they are, so they must mean the same thing in the caller.
+fn share_names(bodies: &mut HashMap<u32, Function>) {
+    let all: BTreeSet<(u32, u32)> =
+        bodies.values().flat_map(|f| f.params.user_named_funcs().values().map(|n| (n.namespace, n.index))).collect();
+    let table: Vec<UserExternalName> = all.into_iter().map(|(namespace, index)| UserExternalName { namespace, index }).collect();
+    for f in bodies.values_mut() {
+        let old = f.params.user_named_funcs().clone();
+        f.params = FunctionParameters::new();
+        for name in &table {
+            f.params.ensure_user_func_name(name.clone());
+        }
+        let renamed = |params: &mut FunctionParameters, name: &mut ExternalName| {
+            if let ExternalName::User(r) = name {
+                *r = params.ensure_user_func_name(old[*r].clone());
+            }
+        };
+        for data in f.stencil.dfg.ext_funcs.values_mut() {
+            renamed(&mut f.params, &mut data.name);
+        }
+        for gv in f.stencil.global_values.values_mut() {
+            if let GlobalValueData::Symbol { name, .. } = gv {
+                renamed(&mut f.params, name);
+            }
+        }
+    }
+}
+
+/// The order to compile functions in so each comes after what it calls (cycles aside): what it
+/// takes in has then already taken in its own callees.
+fn callees_first(id: u32, bodies: &HashMap<u32, Function>, seen: &mut HashSet<u32>, order: &mut Vec<u32>) {
+    if !seen.insert(id) {
+        return;
+    }
+    let f = &bodies[&id];
+    for (_, data) in f.dfg.ext_funcs.iter() {
+        if let Some(callee) = user_function(f, &data.name) {
+            if bodies.contains_key(&callee) {
+                callees_first(callee, bodies, seen, order);
+            }
+        }
+    }
+    order.push(id);
+}
+
+/// The module's id of a function a call names.
+fn user_function(f: &Function, name: &ExternalName) -> Option<u32> {
+    let ExternalName::User(user) = name else { return None };
+    let user = &f.params.user_named_funcs()[*user];
+    (user.namespace == 0).then_some(user.index)
+}
+
+/// Inlines calls to functions in `bodies`, which holds the small ones already compiled.
+struct SmallCallees<'a> {
+    bodies: &'a HashMap<u32, Function>,
+}
+
+impl Inline for SmallCallees<'_> {
+    fn inline(&mut self, caller: &Function, _: Inst, _: Opcode, callee: FuncRef, _: &[Value]) -> InlineCommand<'_> {
+        let name = &caller.dfg.ext_funcs[callee].name;
+        match user_function(caller, name).and_then(|id| self.bodies.get(&id)) {
+            Some(body) if caller.dfg.num_insts() < INLINE_CALLER_LARGEST => {
+                InlineCommand::Inline { callee: Cow::Borrowed(body), visit_callee: false }
+            }
+            _ => InlineCommand::KeepCall,
+        }
+    }
 }
 
 /// One flattened scalar; `heap` marks a pointer to a reference-counted object.
@@ -629,6 +739,12 @@ struct Gen<'a, 'b> {
     local_types: Vec<Ty>,
     /// Flags for loads and stores of runtime objects: aligned and never trapping.
     trusted: MemFlagsData,
+    header: MemFlagsData,
+    counts: MemFlagsData,
+    /// Scalars of locals holding an array known to have one owner here (see `unique`).
+    unique: HashSet<(LocalId, usize)>,
+    /// Above 0 inside a part of an expression that may not run: a check there proves nothing later.
+    branching: u32,
 }
 
 fn args(vals: &[Value]) -> Vec<BlockArg> {
@@ -646,7 +762,14 @@ impl<'a, 'b> Gen<'a, 'b> {
         }
         let exit = b.create_block();
         let local_types = locals.iter().map(|l| l.ty.clone()).collect();
-        let trusted = MemFlagsData::trusted();
+        // A store with no region counts as touching every region, so elements have one too.
+        let mut region = |user_id, description| {
+            let data = AliasRegionData { user_id, description: Cow::Borrowed(description) };
+            MemFlagsData::trusted().with_alias_region(Some(b.func.dfg.alias_regions.insert(data)))
+        };
+        let trusted = region(0, "elements");
+        let header = region(1, "object headers");
+        let counts = region(2, "reference counts");
         Gen {
             be,
             program,
@@ -659,6 +782,10 @@ impl<'a, 'b> Gen<'a, 'b> {
             exit,
             local_types,
             trusted,
+            header,
+            counts,
+            unique: HashSet::new(),
+            branching: 0,
         }
     }
 
@@ -714,17 +841,90 @@ impl<'a, 'b> Gen<'a, 'b> {
     fn retain(&mut self, lay: &[Scalar], vals: &[Value]) {
         for (s, v) in lay.iter().zip(vals) {
             if s.heap {
-                self.call_rt("anvil_retain", &[*v]);
+                self.retain_one(*v);
             }
         }
+    }
+
+    /// One more reference to `v`, which may be null. Static objects, with a negative count, and
+    /// freed ones, with 0, are for the runtime.
+    fn retain_one(&mut self, v: Value) {
+        let (check, count, cold, done) =
+            (self.b.create_block(), self.b.create_block(), self.b.create_block(), self.b.create_block());
+        self.b.set_cold_block(cold);
+        self.b.ins().brif(v, check, &[], done, &[]);
+        self.b.switch_to_block(check);
+        self.b.seal_block(check);
+        let rc = self.b.ins().load(I, self.counts, v, OBJ_RC);
+        let live = self.b.ins().icmp_imm_s(IntCC::SignedGreaterThan, rc, 0);
+        self.b.ins().brif(live, count, &[], cold, &[]);
+        self.b.switch_to_block(count);
+        self.b.seal_block(count);
+        let more = self.b.ins().iadd_imm_s(rc, 1);
+        self.b.ins().store(self.counts, more, v, OBJ_RC);
+        self.b.ins().jump(done, &[]);
+        self.b.switch_to_block(cold);
+        self.b.seal_block(cold);
+        self.call_rt("anvil_retain", &[v]);
+        self.b.ins().jump(done, &[]);
+        self.b.switch_to_block(done);
+        self.b.seal_block(done);
+    }
+
+    /// Gives up a reference to `v`, which may be null. Unless others remain, the runtime decides:
+    /// the last one frees the object, and static objects stay.
+    fn release_one(&mut self, v: Value) {
+        let (check, count, cold, done) =
+            (self.b.create_block(), self.b.create_block(), self.b.create_block(), self.b.create_block());
+        self.b.ins().brif(v, check, &[], done, &[]);
+        self.b.switch_to_block(check);
+        self.b.seal_block(check);
+        let rc = self.b.ins().load(I, self.counts, v, OBJ_RC);
+        let others = self.b.ins().icmp_imm_s(IntCC::SignedGreaterThan, rc, 1);
+        self.b.ins().brif(others, count, &[], cold, &[]);
+        self.b.switch_to_block(count);
+        self.b.seal_block(count);
+        let fewer = self.b.ins().iadd_imm_s(rc, -1);
+        self.b.ins().store(self.counts, fewer, v, OBJ_RC);
+        self.b.ins().jump(done, &[]);
+        self.b.switch_to_block(cold);
+        self.b.seal_block(cold);
+        self.call_rt("anvil_release", &[v]);
+        self.b.ins().jump(done, &[]);
+        self.b.switch_to_block(done);
+        self.b.seal_block(done);
     }
 
     fn release(&mut self, lay: &[Scalar], vals: &[Value]) {
         for (s, v) in lay.iter().zip(vals) {
             if s.heap {
-                self.call_rt("anvil_release", &[*v]);
+                self.release_one(*v);
             }
         }
+    }
+
+    /// The slot of a new last element of uniquely owned array `arr` with `size`-byte elements.
+    fn push_slot(&mut self, arr: Value, size: i64) -> Value {
+        let len = self.b.ins().load(I, self.header, arr, OBJ_LEN);
+        let cap = self.b.ins().load(I, self.header, arr, ARR_CAP);
+        let room = self.b.ins().icmp(IntCC::SignedLessThan, len, cap);
+        let (fits, grow, done) = (self.b.create_block(), self.b.create_block(), self.b.create_block());
+        let slot = self.b.append_block_param(done, I);
+        self.b.set_cold_block(grow);
+        self.b.ins().brif(room, fits, &[], grow, &[]);
+        self.b.switch_to_block(fits);
+        self.b.seal_block(fits);
+        let more = self.b.ins().iadd_imm_s(len, 1);
+        self.b.ins().store(self.header, more, arr, OBJ_LEN);
+        let at = self.elem_at(arr, len, size);
+        self.b.ins().jump(done, &args(&[at]));
+        self.b.switch_to_block(grow);
+        self.b.seal_block(grow);
+        let at = self.call_rt("anvil_arr_push_slot", &[arr]).unwrap();
+        self.b.ins().jump(done, &args(&[at]));
+        self.b.switch_to_block(done);
+        self.b.seal_block(done);
+        slot
     }
 
     fn zero(&mut self, s: Scalar) -> Value {
@@ -855,7 +1055,7 @@ impl<'a, 'b> Gen<'a, 'b> {
             let var = self.vars[l][start + k];
             if self.layouts[l][start + k].heap {
                 let old = self.b.use_var(var);
-                self.call_rt("anvil_release", &[old]);
+                self.release_one(old);
             }
             self.b.def_var(var, *x);
         }
@@ -876,7 +1076,7 @@ impl<'a, 'b> Gen<'a, 'b> {
 
     /// Address of element `index` of array `arr`, after a bounds check that panics at `site`.
     fn elem_addr(&mut self, arr: Value, index: Value, elem: &Ty, site: &str) -> Value {
-        let len = self.b.ins().load(I, self.trusted, arr, OBJ_LEN);
+        let len = self.b.ins().load(I, self.header, arr, OBJ_LEN);
         // Unsigned comparison also catches negative indices.
         let oob = self.b.ins().icmp(IntCC::UnsignedGreaterThanOrEqual, index, len);
         let panic = self.b.create_block();
@@ -890,13 +1090,34 @@ impl<'a, 'b> Gen<'a, 'b> {
         self.b.ins().trap(TrapCode::user(1).unwrap());
         self.b.switch_to_block(cont);
         self.b.seal_block(cont);
-        let data = self.b.ins().load(I, self.trusted, arr, ARR_DATA);
+        let data = self.b.ins().load(I, self.header, arr, ARR_DATA);
         let size = flat_len(self.program, elem) as i64 * SLOT;
         let offset = self.b.ins().imul_imm_s(index, size);
         self.b.ins().iadd(data, offset)
     }
 
     fn stmt(&mut self, s: &Stmt) {
+        if let Stmt::Line(_) | Stmt::Reached(_) = s {
+            return;
+        }
+        let mut touched = HashSet::new();
+        unique::touched(self.program, s, &mut touched);
+        self.unique.retain(|(l, _)| !touched.contains(l));
+        self.emit(s);
+        self.unique.retain(|(l, _)| !touched.contains(l));
+        if let Stmt::Let(l, e) = s {
+            if unique::is_fresh(e, &self.be.fresh) {
+                self.unique.insert((*l, 0));
+            }
+        }
+        if let Stmt::Assign(l, path, e, _) = s {
+            if path.is_empty() && unique::is_fresh(e, &self.be.fresh) {
+                self.unique.insert((*l, 0));
+            }
+        }
+    }
+
+    fn emit(&mut self, s: &Stmt) {
         match s {
             Stmt::Let(l, e) => {
                 let vals = self.expr(e);
@@ -930,18 +1151,23 @@ impl<'a, 'b> Gen<'a, 'b> {
                 let else_b = self.b.create_block();
                 let merge = self.b.create_block();
                 self.b.ins().brif(cond, then_b, &[], else_b, &[]);
+                let known = self.unique.clone();
                 self.b.switch_to_block(then_b);
                 self.b.seal_block(then_b);
                 self.block(t);
                 self.b.ins().jump(merge, &[]);
+                let after_then = std::mem::replace(&mut self.unique, known);
                 self.b.switch_to_block(else_b);
                 self.b.seal_block(else_b);
                 self.block(e);
                 self.b.ins().jump(merge, &[]);
                 self.b.switch_to_block(merge);
                 self.b.seal_block(merge);
+                self.unique.retain(|k| after_then.contains(k));
             }
             Stmt::While(c, body) => {
+                // What the loop's body or condition learns need not hold when they have not run.
+                let known = self.unique.clone();
                 let header = self.b.create_block();
                 let body_b = self.b.create_block();
                 let exit = self.b.create_block();
@@ -958,21 +1184,24 @@ impl<'a, 'b> Gen<'a, 'b> {
                 self.b.seal_block(header);
                 self.b.switch_to_block(exit);
                 self.b.seal_block(exit);
+                self.unique = known;
             }
             Stmt::For(l, start, end, body) => {
                 let s0 = self.expr(start)[0];
                 let e0 = self.expr(end)[0];
                 let limit = self.b.declare_var(I);
                 self.b.def_var(limit, e0);
+                let known = self.unique.clone();
                 self.counted_loop(s0, limit, body, |g, i| {
                     g.b.def_var(g.vars[*l][0], i);
                 });
+                self.unique = known;
             }
             Stmt::ForEach { var, held, iter, body } => {
                 let arr = self.expr(iter);
                 self.store_local(*held, 0, &arr);
                 let arr = arr[0];
-                let len = self.b.ins().load(I, self.trusted, arr, OBJ_LEN);
+                let len = self.b.ins().load(I, self.header, arr, OBJ_LEN);
                 let limit = self.b.declare_var(I);
                 self.b.def_var(limit, len);
                 let zero = self.b.ins().iconst(I, 0);
@@ -980,10 +1209,11 @@ impl<'a, 'b> Gen<'a, 'b> {
                 let elem = (**elem).clone();
                 let held = *held;
                 let var = *var;
+                let known = self.unique.clone();
                 self.counted_loop(zero, limit, body, |g, i| {
                     // The snapshot in `held` is never written, so i < len is still in bounds.
                     let arr = g.b.use_var(g.vars[held][0]);
-                    let data = g.b.ins().load(I, g.trusted, arr, ARR_DATA);
+                    let data = g.b.ins().load(I, g.header, arr, ARR_DATA);
                     let size = flat_len(g.program, &elem) as i64 * SLOT;
                     let offset = g.b.ins().imul_imm_s(i, size);
                     let addr = g.b.ins().iadd(data, offset);
@@ -991,7 +1221,7 @@ impl<'a, 'b> Gen<'a, 'b> {
                     let vals = g.load(addr, &lay);
                     // An array nothing else holds hands its elements out, so they stay unshared.
                     if lay.iter().any(|s| s.heap) {
-                        let rc = g.b.ins().load(I, g.trusted, arr, OBJ_RC);
+                        let rc = g.b.ins().load(I, g.counts, arr, OBJ_RC);
                         let alone = g.b.ins().icmp_imm_s(IntCC::Equal, rc, 1);
                         let (take, share, go) = (g.b.create_block(), g.b.create_block(), g.b.create_block());
                         g.b.ins().brif(alone, take, &[], share, &[]);
@@ -1014,6 +1244,7 @@ impl<'a, 'b> Gen<'a, 'b> {
                     }
                     g.store_local(var, 0, &vals);
                 });
+                self.unique = known;
             }
             Stmt::Match { held, scrutinee, arms } => {
                 let vals = self.expr(scrutinee);
@@ -1021,7 +1252,10 @@ impl<'a, 'b> Gen<'a, 'b> {
                 let Ty::Enum(eid) = scrutinee.ty else { unreachable!("match on {:?}", scrutinee.ty) };
                 let tag = self.b.use_var(self.vars[*held][0]);
                 let merge = self.b.create_block();
+                let known = self.unique.clone();
+                let mut after_arms: Option<HashSet<(LocalId, usize)>> = None;
                 for (k, arm) in arms.iter().enumerate() {
+                    self.unique = known.clone();
                     let next = if k + 1 < arms.len() {
                         let this = self.b.create_block();
                         for v in &arm.also {
@@ -1049,11 +1283,17 @@ impl<'a, 'b> Gen<'a, 'b> {
                     }
                     self.block(&arm.body);
                     self.b.ins().jump(merge, &[]);
+                    let here = std::mem::take(&mut self.unique);
+                    after_arms = Some(match after_arms {
+                        Some(before) => before.intersection(&here).copied().collect(),
+                        None => here,
+                    });
                     if let Some(next) = next {
                         self.b.switch_to_block(next);
                         self.b.seal_block(next);
                     }
                 }
+                self.unique = after_arms.unwrap_or(known);
                 self.b.switch_to_block(merge);
                 self.b.seal_block(merge);
             }
@@ -1079,6 +1319,7 @@ impl<'a, 'b> Gen<'a, 'b> {
             Stmt::Reached(_) | Stmt::Line(_) => {}
             // Left null, as a move leaves it: the function's exit releases every local.
             Stmt::Drop(l) => {
+                self.unique.retain(|(local, _)| local != l);
                 let vals = self.use_local(*l);
                 let lay = self.layouts[*l].clone();
                 self.release(&lay, &vals);
@@ -1172,21 +1413,37 @@ impl<'a, 'b> Gen<'a, 'b> {
 
     /// Makes the array stored at `loc` unique (copying it if shared), stores it back, returns it.
     fn unique_at(&mut self, loc: &Loc) -> Value {
-        match loc {
-            Loc::Vars(l, start, _) => {
-                let var = self.vars[*l][*start];
-                let p = self.b.use_var(var);
-                let q = self.call_rt("anvil_arr_unique", &[p]).unwrap();
-                self.b.def_var(var, q);
-                q
+        if let Loc::Vars(l, start, _) = loc {
+            if self.unique.contains(&(*l, *start)) {
+                return self.b.use_var(self.vars[*l][*start]);
             }
-            Loc::Mem(addr, _) => {
-                let p = self.b.ins().load(I, self.trusted, *addr, 0);
-                let q = self.call_rt("anvil_arr_unique", &[p]).unwrap();
-                self.b.ins().store(self.trusted, q, *addr, 0);
-                q
+            if self.branching == 0 {
+                self.unique.insert((*l, *start));
             }
         }
+        let p = match loc {
+            Loc::Vars(l, start, _) => self.b.use_var(self.vars[*l][*start]),
+            Loc::Mem(addr, _) => self.b.ins().load(I, self.trusted, *addr, 0),
+        };
+        let rc = self.b.ins().load(I, self.counts, p, OBJ_RC);
+        let alone = self.b.ins().icmp_imm_s(IntCC::Equal, rc, 1);
+        let (copy, done) = (self.b.create_block(), self.b.create_block());
+        let unique = self.b.append_block_param(done, I);
+        self.b.set_cold_block(copy);
+        self.b.ins().brif(alone, done, &args(&[p]), copy, &[]);
+        self.b.switch_to_block(copy);
+        self.b.seal_block(copy);
+        let q = self.call_rt("anvil_arr_unique", &[p]).unwrap();
+        match loc {
+            Loc::Vars(l, start, _) => self.b.def_var(self.vars[*l][*start], q),
+            Loc::Mem(addr, _) => {
+                self.b.ins().store(self.trusted, q, *addr, 0);
+            }
+        }
+        self.b.ins().jump(done, &args(&[q]));
+        self.b.switch_to_block(done);
+        self.b.seal_block(done);
+        unique
     }
 
     /// Stores owned `vals` at `loc`, releasing the old value.
@@ -1331,7 +1588,7 @@ impl<'a, 'b> Gen<'a, 'b> {
                 let call = self.b.ins().call_indirect(sig, code, &vals);
                 let results = self.b.inst_results(call).to_vec();
                 if owned {
-                    self.call_rt("anvil_release", &[c[0]]);
+                    self.release_one(c[0]);
                 }
                 results
             }
@@ -1349,9 +1606,10 @@ impl<'a, 'b> Gen<'a, 'b> {
                 let ti = self.b.ins().symbol_value(I, gv);
                 let cap = self.b.ins().iconst(I, elems.len() as i64);
                 let arr = self.call_rt("anvil_arr_new", &[ti, cap]).unwrap();
+                let size = flat_len(self.program, elem) as i64 * SLOT;
                 for x in elems {
                     let vals = self.expr(x);
-                    let slot = self.call_rt("anvil_arr_push_slot", &[arr]).unwrap();
+                    let slot = self.push_slot(arr, size);
                     self.store(slot, &vals);
                 }
                 vec![arr]
@@ -1366,19 +1624,41 @@ impl<'a, 'b> Gen<'a, 'b> {
             ExprKind::Index { base, index, site, .. } if base.ty == Ty::Bytes => {
                 let (b, owned) = if mutates(index) { (self.expr(base), true) } else { self.borrow(base) };
                 let i = self.expr(index)[0];
+                let len = self.b.ins().load(I, self.header, b[0], OBJ_LEN);
+                // Unsigned comparison also catches negative indices.
+                let oob = self.b.ins().icmp(IntCC::UnsignedGreaterThanOrEqual, i, len);
+                let (bad, fine) = (self.b.create_block(), self.b.create_block());
+                self.b.set_cold_block(bad);
+                self.b.ins().brif(oob, bad, &[], fine, &[]);
+                self.b.switch_to_block(bad);
+                self.b.seal_block(bad);
                 let s = self.str_obj(site);
-                let v = self.call_rt("anvil_bytes_at", &[b[0], i, s]).unwrap();
+                self.call_rt("anvil_panic_index", &[i, len, s]);
+                self.b.ins().trap(TrapCode::user(1).unwrap());
+                self.b.switch_to_block(fine);
+                self.b.seal_block(fine);
+                let at = self.b.ins().iadd(b[0], i);
+                let v = self.b.ins().uload8(I, self.trusted, at, STR_BYTES);
                 if owned {
-                    self.call_rt("anvil_release", &[b[0]]);
+                    self.release_one(b[0]);
                 }
                 vec![v]
             }
             ExprKind::Bits { op, l, r, site } => {
                 let a = self.expr(l)[0];
-                let mut n = self.expr(r)[0];
+                let n = self.expr(r)[0];
                 if matches!(op, BitOp::Shl | BitOp::Shr | BitOp::UShr) {
+                    let outside = self.b.ins().icmp_imm_u(IntCC::UnsignedGreaterThan, n, 63);
+                    let (bad, fine) = (self.b.create_block(), self.b.create_block());
+                    self.b.set_cold_block(bad);
+                    self.b.ins().brif(outside, bad, &[], fine, &[]);
+                    self.b.switch_to_block(bad);
+                    self.b.seal_block(bad);
                     let s = self.str_obj(site);
-                    n = self.call_rt("anvil_check_shift", &[n, s]).unwrap();
+                    self.call_rt("anvil_check_shift", &[n, s]);
+                    self.b.ins().trap(TrapCode::user(1).unwrap());
+                    self.b.switch_to_block(fine);
+                    self.b.seal_block(fine);
                 }
                 vec![match op {
                     BitOp::And => self.b.ins().band(a, n),
@@ -1402,7 +1682,7 @@ impl<'a, 'b> Gen<'a, 'b> {
                 let vals = self.load(addr, &lay);
                 self.retain(&lay, &vals);
                 if owned {
-                    self.call_rt("anvil_release", &[arr[0]]);
+                    self.release_one(arr[0]);
                 }
                 vals
             }
@@ -1419,7 +1699,7 @@ impl<'a, 'b> Gen<'a, 'b> {
                 };
                 let out = self.call_rt(name, &[vals[0], f, t, s]).unwrap();
                 if owned {
-                    self.call_rt("anvil_release", &[vals[0]]);
+                    self.release_one(vals[0]);
                 }
                 vec![out]
             }
@@ -1428,7 +1708,8 @@ impl<'a, 'b> Gen<'a, 'b> {
                 let info = self.be.pair_info(self.program, kt, vt);
                 let ti = self.data_ptr(info);
                 let cap = self.b.ins().iconst(I, entries.len() as i64);
-                let m = self.call_rt("anvil_arr_new", &[ti, cap]).unwrap();
+                let is_str = self.b.ins().iconst(I, (**kt == Ty::Str) as i64);
+                let m = self.call_rt("anvil_map_new", &[ti, cap, is_str]).unwrap();
                 for (k, v) in entries {
                     let key = self.expr(k)[0];
                     let vals = self.expr(v);
@@ -1436,7 +1717,7 @@ impl<'a, 'b> Gen<'a, 'b> {
                     let found = self.b.ins().icmp_imm_s(IntCC::SignedGreaterThanOrEqual, at, 0);
                     self.panic_if(found, duplicate);
                     let pos = self.b.ins().bnot(at);
-                    let slot = self.call_rt("anvil_arr_insert_slot", &[m, pos]).unwrap();
+                    let slot = self.call_rt("anvil_map_insert_slot", &[m, pos, key]).unwrap();
                     self.store(slot, &[key]);
                     let vslot = self.b.ins().iadd_imm_s(slot, SLOT);
                     self.store(vslot, &vals);
@@ -1471,7 +1752,7 @@ impl<'a, 'b> Gen<'a, 'b> {
                 self.b.switch_to_block(insert);
                 self.b.seal_block(insert);
                 let pos = self.b.ins().bnot(at);
-                let slot = self.call_rt("anvil_arr_insert_slot", &[m, pos]).unwrap();
+                let slot = self.call_rt("anvil_map_insert_slot", &[m, pos, k]).unwrap();
                 self.store(slot, &[k]);
                 let vslot = self.b.ins().iadd_imm_s(slot, SLOT);
                 self.store(vslot, &vals);
@@ -1500,7 +1781,7 @@ impl<'a, 'b> Gen<'a, 'b> {
                 lay.extend(self.layout(&vt));
                 let old = self.load(addr, &lay);
                 self.release(&lay, &old);
-                self.call_rt("anvil_arr_remove_slot", &[m, at]);
+                self.call_rt("anvil_map_remove_slot", &[m, at]);
                 Vec::new()
             }
             // Each part's text in order, then one result of their total length.
@@ -1511,7 +1792,7 @@ impl<'a, 'b> Gen<'a, 'b> {
                 }
                 let mut total = self.b.ins().iconst(I, 0);
                 for t in &texts {
-                    let len = self.b.ins().load(I, self.trusted, *t, OBJ_LEN);
+                    let len = self.b.ins().load(I, self.header, *t, OBJ_LEN);
                     total = self.b.ins().iadd(total, len);
                 }
                 let out = self.call_rt("anvil_str_alloc", &[total]).unwrap();
@@ -1532,8 +1813,8 @@ impl<'a, 'b> Gen<'a, 'b> {
                 let a = self.expr(l)[0];
                 let c = self.expr(r)[0];
                 let joined = self.call_rt("anvil_str_concat", &[a, c]).unwrap();
-                self.call_rt("anvil_release", &[a]);
-                self.call_rt("anvil_release", &[c]);
+                self.release_one(a);
+                self.release_one(c);
                 vec![joined]
             }
             ExprKind::Push { local, path, value, .. } => {
@@ -1541,7 +1822,7 @@ impl<'a, 'b> Gen<'a, 'b> {
                 let indices = self.indices(path);
                 let loc = self.locate(*local, path, &indices);
                 let arr = self.unique_at(&loc);
-                let slot = self.call_rt("anvil_arr_push_slot", &[arr]).unwrap();
+                let slot = self.push_slot(arr, flat_len(self.program, &value.ty) as i64 * SLOT);
                 self.store(slot, &vals);
                 Vec::new()
             }
@@ -1549,11 +1830,13 @@ impl<'a, 'b> Gen<'a, 'b> {
                 let indices = self.indices(path);
                 let loc = self.locate(*local, path, &indices);
                 let arr = self.unique_at(&loc);
-                let len = self.b.ins().load(I, self.trusted, arr, OBJ_LEN);
+                let len = self.b.ins().load(I, self.header, arr, OBJ_LEN);
                 let empty = self.b.ins().icmp_imm_s(IntCC::Equal, len, 0);
                 self.panic_if(empty, message);
                 // The element's references move from the array to the result.
-                let slot = self.call_rt("anvil_arr_pop_slot", &[arr]).unwrap();
+                let last = self.b.ins().iadd_imm_s(len, -1);
+                self.b.ins().store(self.header, last, arr, OBJ_LEN);
+                let slot = self.elem_at(arr, last, flat_len(self.program, &e.ty) as i64 * SLOT);
                 let lay = self.layout(&e.ty);
                 self.load(slot, &lay)
             }
@@ -1640,8 +1923,8 @@ impl<'a, 'b> Gen<'a, 'b> {
                 let c = self.expr(r)[0];
                 let v = self.scalar_cmp(*op, &l.ty, a, c);
                 if matches!(l.ty, Ty::Bytes | Ty::Str) {
-                    self.call_rt("anvil_release", &[a]);
-                    self.call_rt("anvil_release", &[c]);
+                    self.release_one(a);
+                    self.release_one(c);
                 }
                 vec![v]
             }
@@ -1651,12 +1934,14 @@ impl<'a, 'b> Gen<'a, 'b> {
                 let lay = self.layout(&e.ty);
                 let out: Vec<Value> = lay.iter().map(|s| self.b.append_block_param(merge, s.ty)).collect();
                 self.b.ins().brif(c, yes, &[], no, &[]);
+                self.branching += 1;
                 for (block, branch) in [(yes, then), (no, otherwise)] {
                     self.b.switch_to_block(block);
                     self.b.seal_block(block);
                     let v = self.expr(branch);
                     self.b.ins().jump(merge, &args(&v));
                 }
+                self.branching -= 1;
                 self.b.switch_to_block(merge);
                 self.b.seal_block(merge);
                 out
@@ -1674,7 +1959,9 @@ impl<'a, 'b> Gen<'a, 'b> {
                 }
                 self.b.switch_to_block(rhs);
                 self.b.seal_block(rhs);
+                self.branching += 1;
                 let c = self.expr(r)[0];
+                self.branching -= 1;
                 self.b.ins().jump(merge, &args(&[c]));
                 self.b.switch_to_block(merge);
                 self.b.seal_block(merge);
@@ -1711,7 +1998,7 @@ impl<'a, 'b> Gen<'a, 'b> {
 
     /// Address of element `i` (in bounds) of an array or map with `size`-byte elements.
     fn elem_at(&mut self, arr: Value, i: Value, size: i64) -> Value {
-        let data = self.b.ins().load(I, self.trusted, arr, ARR_DATA);
+        let data = self.b.ins().load(I, self.header, arr, ARR_DATA);
         let offset = self.b.ins().imul_imm_s(i, size);
         self.b.ins().iadd(data, offset)
     }
@@ -1851,7 +2138,7 @@ impl<'a, 'b> Gen<'a, 'b> {
         sig.params.insert(0, AbiParam::new(I));
         let sig = self.b.import_signature(sig);
         let limit = self.b.declare_var(I);
-        let n = self.b.ins().load(I, self.trusted, input, OBJ_LEN);
+        let n = self.b.ins().load(I, self.header, input, OBJ_LEN);
         self.b.def_var(limit, n);
         let zero = self.b.ins().iconst(I, 0);
         self.counted_loop(zero, limit, &[], |g, j| {
@@ -1911,8 +2198,12 @@ impl<'a, 'b> Gen<'a, 'b> {
         self.b.ins().brif(either, no, &[], both, &[]);
         self.b.switch_to_block(both);
         self.b.seal_block(both);
-        let la = self.b.ins().load(I, self.trusted, a, OBJ_LEN);
-        let lc = self.b.ins().load(I, self.trusted, c, OBJ_LEN);
+        if let Ty::Map(..) = ty {
+            self.call_rt("anvil_map_settle", &[a]);
+            self.call_rt("anvil_map_settle", &[c]);
+        }
+        let la = self.b.ins().load(I, self.header, a, OBJ_LEN);
+        let lc = self.b.ins().load(I, self.header, c, OBJ_LEN);
         let header = self.b.create_block();
         let body = self.b.create_block();
         let step = self.b.create_block();
@@ -2031,7 +2322,7 @@ impl<'a, 'b> Gen<'a, 'b> {
                 }
                 let unit = self.str_obj(&format!(" {u}"));
                 let joined = self.call_rt("anvil_str_concat", &[digits, unit]).unwrap();
-                self.call_rt("anvil_release", &[digits]);
+                self.release_one(digits);
                 joined
             }
             t => unreachable!("text of {t:?}"),
@@ -2049,8 +2340,8 @@ impl<'a, 'b> Gen<'a, 'b> {
                     _ => "anvil_str_find",
                 };
                 let r = self.call_rt(name, &[s, t]).unwrap();
-                self.call_rt("anvil_release", &[s]);
-                self.call_rt("anvil_release", &[t]);
+                self.release_one(s);
+                self.release_one(t);
                 return match bi {
                     Builtin::StrFind => {
                         let Ty::Enum(eid) = ty else { unreachable!() };
@@ -2068,8 +2359,8 @@ impl<'a, 'b> Gen<'a, 'b> {
                 let ti = self.data_ptr(info);
                 let m = self.str_obj(message);
                 let out = self.call_rt("anvil_str_split", &[s, sep, ti, m]).unwrap();
-                self.call_rt("anvil_release", &[s]);
-                self.call_rt("anvil_release", &[sep]);
+                self.release_one(s);
+                self.release_one(sep);
                 return vec![out];
             }
             Builtin::MapHas | Builtin::MapGet => {
@@ -2098,7 +2389,7 @@ impl<'a, 'b> Gen<'a, 'b> {
                     })
                 };
                 if owned {
-                    self.call_rt("anvil_release", &[m]);
+                    self.release_one(m);
                 }
                 return out;
             }
@@ -2109,9 +2400,11 @@ impl<'a, 'b> Gen<'a, 'b> {
                 let (part, offset) =
                     if let Builtin::MapKeys = bi { ((**kt).clone(), 0) } else { ((**vt).clone(), SLOT) };
                 let size = self.pair_size(vt);
+                self.call_rt("anvil_map_settle", &[m]);
+                let part_size = flat_len(self.program, &part) as i64 * SLOT;
                 let info = self.be.type_info(self.program, &part);
                 let ti = self.data_ptr(info);
-                let len = self.b.ins().load(I, self.trusted, m, OBJ_LEN);
+                let len = self.b.ins().load(I, self.header, m, OBJ_LEN);
                 let out = self.call_rt("anvil_arr_new", &[ti, len]).unwrap();
                 let limit = self.b.declare_var(I);
                 self.b.def_var(limit, len);
@@ -2122,11 +2415,11 @@ impl<'a, 'b> Gen<'a, 'b> {
                     let addr = g.b.ins().iadd_imm_s(addr, offset);
                     let v = g.load(addr, &lay);
                     g.retain(&lay, &v);
-                    let slot = g.call_rt("anvil_arr_push_slot", &[out]).unwrap();
+                    let slot = g.push_slot(out, part_size);
                     g.store(slot, &v);
                 });
                 if owned {
-                    self.call_rt("anvil_release", &[m]);
+                    self.release_one(m);
                 }
                 return vec![out];
             }
@@ -2153,7 +2446,7 @@ impl<'a, 'b> Gen<'a, 'b> {
                         let (t, owned) = self.borrow(&bargs[0]);
                         self.call_rt("anvil_print_line", &[t[0], stream]);
                         if owned {
-                            self.call_rt("anvil_release", &[t[0]]);
+                            self.release_one(t[0]);
                         }
                     }
                 }
@@ -2175,7 +2468,7 @@ impl<'a, 'b> Gen<'a, 'b> {
                 let (t, owned) = self.borrow(&bargs[0]);
                 self.call_rt("anvil_print_raw", &[t[0]]);
                 if owned {
-                    self.call_rt("anvil_release", &[t[0]]);
+                    self.release_one(t[0]);
                 }
                 return Vec::new();
             }
@@ -2196,7 +2489,7 @@ impl<'a, 'b> Gen<'a, 'b> {
                 let Ty::Enum(eid) = ty else { unreachable!() };
                 let name = self.expr(&bargs[0])[0];
                 let v = self.call_rt("anvil_env", &[name]).unwrap();
-                self.call_rt("anvil_release", &[name]);
+                self.release_one(name);
                 let got = self.b.ins().icmp_imm_s(IntCC::NotEqual, v, 0);
                 return self.option(*eid, got, |_| vec![v]);
             }
@@ -2206,7 +2499,7 @@ impl<'a, 'b> Gen<'a, 'b> {
                 let info = self.be.type_info(self.program, &Ty::Str);
                 let ti = self.data_ptr(info);
                 let r = self.call_rt("anvil_list_dir", &[path, ti]).unwrap();
-                self.call_rt("anvil_release", &[path]);
+                self.release_one(path);
                 let ok = self.b.ins().icmp_imm_s(IntCC::NotEqual, r, 0);
                 return self.either(
                     *eid,
@@ -2227,10 +2520,10 @@ impl<'a, 'b> Gen<'a, 'b> {
                 } else {
                     let text = self.expr(&bargs[1])[0];
                     let r = self.call_rt("anvil_write_file", &[path, text]).unwrap();
-                    self.call_rt("anvil_release", &[text]);
+                    self.release_one(text);
                     (r, self.b.ins().icmp_imm_s(IntCC::SignedGreaterThanOrEqual, r, 0))
                 };
-                self.call_rt("anvil_release", &[path]);
+                self.release_one(path);
                 return self.either(
                     *eid,
                     ok,
@@ -2252,7 +2545,7 @@ impl<'a, 'b> Gen<'a, 'b> {
                         self.option(*eid, ok, |_| vec![v])
                     }
                 };
-                self.call_rt("anvil_release", &[s]);
+                self.release_one(s);
                 return out;
             }
             Builtin::WrappingAdd | Builtin::WrappingSub | Builtin::WrappingMul => {
@@ -2270,8 +2563,8 @@ impl<'a, 'b> Gen<'a, 'b> {
                 let at = self.expr(&bargs[2])[0];
                 let where_ = self.str_obj(site);
                 let r = self.call_rt("anvil_str_find_from", &[s, t, at, where_]).unwrap();
-                self.call_rt("anvil_release", &[s]);
-                self.call_rt("anvil_release", &[t]);
+                self.release_one(s);
+                self.release_one(t);
                 let Ty::Enum(eid) = ty else { unreachable!() };
                 let found = self.b.ins().icmp_imm_s(IntCC::SignedGreaterThanOrEqual, r, 0);
                 return self.option(*eid, found, |_| vec![r]);
@@ -2280,8 +2573,8 @@ impl<'a, 'b> Gen<'a, 'b> {
                 let a = self.expr(&bargs[0])[0];
                 let c = self.expr(&bargs[1])[0];
                 let holds = self.scalar_cmp(*op, &Ty::Bytes, a, c);
-                self.call_rt("anvil_release", &[a]);
-                self.call_rt("anvil_release", &[c]);
+                self.release_one(a);
+                self.release_one(c);
                 let fail = self.b.ins().icmp_imm_s(IntCC::Equal, holds, 0);
                 self.panic_if(fail, message);
                 return Vec::new();
@@ -2317,8 +2610,8 @@ impl<'a, 'b> Gen<'a, 'b> {
                 self.b.switch_to_block(cont);
                 self.b.seal_block(cont);
                 if *ty == Ty::Str {
-                    self.call_rt("anvil_release", &[a]);
-                    self.call_rt("anvil_release", &[c]);
+                    self.release_one(a);
+                    self.release_one(c);
                 }
                 return Vec::new();
             }
@@ -2332,7 +2625,7 @@ impl<'a, 'b> Gen<'a, 'b> {
                 let xs = self.expr(&bargs[0])[0];
                 let s = self.str_obj(site);
                 let out = self.call_rt("anvil_bytes_of", &[xs, s]).unwrap();
-                self.call_rt("anvil_release", &[xs]);
+                self.release_one(xs);
                 return vec![out];
             }
             // A str object is valid bytes as it is.
@@ -2344,7 +2637,7 @@ impl<'a, 'b> Gen<'a, 'b> {
                 let m = self.str_obj(message);
                 let out = self.call_rt("anvil_str_replace", &[s, old, new, m]).unwrap();
                 for v in [s, old, new] {
-                    self.call_rt("anvil_release", &[v]);
+                    self.release_one(v);
                 }
                 return vec![out];
             }
@@ -2362,7 +2655,7 @@ impl<'a, 'b> Gen<'a, 'b> {
                         self.call_rt("anvil_str_case", &[x, upper]).unwrap()
                     }
                 };
-                self.call_rt("anvil_release", &[x]);
+                self.release_one(x);
                 return vec![out];
             }
             // Each worker gets its own copies of the function and of its share of xs (see anvil_rt.c).
@@ -2375,16 +2668,16 @@ impl<'a, 'b> Gen<'a, 'b> {
                 let info = self.be.type_info(self.program, ret);
                 let ti = self.data_ptr(info);
                 let out = self.call_rt("anvil_parallel_map", &[xs, f, ti, work]).unwrap();
-                self.call_rt("anvil_release", &[xs]);
-                self.call_rt("anvil_release", &[f]);
+                self.release_one(xs);
+                self.release_one(f);
                 return vec![out];
             }
             Builtin::ArrJoin => {
                 let xs = self.expr(&bargs[0])[0];
                 let sep = self.expr(&bargs[1])[0];
                 let out = self.call_rt("anvil_arr_join", &[xs, sep]).unwrap();
-                self.call_rt("anvil_release", &[xs]);
-                self.call_rt("anvil_release", &[sep]);
+                self.release_one(xs);
+                self.release_one(sep);
                 return vec![out];
             }
             Builtin::FloatFixed { message } => {
@@ -2404,21 +2697,21 @@ impl<'a, 'b> Gen<'a, 'b> {
                 let kind = self.b.ins().iconst(I, kind);
                 let m = self.str_obj(message);
                 let out = self.call_rt("anvil_arr_sorted", &[xs, kind, m]).unwrap();
-                self.call_rt("anvil_release", &[xs]);
+                self.release_one(xs);
                 return vec![out];
             }
             Builtin::BytesToStr => {
                 let Ty::Enum(eid) = ty else { unreachable!() };
                 let bs = self.expr(&bargs[0])[0];
                 let s = self.call_rt("anvil_bytes_to_str", &[bs]).unwrap();
-                self.call_rt("anvil_release", &[bs]);
+                self.release_one(bs);
                 let ok = self.b.ins().icmp_imm_s(IntCC::NotEqual, s, 0);
                 return self.option(*eid, ok, |_| vec![s]);
             }
             Builtin::BytesHex => {
                 let bs = self.expr(&bargs[0])[0];
                 let s = self.call_rt("anvil_bytes_hex", &[bs]).unwrap();
-                self.call_rt("anvil_release", &[bs]);
+                self.release_one(bs);
                 return vec![s];
             }
             Builtin::BytesToArray => {
@@ -2426,7 +2719,7 @@ impl<'a, 'b> Gen<'a, 'b> {
                 let info = self.be.type_info(self.program, &Ty::I64);
                 let ti = self.data_ptr(info);
                 let out = self.call_rt("anvil_bytes_to_array", &[bs, ti]).unwrap();
-                self.call_rt("anvil_release", &[bs]);
+                self.release_one(bs);
                 return vec![out];
             }
             Builtin::ClockNs => return vec![self.call_rt("anvil_clock_ns", &[]).unwrap()],
@@ -2434,9 +2727,9 @@ impl<'a, 'b> Gen<'a, 'b> {
             Builtin::Len => {
                 // str and arrays both keep their length at the same offset.
                 let (vals, owned) = self.borrow(&bargs[0]);
-                let len = self.b.ins().load(I, self.trusted, vals[0], OBJ_LEN);
+                let len = self.b.ins().load(I, self.header, vals[0], OBJ_LEN);
                 if owned {
-                    self.call_rt("anvil_release", &[vals[0]]);
+                    self.release_one(vals[0]);
                 }
                 return vec![len];
             }

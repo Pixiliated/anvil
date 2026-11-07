@@ -3,6 +3,16 @@
 Each version is one roadmap milestone (docs/ROADMAP.md); docs/DECISIONS.md says why things are
 the way they are.
 
+## 0.41.0
+- Compiled programs run faster, with the same output. On a benchmark of eight programs: from about 2.5x
+  behind Rust to about 1.6x, and from 1.4x behind Java to a little ahead; allocation-heavy code is ahead
+  of Rust and C++.
+- Big maps find keys by hash, in the order they always gave: building one no longer gets slower with
+  its size.
+- Small objects come from per-thread pools. Reference counts and array growth are inline, writes to an
+  array known to have one owner need no check, and small functions are inlined.
+- `find`, `split` and integer text are faster; output to a file or pipe is written in larger pieces.
+
 ## 0.40.0
 - The interpreter is about three times faster, with the same counts. `mutate` runs only what runs the
   mutated statement, and `verify` checks files side by side.

@@ -1,0 +1,183 @@
+// Maps past the size where they find keys by hash: whatever they do underneath, keys stay in order.
+
+fn total(xs: [i64]) -> i64 {
+    var sum: i64 = 0;
+    for x in xs {
+        sum = sum + x;
+    }
+    return sum;
+}
+
+allow unreached "runs only if a map has gone wrong"
+fn is_ascending(xs: [i64]) -> bool {
+    for i in 1..xs.len() {
+        if xs[i - 1] >= xs[i] {
+            return false;
+        }
+    }
+    return true;
+}
+
+fn names_ascending(xs: [str]) -> bool {
+    return xs == xs.sorted();
+}
+
+fn at(m: Map[i64, i64], k: i64) -> i64 {
+    match m.get(k) {
+        Some(value: v) => { return v; }
+        None => { return -1; }
+    }
+}
+
+// Keys in a scrambled order, some negative.
+fn scramble(i: i64) -> i64 {
+    return (i * 7919) % 1009 - 500;
+}
+
+allow unreached "runs only if a map has gone wrong"
+fn numbers() uses io {
+    var m: Map[i64, i64] = [:];
+    for i in 0..1000 {
+        m.set(key: scramble(i), value: i);
+    }
+    print("{m.len()} {is_ascending(m.keys())} {m.keys()[0]} {at(m: m, k: 3)} {at(m: m, k: 5000)}");
+    print("{total(m.values())}");
+    // Replacing does not change how many there are.
+    for i in 0..1000 {
+        m.set(key: scramble(i), value: 1);
+    }
+    print("{m.len()} {total(m.values())}");
+    // Removing, then looking for what stayed and what went.
+    for i in 0..500 {
+        m.remove(scramble(i));
+    }
+    print("{m.len()} {is_ascending(m.keys())} {m.has(scramble(0))} {m.has(scramble(999))}");
+    for i in 500..1000 {
+        if !m.has(scramble(i)) {
+            print("lost {i}");
+        }
+    }
+    // Adding again after removing.
+    for i in 0..500 {
+        m.set(key: scramble(i), value: 2);
+    }
+    print("{m.len()} {total(m.values())} {is_ascending(m.keys())}");
+}
+
+allow unreached "runs only if a map has gone wrong"
+fn words() uses io {
+    var m: Map[str, i64] = [:];
+    for i in 0..600 {
+        m.set(key: "word {scramble(i)}", value: i);
+    }
+    print("{m.len()} {names_ascending(m.keys())} {m.keys()[0]}");
+    for i in 0..600 {
+        match m.get("word {scramble(i)}") {
+            Some(value: v) => {
+                if v != i {
+                    print("wrong {i}");
+                }
+            }
+            None => { print("missing {i}"); }
+        }
+    }
+    for i in 0..300 {
+        m.remove("word {scramble(i)}");
+    }
+    let zero: str = "word 0";
+    print("{m.len()} {names_ascending(m.keys())} {m.has(zero)}");
+}
+
+fn values_with_references() uses io {
+    var m: Map[str, [str]] = [:];
+    for i in 0..100 {
+        m.set(key: "k{i}", value: ["v{i}", "w{i}"]);
+    }
+    let kept: [str] = m.values()[0];
+    for i in 0..100 {
+        m.set(key: "k{i}", value: ["again"]);
+    }
+    for i in 50..100 {
+        m.remove("k{i}");
+    }
+    print("{m.len()} {kept[0]} {m.values()[0][0]}");
+}
+
+fn shared_maps() uses io {
+    var a: Map[i64, i64] = [:];
+    for i in 0..100 {
+        a.set(key: 100 - i, value: i);
+    }
+    let b: Map[i64, i64] = a;
+    a.set(key: 1000, value: 1);
+    a.remove(50);
+    print("{a.len()} {b.len()} {a.has(50)} {b.has(50)} {a.has(1000)} {b.has(1000)}");
+    print("{is_ascending(a.keys())} {is_ascending(b.keys())}");
+    var c: Map[i64, i64] = b;
+    c.set(key: 7, value: -7);
+    print("{at(m: b, k: 7)} {at(m: c, k: 7)}");
+}
+
+fn equal_whatever_the_history() uses io {
+    var up: Map[i64, i64] = [:];
+    var down: Map[i64, i64] = [:];
+    for i in 0..200 {
+        up.set(key: i, value: i * 2);
+        down.set(key: 199 - i, value: (199 - i) * 2);
+    }
+    print("{up == down}");
+    up.set(key: 5000, value: 1);
+    print("{up == down}");
+    up.remove(5000);
+    print("{up == down}");
+    down.set(key: 0, value: 1);
+    print("{up == down} {up != down}");
+    var few: Map[i64, i64] = [1: 2, 3: 4];
+    let same: Map[i64, i64] = [3: 4, 1: 2];
+    print("{few == same}");
+    few.remove(1);
+    print("{few == same}");
+}
+
+allow unreached "runs only if a map has gone wrong"
+fn crossing_the_size_one_at_a_time() uses io {
+    var m: Map[i64, i64] = [:];
+    for i in 0..70 {
+        m.set(key: 70 - i, value: i);
+        if m.len() != i + 1 || !is_ascending(m.keys()) || at(m: m, k: 70 - i) != i {
+            print("wrong at {i}");
+        }
+    }
+    while m.len() > 0 {
+        let k: i64 = m.keys()[m.len() / 2];
+        m.remove(k);
+        if m.has(k) || !is_ascending(m.keys()) {
+            print("wrong removing {k}");
+        }
+    }
+    print("{m.len()}");
+}
+
+fn twice(m: Map[i64, i64]) -> i64 {
+    return 2 * total(m.values());
+}
+
+fn worker_copies() uses io {
+    var m: Map[i64, i64] = [:];
+    for i in 0..300 {
+        m.set(key: scramble(i), value: 1);
+    }
+    let maps: [Map[i64, i64]] = [m, m, m];
+    let results: [i64] = maps.parallel_map(twice);
+    print("{results[0]} {results[2]}");
+}
+
+fn main() uses io {
+    numbers();
+    words();
+    values_with_references();
+    shared_maps();
+    equal_whatever_the_history();
+    crossing_the_size_one_at_a_time();
+    worker_copies();
+}

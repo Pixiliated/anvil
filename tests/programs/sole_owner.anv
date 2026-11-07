@@ -1,0 +1,228 @@
+// Writes that skip the check for a second owner must never reach an array someone else holds.
+
+struct Bag {
+    items: [i64],
+    size: i64,
+}
+
+fn fresh(n: i64) -> [i64] {
+    var out: [i64] = [];
+    for i in 0..n {
+        out.push(i);
+    }
+    return out;
+}
+
+// Looks fresh but hands back what it was given.
+fn same(xs: [i64]) -> [i64] {
+    return xs;
+}
+
+fn either(xs: [i64], yes: bool) -> [i64] {
+    if yes {
+        return xs;
+    }
+    return fresh(2);
+}
+
+// Its local is shared before it is returned.
+fn leaky() -> [[i64]] {
+    var row: [i64] = [1, 2];
+    var rows: [[i64]] = [row];
+    row[0] = 9;
+    rows.push(row);
+    return rows;
+}
+
+fn write_first(xs: [i64]) -> [i64] {
+    var ys: [i64] = xs;
+    ys[0] = 100;
+    return ys;
+}
+
+fn kept_alias_in_a_loop() uses io {
+    var a: [i64] = fresh(3);
+    a[0] = 10;
+    var b: [i64] = [];
+    for i in 0..3 {
+        a[1] = i;
+        if i == 1 {
+            b = a;
+        }
+        a[2] = i * 2;
+    }
+    print("{a[0]} {a[1]} {a[2]} / {b[0]} {b[1]} {b[2]}");
+}
+
+fn alias_in_one_branch(take: bool) uses io {
+    var a: [i64] = fresh(2);
+    a[0] = 5;
+    var b: [i64] = [0];
+    if take {
+        b = a;
+    }
+    a[1] = 7;
+    print("{a[1]} {b[b.len() - 1]}");
+}
+
+fn checked_in_one_branch(write: bool) uses io {
+    let shared: [i64] = fresh(2);
+    var a: [i64] = shared;
+    if write {
+        a[0] = 1;
+    }
+    a[1] = 2;
+    print("{shared[0]} {shared[1]} {a[0]} {a[1]}");
+}
+
+fn checked_in_part_of_an_expression(go: bool) uses io {
+    let shared: [i64] = fresh(2);
+    var a: [i64] = shared;
+    let last: i64 = if go { a.pop() } else { 0 };
+    a[0] = 50;
+    print("{last} {shared[0]} {shared.len()} {a[0]}");
+}
+
+fn checked_in_the_right_of_and(go: bool) uses io {
+    let shared: [i64] = fresh(2);
+    var a: [i64] = shared;
+    if go && a.pop() > 0 {
+        print("popped");
+    }
+    a[0] = 60;
+    print("{shared[0]} {shared.len()} {a[0]}");
+}
+
+fn loop_may_not_run(n: i64) uses io {
+    let shared: [i64] = fresh(2);
+    var a: [i64] = shared;
+    for i in 0..n {
+        a[0] = i + 1;
+    }
+    a[1] = 70;
+    print("{shared[1]} {a[0]} {a[1]}");
+}
+
+fn shared_late_in_a_loop() uses io {
+    var a: [i64] = fresh(2);
+    var saved: [[i64]] = [];
+    var i: i64 = 0;
+    while i < 3 {
+        a[0] = i;
+        saved.push(a);
+        i = i + 1;
+    }
+    print("{saved[0][0]} {saved[1][0]} {saved[2][0]} {a[0]}");
+}
+
+fn given_to_a_call_that_keeps_it() uses io {
+    var a: [i64] = fresh(2);
+    a[0] = 1;
+    let b: [i64] = same(a);
+    a[0] = 2;
+    print("{a[0]} {b[0]}");
+    var c: [i64] = either(xs: a, yes: true);
+    c[1] = 40;
+    print("{a[1]} {c[1]}");
+    var d: [i64] = either(xs: a, yes: false);
+    d[1] = 41;
+    print("{a[1]} {d[1]}");
+}
+
+fn captured() uses io {
+    var a: [i64] = fresh(2);
+    a[0] = 3;
+    let look: fn(i64) -> i64 = fn(i: i64) -> i64 {
+        return a[i];
+    };
+    a[0] = 4;
+    print("{a[0]} {look(0)}");
+}
+
+fn walked_while_written() uses io {
+    var a: [i64] = fresh(3);
+    a[0] = 1;
+    for x in a {
+        a[2] = a[2] + x;
+    }
+    a[1] = 8;
+    print("{a[0]} {a[1]} {a[2]}");
+}
+
+fn fields() uses io {
+    var b: Bag = Bag { items: fresh(2), size: 2 };
+    b.items[0] = 1;
+    let view: [i64] = b.items;
+    b.items[0] = 2;
+    print("{view[0]} {b.items[0]} {b.size}");
+    let copy: Bag = b;
+    b.items[1] = 30;
+    print("{copy.items[1]} {b.items[1]}");
+    b.items = view;
+    b.items[1] = 31;
+    print("{view[1]} {b.items[1]}");
+}
+
+fn rows_in_rows() uses io {
+    var row: [i64] = fresh(2);
+    var rows: [[i64]] = [row, row];
+    rows[0][0] = 9;
+    row[1] = 8;
+    print("{rows[0][0]} {rows[1][0]} {rows[0][1]} {row[0]} {row[1]}");
+    let first: [i64] = rows[0];
+    rows[0][1] = 7;
+    print("{first[1]} {rows[0][1]}");
+}
+
+fn slices_are_new() uses io {
+    let whole: [i64] = fresh(4);
+    var part: [i64] = whole[1..3];
+    part[0] = 90;
+    print("{whole[1]} {part[0]}");
+    let sorted: [i64] = whole.sorted();
+    var again: [i64] = sorted;
+    again[0] = 91;
+    print("{sorted[0]} {again[0]}");
+}
+
+fn pushes_past_their_room() uses io {
+    var a: [i64] = [];
+    for i in 0..100 {
+        a.push(i);
+        if i == 50 {
+            let held: [i64] = a;
+            a.push(-1);
+            print("{held.len()} {a.len()}");
+        }
+    }
+    var total: i64 = 0;
+    while a.len() > 0 {
+        total = total + a.pop();
+    }
+    print("{total}");
+}
+
+fn main() uses io {
+    print("{write_first(fresh(1))[0]}");
+    let rows: [[i64]] = leaky();
+    print("{rows[0][0]} {rows[1][0]}");
+    kept_alias_in_a_loop();
+    alias_in_one_branch(true);
+    alias_in_one_branch(false);
+    checked_in_one_branch(true);
+    checked_in_one_branch(false);
+    checked_in_part_of_an_expression(true);
+    checked_in_part_of_an_expression(false);
+    checked_in_the_right_of_and(true);
+    checked_in_the_right_of_and(false);
+    loop_may_not_run(0);
+    loop_may_not_run(2);
+    shared_late_in_a_loop();
+    given_to_a_call_that_keeps_it();
+    captured();
+    walked_while_written();
+    fields();
+    rows_in_rows();
+    slices_are_new();
+    pushes_past_their_room();
+}

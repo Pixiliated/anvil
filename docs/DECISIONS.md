@@ -703,4 +703,23 @@ Short records of choices that are not obvious from the code. Newest last.
   beside the panic: where they are wanted, with the rule intact.
 - **`testkit.anv` by name**: a new visibility or `test fn` would be language for one lint's sake. A
   file's name says what it is for, and its helpers still have to be tested.
-
+- **Run speed comes from what a program does most, not from a new backend** (v0.41). A sampling profiler
+  and the machine code named the costs. Cranelift stays: a build still takes a fraction of a second.
+- **Maps are hashed underneath, sorted when looked at.** A tree would keep them sorted all the time at
+  the price of every lookup. Up to 32 elements a map is the sorted array it always was; past that a
+  table finds keys, new elements go on the end and whoever walks the elements settles them first. Settling
+  merges what is new, so it costs no more than the walk it comes before. The hash is fixed and order
+  never depends on it: determinism is untouched, and the interpreter keeps its sorted vector, as only
+  time differs.
+- **Pools, not a general allocator.** Every object's size is known when it is freed, so a free list per
+  size needs no headers. Chunks are never given back: a program's small-object memory stays at its peak.
+  A worker's pool goes to the next worker, so repeated `parallel_map`s do not grow.
+- **One owner, proved by emission order.** `unique.rs` says which locals a statement might share or
+  replace, and `Gen` forgets those around it; a check counts only where it dominates what follows (not in
+  one arm, not in part of an expression, not after a loop that may not run). `sole_owner.anv` exists
+  for this: breaking any of these rules on purpose makes its golden fail.
+- **Cranelift's inliner copies data symbols as they are**, so every function shares one table of
+  names (`share_names`). Without it programs read the wrong data; it is what the first attempt found.
+- **Not done:** signed add and subtract still set a byte and test it, as Cranelift folds that only
+  for multiply and unsigned add; no vectorizing, which is most of what is left on matrix code; spilling in
+  very large functions.
