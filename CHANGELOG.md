@@ -3,6 +3,19 @@
 Each version is one roadmap milestone (docs/ROADMAP.md); docs/DECISIONS.md says why things are
 the way they are.
 
+## 0.45.0
+- A release build's innermost loops, `for` and a `while` counting up to a limit by a fixed step, test
+  before they start whether an array access with an index that is a straight line in the counter could
+  fail. If none could, the loop runs without those checks, and the C compiler can vectorize it; if one
+  could, it runs as written and stops at the same round with the same message. `--asm --release` says
+  how many loops were cleared.
+- Matrix multiplication runs 1.54x faster than v0.44's release build, and 3.18x faster when written with
+  a reused inner loop, the way the Rust version is. The route planner and fannkuch written plainly are
+  1.07x faster, the rest within 2%: 1.05x across the benchmark programs. Delivered programs went from
+  1.39x Rust's time to 1.21x: matrix multiplication from 3.44x to 1.29x. Fannkuch, binary trees and the
+  route planner stay faster than Rust; word counting, the ledger and the calculator stay 1.9x to 3.6x
+  behind it, and clearing does not help them.
+
 ## 0.44.0
 - `anvil build --release`: the program through C and the C compiler that comes with the linker
   (`cl /O2` on Windows, `cc -O2` elsewhere), so nothing new to install. Builds take about a second;

@@ -1,0 +1,11 @@
+// Below the array only at the first round: the last round alone would not show it.
+
+fn main() uses io {
+    let a: [i64] = [1, 2, 3];
+    var sum: i64 = 0;
+    for i in 0..3 {
+        print("round {i}");
+        sum = sum + a[i - 1];
+    }
+    print("never {sum}");
+}

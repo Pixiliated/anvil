@@ -1,0 +1,5 @@
+exit: 101
+panic: index 2 out of bounds for length 2 at tests/programs/panic_cleared_curve.anv:8:21
+---
+round 0
+round 1

@@ -364,8 +364,10 @@ fn compile(program: &Program, asm: bool, entry: Entry, release: bool) -> Result<
         ctx.set_disasm(asm);
         ctx.func = bodies.remove(&id).unwrap();
         // The C compiler inlines for itself, and better.
-        if let Some(c) = &mut be.c {
-            c.functions.push((ClFuncId::from_u32(id), ctx.func));
+        if be.c.is_some() {
+            cranelift_codegen::verify_function(&ctx.func, be.module.isa())
+                .map_err(|e| format!("the IR of `{}` is wrong: {e}", names[&id]))?;
+            be.c.as_mut().unwrap().functions.push((ClFuncId::from_u32(id), ctx.func));
             continue;
         }
         ctx.inline(SmallCallees { bodies: &inlined }).map_err(|e| format!("codegen of `{}` failed: {e:?}", names[&id]))?;
@@ -826,6 +828,10 @@ struct Gen<'a, 'b> {
     trusted: MemFlagsData,
     header: MemFlagsData,
     counts: MemFlagsData,
+    /// In a loop that was cleared before it started: the index expressions known to be in bounds
+    /// and free of overflow, and each array's storage, which the loop cannot move.
+    cleared: HashSet<*const Expr>,
+    storage: HashMap<unique::Key, Variable>,
     /// The function being generated, and its locals' names, for `Unproved`.
     function: String,
     local_names: Vec<String>,
@@ -874,6 +880,8 @@ impl<'a, 'b> Gen<'a, 'b> {
             header,
             counts,
             function: String::new(),
+            cleared: HashSet::new(),
+            storage: HashMap::new(),
             local_names: locals.iter().map(|l| l.name.clone()).collect(),
             known: unique::Known::default(),
             branching: 0,
@@ -1339,22 +1347,15 @@ impl<'a, 'b> Gen<'a, 'b> {
                     self.known = known.clone();
                     self.own_before_loop(keys, runs);
                 }
-                let header = self.b.create_block();
-                let body_b = self.b.create_block();
-                let exit = self.b.create_block();
-                self.b.ins().jump(header, &[]);
-                self.b.switch_to_block(header);
-                let cond = self.expr(c)[0];
-                self.b.ins().brif(cond, body_b, &[], exit, &[]);
-                self.b.switch_to_block(body_b);
-                self.b.seal_block(body_b);
-                self.loops.push((header, exit));
-                self.block(body);
-                self.loops.pop();
-                self.b.ins().jump(header, &[]);
-                self.b.seal_block(header);
-                self.b.switch_to_block(exit);
-                self.b.seal_block(exit);
+                let plan = if self.be.c.is_some() {
+                    unique::counted_while(self.program, &self.local_types, c, body).filter(|p| !p.accesses.is_empty())
+                } else {
+                    None
+                };
+                match plan {
+                    Some(p) => self.counted_while_or_checked(c, body, &p),
+                    None => self.while_loop(c, body),
+                }
                 self.known = known;
             }
             Stmt::For(l, start, end, body) => {
@@ -1369,9 +1370,18 @@ impl<'a, 'b> Gen<'a, 'b> {
                     self.own_before_loop(keys, runs);
                 }
                 self.counter_facts(s);
-                self.counted_loop(s0, limit, body, |g, i| {
-                    g.b.def_var(g.vars[*l][0], i);
-                });
+                let plan = if self.be.c.is_some() {
+                    unique::clearable(self.program, &self.local_types, *l, body)
+                } else {
+                    Vec::new()
+                };
+                if plan.is_empty() {
+                    self.counted_loop(s0, limit, body, |g, i| {
+                        g.b.def_var(g.vars[*l][0], i);
+                    });
+                } else {
+                    self.cleared_or_checked(*l, s0, e0, limit, body, &plan);
+                }
                 self.known = known;
             }
             Stmt::ForEach { var, held, iter, body } => {
@@ -1551,12 +1561,210 @@ impl<'a, 'b> Gen<'a, 'b> {
         self.b.seal_block(exit);
     }
 
+    /// Goes on when `ok`, and otherwise to `other`.
+    fn require(&mut self, ok: Value, other: Block) {
+        let next = self.b.create_block();
+        self.b.ins().brif(ok, next, &[], other, &[]);
+        self.b.switch_to_block(next);
+        self.b.seal_block(next);
+    }
+
+    /// `e`, a straight line in `counter`, with the counter at `at`; each overflow is added to `bad`.
+    fn at_round(&mut self, e: &Expr, counter: LocalId, at: Value, bad: &mut Value) -> Value {
+        match &e.kind {
+            ExprKind::Local(l) if *l == counter => at,
+            ExprKind::IArith { op, l, r, .. } => {
+                let a = self.at_round(l, counter, at, bad);
+                let c = self.at_round(r, counter, at, bad);
+                let (v, of) = match op {
+                    IOp::Add => self.b.ins().sadd_overflow(a, c),
+                    IOp::Sub => self.b.ins().ssub_overflow(a, c),
+                    IOp::Mul => self.b.ins().smul_overflow(a, c),
+                    _ => unreachable!("not a straight line"),
+                };
+                *bad = self.b.ins().bor(*bad, of);
+                v
+            }
+            _ => self.expr(e)[0],
+        }
+    }
+
+    fn while_loop(&mut self, c: &Expr, body: &[Stmt]) {
+        let header = self.b.create_block();
+        let body_b = self.b.create_block();
+        let exit = self.b.create_block();
+        self.b.ins().jump(header, &[]);
+        self.b.switch_to_block(header);
+        let cond = self.expr(c)[0];
+        self.b.ins().brif(cond, body_b, &[], exit, &[]);
+        self.b.switch_to_block(body_b);
+        self.b.seal_block(body_b);
+        self.loops.push((header, exit));
+        self.block(body);
+        self.loops.pop();
+        self.b.ins().jump(header, &[]);
+        self.b.seal_block(header);
+        self.b.switch_to_block(exit);
+        self.b.seal_block(exit);
+    }
+
+    /// `while_loop`, cleared if a test now shows nothing could fail (see `cleared_or_checked`).
+    fn counted_while_or_checked(&mut self, c: &Expr, body: &[Stmt], p: &unique::CountedWhile) {
+        let (checked, done) = (self.b.create_block(), self.b.create_block());
+        let first = self.b.use_var(self.vars[p.counter][0]);
+        let mut bad = self.b.ins().iconst(types::I8, 0);
+        let limit = self.at_round(p.limit, p.counter, first, &mut bad);
+        let fine = self.b.ins().icmp_imm_s(IntCC::Equal, bad, 0);
+        self.require(fine, checked);
+        let runs = self.b.ins().icmp(IntCC::SignedLessThan, first, limit);
+        self.require(runs, checked);
+        // The counter's last value: below the limit, a whole number of steps from the first.
+        let top = self.b.ins().iadd_imm_s(limit, -1);
+        let (span, of) = self.b.ins().ssub_overflow(top, first);
+        let fine = self.b.ins().icmp_imm_s(IntCC::Equal, of, 0);
+        self.require(fine, checked);
+        let step = self.b.ins().iconst(I, p.step);
+        let rounds = self.b.ins().sdiv(span, step);
+        let whole = self.b.ins().imul(rounds, step);
+        let last = self.b.ins().iadd(first, whole);
+        let (_, of) = self.b.ins().sadd_overflow(last, step);
+        let fine = self.b.ins().icmp_imm_s(IntCC::Equal, of, 0);
+        self.require(fine, checked);
+        self.clear_tests(p.counter, first, last, &p.accesses, checked);
+        let facts = self.known.clone();
+        self.hold_cleared(&p.accesses);
+        self.cleared.insert(p.advance as *const Expr);
+        self.while_loop(c, body);
+        self.cleared.clear();
+        self.storage.clear();
+        self.b.ins().jump(done, &[]);
+        self.b.switch_to_block(checked);
+        self.b.seal_block(checked);
+        self.known = facts;
+        self.while_loop(c, body);
+        self.b.ins().jump(done, &[]);
+        self.b.switch_to_block(done);
+        self.b.seal_block(done);
+    }
+
+    /// Runs the loop with no bounds or overflow checks on `plan`'s accesses if a test now shows
+    /// none could fail, and as written otherwise: a loop that would stop part way still does, at
+    /// the same round, with the same message. Each index is a straight line, so if its parts and
+    /// its value are fine at the first and last rounds, they are at every round between.
+    fn cleared_or_checked(
+        &mut self,
+        l: LocalId,
+        s0: Value,
+        e0: Value,
+        limit: Variable,
+        body: &[Stmt],
+        plan: &[unique::Access],
+    ) {
+        let (checked, done) = (self.b.create_block(), self.b.create_block());
+        let runs = self.b.ins().icmp(IntCC::SignedLessThan, s0, e0);
+        self.require(runs, checked);
+        let last = self.b.ins().iadd_imm_s(e0, -1);
+        self.clear_tests(l, s0, last, plan, checked);
+        let facts = self.known.clone();
+        self.hold_cleared(plan);
+        self.counted_loop(s0, limit, body, |g, i| {
+            g.b.def_var(g.vars[l][0], i);
+        });
+        self.cleared.clear();
+        self.storage.clear();
+        self.b.ins().jump(done, &[]);
+        self.b.switch_to_block(checked);
+        self.b.seal_block(checked);
+        self.known = facts;
+        self.counted_loop(s0, limit, body, |g, i| {
+            g.b.def_var(g.vars[l][0], i);
+        });
+        self.b.ins().jump(done, &[]);
+        self.b.switch_to_block(done);
+        self.b.seal_block(done);
+    }
+
+    /// Tests each access at the counter's first and last values, going to `checked` on any doubt.
+    fn clear_tests(&mut self, l: LocalId, s0: Value, last: Value, plan: &[unique::Access], checked: Block) {
+        let mut seen = HashSet::new();
+        for a in plan {
+            if !seen.insert((a.key, format!("{:?}", a.index.kind), a.write)) {
+                continue;
+            }
+            let arr = self.b.use_var(self.vars[a.key.0][a.key.1]);
+            let set = self.b.ins().icmp_imm_s(IntCC::NotEqual, arr, 0);
+            self.require(set, checked);
+            let len = self.b.ins().load(I, self.header, arr, OBJ_LEN);
+            let mut bad = self.b.ins().iconst(types::I8, 0);
+            let first = self.at_round(a.index, l, s0, &mut bad);
+            let end = self.at_round(a.index, l, last, &mut bad);
+            let fine = self.b.ins().icmp_imm_s(IntCC::Equal, bad, 0);
+            self.require(fine, checked);
+            let low = self.b.ins().icmp(IntCC::UnsignedLessThan, first, len);
+            self.require(low, checked);
+            let high = self.b.ins().icmp(IntCC::UnsignedLessThan, end, len);
+            self.require(high, checked);
+            if a.write {
+                let rc = self.b.ins().load(I, self.counts, arr, OBJ_RC);
+                let alone = self.b.ins().icmp_imm_s(IntCC::Equal, rc, 1);
+                self.require(alone, checked);
+            }
+        }
+    }
+
+    /// Enters a cleared loop: its accesses need no tests, and its arrays' storage cannot move.
+    fn hold_cleared(&mut self, plan: &[unique::Access]) {
+        self.be.c.as_mut().expect("only a release build clears loops").cleared_loops += 1;
+        for a in plan {
+            self.cleared.insert(a.index as *const Expr);
+            if a.write {
+                self.known.unique.insert(a.key);
+            }
+            if a.elem.is_some() && !self.storage.contains_key(&a.key) {
+                let arr = self.b.use_var(self.vars[a.key.0][a.key.1]);
+                let data = self.b.ins().load(I, self.header, arr, ARR_DATA);
+                let var = self.b.declare_var(I);
+                self.b.def_var(var, data);
+                self.storage.insert(a.key, var);
+            }
+        }
+    }
+
+    fn is_cleared(&self, index: &Expr) -> bool {
+        self.cleared.contains(&(index as *const Expr))
+    }
+
+    /// A cleared index: what `expr` gives, with nothing checked.
+    fn unchecked(&mut self, e: &Expr) -> Value {
+        match &e.kind {
+            ExprKind::IArith { op, l, r, .. } => {
+                let (a, c) = (self.unchecked(l), self.unchecked(r));
+                match op {
+                    IOp::Add => self.b.ins().iadd(a, c),
+                    IOp::Sub => self.b.ins().isub(a, c),
+                    IOp::Mul => self.b.ins().imul(a, c),
+                    _ => unreachable!("not a straight line"),
+                }
+            }
+            _ => self.expr(e)[0],
+        }
+    }
+
+    /// Where element `index` of an array a cleared loop holds is.
+    fn cleared_addr(&mut self, key: unique::Key, index: Value, elem: &Ty) -> Value {
+        let data = self.b.use_var(self.storage[&key]);
+        let size = flat_len(self.program, elem) as i64 * SLOT;
+        let offset = self.b.ins().imul_imm_s(index, size);
+        self.b.ins().iadd(data, offset)
+    }
+
     /// The index values of a place, evaluated left to right.
     fn indices(&mut self, path: &[Step]) -> Vec<Value> {
         let mut out = Vec::new();
         for step in path {
             if let Step::Index { index, .. } = step {
-                out.push(self.expr(index)[0]);
+                let v = if self.is_cleared(index) { self.unchecked(index) } else { self.expr(index)[0] };
+                out.push(v);
             }
         }
         out
@@ -1589,7 +1797,10 @@ impl<'a, 'b> Gen<'a, 'b> {
                     let elem = (**elem).clone();
                     let key = if let Loc::Vars(l, start, _) = &loc { Some((*l, *start)) } else { None };
                     let named = unique::local_of(index_expr);
-                    let addr = self.elem_addr(arr, index, &elem, site, key, named);
+                    let addr = match key {
+                        Some(k) if self.is_cleared(index_expr) => self.cleared_addr(k, index, &elem),
+                        _ => self.elem_addr(arr, index, &elem, site, key, named),
+                    };
                     Loc::Mem(addr, elem)
                 }
             };
@@ -1747,10 +1958,15 @@ impl<'a, 'b> Gen<'a, 'b> {
     /// The values of `base[index]`, borrowed from the array.
     fn element(&mut self, base: &Expr, index: &Expr, ty: &Ty, site: &str) -> Vec<Value> {
         let key = unique::key_of(self.program, base);
+        let lay = self.layout(ty);
+        if let Some(k) = key.filter(|_| self.is_cleared(index)) {
+            let i = self.unchecked(index);
+            let addr = self.cleared_addr(k, i, ty);
+            return self.load(addr, &lay);
+        }
         let arr = self.borrow(base).0[0];
         let i = self.expr(index)[0];
         let named = unique::local_of(index);
-        let lay = self.layout(ty);
         let addr = self.elem_addr(arr, i, ty, site, key, named);
         self.load(addr, &lay)
     }
@@ -1858,9 +2074,12 @@ impl<'a, 'b> Gen<'a, 'b> {
                 let plain = !mutates(index);
                 let key = if plain { unique::key_of(self.program, base) } else { None };
                 let (b, owned) = if plain { self.borrow(base) } else { (self.expr(base), true) };
-                let i = self.expr(index)[0];
+                let cleared = plain && self.is_cleared(index);
+                let i = if cleared { self.unchecked(index) } else { self.expr(index)[0] };
                 let named = unique::local_of(index);
-                self.bounds_check(b[0], i, site, key, named);
+                if !cleared {
+                    self.bounds_check(b[0], i, site, key, named);
+                }
                 let at = self.b.ins().iadd(b[0], i);
                 let v = self.b.ins().uload8(I, self.trusted, at, STR_BYTES);
                 if owned {
@@ -1900,9 +2119,13 @@ impl<'a, 'b> Gen<'a, 'b> {
             ExprKind::Index { base, index, site, .. } => {
                 // A borrowed array could be changed in place by a pop in the index expression.
                 let (arr, owned) = if mutates(index) { (self.expr(base), true) } else { self.borrow(base) };
-                let i = self.expr(index)[0];
                 let lay = self.layout(&e.ty);
-                let addr = self.elem_addr(arr[0], i, &e.ty, site, None, None);
+                let cleared = unique::key_of(self.program, base).filter(|_| self.is_cleared(index));
+                let i = if cleared.is_some() { self.unchecked(index) } else { self.expr(index)[0] };
+                let addr = match cleared {
+                    Some(k) => self.cleared_addr(k, i, &e.ty),
+                    None => self.elem_addr(arr[0], i, &e.ty, site, None, None),
+                };
                 let vals = self.load(addr, &lay);
                 self.retain(&lay, &vals);
                 if owned {
@@ -2095,6 +2318,7 @@ impl<'a, 'b> Gen<'a, 'b> {
                 vals
             }
             // A counter plus 1 is at most its limit, and minus a number at least its start less it.
+            ExprKind::IArith { .. } if self.is_cleared(e) => vec![self.unchecked(e)],
             ExprKind::IArith { op: op @ (IOp::Add | IOp::Sub), l, r, .. }
                 if unique::local_of(l).is_some_and(|i| self.known.counters.contains(&i))
                     && matches!((&r.kind, op), (ExprKind::Int(1), IOp::Add) | (ExprKind::Int(0..), IOp::Sub)) =>

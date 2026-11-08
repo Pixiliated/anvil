@@ -1,0 +1,13 @@
+// The offset moves as the loop runs: where it started says nothing about where it ends up.
+
+fn main() uses io {
+    let a: [i64] = [1, 2, 3, 4];
+    var at: i64 = 0;
+    var sum: i64 = 0;
+    for i in 0..3 {
+        sum = sum + a[at + i];
+        print("round {i}: {sum}");
+        at = i * 2;
+    }
+    print("never");
+}

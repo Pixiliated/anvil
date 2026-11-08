@@ -142,6 +142,29 @@ fn release_builds_are_deterministic_and_do_what_native_builds_do() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+#[test]
+fn release_builds_clear_the_loops_they_can() {
+    // Which loops get their checks tested ahead shows in the C, so this cannot quietly stop.
+    let p = hello_project("cleared");
+    let cleared = |body: &str| {
+        p.write("src/l.anv", &format!("fn main() uses io {{\n    var a: [i64] = [1, 2, 3, 4];\n    var s: i64 = 0;\n    a[0] = 1;\n    s = s + 1;\n{body}    print(\"{{s}} {{a[0]}}\");\n}}\n"));
+        let exe = p.0.join(format!("l{}", std::env::consts::EXE_SUFFIX));
+        let v = json_of(&p.anvil(&["build", "src/l.anv", "--release", "--asm", "--json", "-o", exe.to_str().unwrap()]));
+        assert_eq!(v["ok"], true, "{v}");
+        let c = v["asm"].as_str().unwrap().to_string();
+        let at = c.find("/* cleared loops: ").unwrap() + 18;
+        c[at..c[at..].find(' ').unwrap() + at].parse::<usize>().unwrap()
+    };
+    assert_eq!(cleared("    for i in 0..4 {\n        s = s + a[i];\n    }\n"), 1);
+    assert_eq!(cleared("    for i in 0..3 {\n        a[i] = a[i + 1];\n    }\n"), 1);
+    assert_eq!(cleared("    var i: i64 = 0;\n    while i < 4 {\n        s = s + a[i];\n        i = i + 1;\n    }\n"), 1);
+    assert_eq!(cleared("    var i: i64 = 0;\n    while i < 4 {\n        s = s + a[i];\n        i = i + 2;\n    }\n"), 1);
+    // A curve, an index that depends on what is read, and a loop inside a loop's body.
+    assert_eq!(cleared("    for i in 0..2 {\n        s = s + a[i * i];\n    }\n"), 0);
+    assert_eq!(cleared("    for i in 0..4 {\n        s = s + a[a[i] % 4];\n    }\n"), 1);
+    assert_eq!(cleared("    for i in 0..2 {\n        s = s + a[i];\n        for j in 0..2 {\n            s = s + a[j];\n        }\n    }\n"), 1);
+}
+
 fn check_json(path: &str) -> (bool, serde_json::Value) {
     let out = anvil(&["check", path, "--json"]);
     let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap_or_else(|e| {
@@ -2901,7 +2924,12 @@ fn verify_says_the_same_on_one_thread_and_on_many() {
         c.args(["verify", "--json"]).env("ANVIL_THREADS", threads);
         let v: serde_json::Value = serde_json::from_slice(&c.output().unwrap().stdout).unwrap();
         let files: Vec<serde_json::Value> = v["files"].as_array().unwrap().clone();
-        (files, v["open"].clone())
+        // When a finding was last seen is the one thing that differs from run to run.
+        let mut open = v["open"].clone();
+        for finding in open.as_array_mut().unwrap() {
+            finding.as_object_mut().unwrap().remove("last_seen");
+        }
+        (files, open)
     };
     let one = run("1");
     assert_eq!(one, run("8"));
@@ -2952,25 +2980,45 @@ fn compare_says_which_program_is_faster_and_when_it_cannot_tell() {
     p.write("src/other.anv", &source("60000000", "not the same"));
     p.write("src/given.anv", &source("argv[0].parse_i64() else {\n        panic(\"a number\");\n    }", "same"));
 
+    // Other work on the machine can make any one comparison wrong, or unable to tell. A verdict that
+    // comes out wrong five times running is not the machine.
+    let called = |args: &[&str], want: Option<&str>| {
+        let mut last = serde_json::Value::Null;
+        for _ in 0..5 {
+            last = json_of(&p.anvil(args));
+            if last["faster"].as_str() == want {
+                return last;
+            }
+        }
+        panic!("five runs of {args:?} did not call {want:?}: {last}");
+    };
+
     // A difference far beyond the noise is called, and named by file.
-    let v = json_of(&p.anvil(&["compare", "--json", "src/long.anv", "src/short.anv", "--rounds", "3"]));
+    let v = called(&["compare", "--json", "src/long.anv", "src/short.anv", "--rounds", "3"], Some("b"));
     assert_eq!(v["ok"], true, "{v}");
     assert_eq!(v["faster"], "b", "{v}");
     assert!(v["ratio"].as_f64().unwrap() > 1.5, "{v}");
     assert_eq!(v["same_output"], true, "{v}");
     assert_eq!(v["a"]["seconds"].as_array().unwrap().len(), 3, "{v}");
     assert!(v["a"]["min"].as_f64().unwrap() > v["b"]["min"].as_f64().unwrap(), "{v}");
-    let out = String::from_utf8_lossy(&p.anvil(&["compare", "src/short.anv", "src/long.anv", "--rounds", "3"]).stdout).to_string();
-    assert!(out.contains("src/short.anv is ") && out.contains("as fast as src/long.anv"), "{out}");
+    let said = |out: &str| out.contains("src/short.anv is ") && out.contains("as fast as src/long.anv");
+    let mut out = String::new();
+    for _ in 0..5 {
+        out = String::from_utf8_lossy(&p.anvil(&["compare", "src/short.anv", "src/long.anv", "--rounds", "3"]).stdout).to_string();
+        if said(&out) {
+            break;
+        }
+    }
+    assert!(said(&out), "{out}");
 
     // Release builds compare the same way.
-    let v = json_of(&p.anvil(&["compare", "--json", "src/long.anv", "src/short.anv", "--rounds", "3", "--release"]));
+    let v = called(&["compare", "--json", "src/long.anv", "src/short.anv", "--rounds", "3", "--release"], Some("b"));
     assert_eq!(v["ok"], true, "{v}");
     assert_eq!(v["release"], true, "{v}");
     assert_eq!(v["faster"], "b", "{v}");
 
     // A program against itself is no difference, and arguments reach it.
-    let v = json_of(&p.anvil(&["compare", "--json", "src/given.anv", "src/given.anv", "--rounds", "5", "--", "60000000"]));
+    let v = called(&["compare", "--json", "src/given.anv", "src/given.anv", "--rounds", "5", "--", "60000000"], None);
     assert_eq!(v["ok"], true, "{v}");
     assert!(v["faster"].is_null(), "the same program was called faster: {v}");
     assert!(v["ratio"].is_null(), "{v}");

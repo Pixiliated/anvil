@@ -1,0 +1,5 @@
+exit: 101
+panic: integer overflow in `+` at tests/programs/panic_cleared_overflow.anv:9:23
+---
+round 0
+round 1

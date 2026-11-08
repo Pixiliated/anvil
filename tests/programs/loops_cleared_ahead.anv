@@ -1,0 +1,350 @@
+// A release build can test a loop's array accesses before it starts and then skip the checks. Every
+// loop here must still do exactly what it says, whichever way that test comes out.
+
+struct Grid {
+    cols: i64,
+    name: str,
+    cells: [i64],
+}
+
+fn numbers(n: i64) -> [i64] {
+    var out: [i64] = [];
+    for i in 0..n {
+        out.push(i);
+    }
+    return out;
+}
+
+fn show(xs: [i64]) -> str {
+    var out: str = "";
+    for x in xs {
+        out = out + " {x}";
+    }
+    return out;
+}
+
+fn forward_and_back() uses io {
+    let a: [i64] = numbers(5);
+    var b: [i64] = numbers(5);
+    for i in 0..5 {
+        b[i] = a[4 - i] * 10;
+    }
+    print("back:{show(b)}");
+}
+
+fn scaled_and_shifted() uses io {
+    let a: [i64] = numbers(12);
+    var sum: i64 = 0;
+    for i in 0..4 {
+        sum = sum + a[i * 3] + a[i * 2 + 1] * 100;
+    }
+    print("scaled: {sum}");
+}
+
+fn offset_by_locals(start: i64, step: i64) uses io {
+    let a: [i64] = numbers(20);
+    var out: [i64] = numbers(6);
+    let base: i64 = start * step;
+    for j in 1..5 {
+        out[j] = a[base + j - 1];
+    }
+    print("offset:{show(out)}");
+}
+
+fn overlapping() uses io {
+    var a: [i64] = numbers(6);
+    for i in 0..5 {
+        a[i] = a[i + 1] + a[i];
+    }
+    print("overlap:{show(a)}");
+    var b: [i64] = numbers(6);
+    for i in 1..6 {
+        b[i] = b[i - 1] * 2 + 1;
+    }
+    print("rolling:{show(b)}");
+}
+
+fn shared_arrays() uses io {
+    let a: [i64] = numbers(4);
+    var b: [i64] = a;
+    for i in 0..4 {
+        b[i] = a[i] + 100;
+    }
+    print("shared:{show(a)} /{show(b)}");
+    // Written through one name, read through another, the same array.
+    var c: [i64] = numbers(4);
+    let d: [i64] = c;
+    for i in 0..4 {
+        c[i] = c[i] + d[3 - i];
+    }
+    print("named:{show(c)} /{show(d)}");
+}
+
+// Only sometimes written, so nothing copies it before the loop: the test has to notice the sharing.
+fn written_sometimes() uses io {
+    let a: [i64] = numbers(5);
+    var b: [i64] = a;
+    for i in 0..5 {
+        if a[i] % 2 == 1 {
+            b[i] = 100 + i;
+        }
+    }
+    print("sometimes:{show(a)} /{show(b)}");
+}
+
+fn field_arrays() uses io {
+    var g: Grid = Grid { cols: 3, name: "g", cells: numbers(9) };
+    let row: i64 = 1;
+    for c in 0..g.cols {
+        g.cells[row * g.cols + c] = g.cells[c] + 50;
+    }
+    print("field: {g.name}{show(g.cells)}");
+}
+
+fn bytes_scanned() uses io {
+    let b: bytes = "hello, bytes".to_bytes();
+    var letters: i64 = 0;
+    var total: i64 = 0;
+    for i in 0..b.len() {
+        total = total + b[i];
+        if b[b.len() - 1 - i] > 96 {
+            letters = letters + 1;
+        }
+    }
+    print("bytes: {total} {letters}");
+}
+
+allow unreached "this loop is here to not run"
+fn no_rounds() uses io {
+    let a: [i64] = numbers(2);
+    var sum: i64 = 0;
+    // Far past the end, in a loop that never starts.
+    for i in 5..5 {
+        sum = sum + a[i + 100];
+    }
+    print("none: {sum}");
+}
+
+fn an_access_not_taken() uses io {
+    let a: [i64] = numbers(3);
+    var sum: i64 = 0;
+    for i in 0..6 {
+        // Past the end when i is large, but only reached when it is not.
+        if i < 3 {
+            sum = sum + a[i];
+        }
+    }
+    print("guarded: {sum}");
+}
+
+fn leaving_early() uses io {
+    let a: [i64] = numbers(3);
+    var sum: i64 = 0;
+    for i in 0..10 {
+        if i == 3 {
+            break;
+        }
+        sum = sum + a[i];
+    }
+    print("break: {sum}");
+    var skipped: i64 = 0;
+    for i in 0..4 {
+        if i == 2 {
+            continue;
+        }
+        skipped = skipped + a[i % 3];
+    }
+    print("continue: {skipped}");
+}
+
+fn what_the_loop_changes() uses io {
+    // The array grows, so its storage moves.
+    var a: [i64] = numbers(2);
+    for i in 0..6 {
+        a.push(a[i] + 1);
+    }
+    print("grows:{show(a)}");
+    // Long enough for every round, and full, so the first push moves it under the writes after.
+    var full: [i64] = numbers(8);
+    for i in 0..4 {
+        full.push(i);
+        full[i] = 100 + i;
+    }
+    print("grown write:{show(full)}");
+    // It shrinks.
+    var b: [i64] = numbers(6);
+    var seen: i64 = 0;
+    for i in 0..3 {
+        seen = seen + b[i];
+        let gone: i64 = b.pop();
+        seen = seen + gone * 1000;
+    }
+    print("shrinks:{show(b)} {seen}");
+    // It is replaced.
+    var c: [i64] = numbers(3);
+    var sum: i64 = 0;
+    for i in 0..3 {
+        sum = sum + c[i];
+        if i == 0 {
+            c = [10, 20, 30];
+        }
+    }
+    print("replaced: {sum}");
+    // The offset moves.
+    let d: [i64] = numbers(10);
+    var at: i64 = 0;
+    var total: i64 = 0;
+    for i in 0..3 {
+        total = total + d[at + i];
+        at = at + 2;
+    }
+    print("moved: {total}");
+}
+
+fn not_straight_lines() uses io {
+    let a: [i64] = numbers(10);
+    var sum: i64 = 0;
+    for i in 0..4 {
+        sum = sum + a[i * i] + a[a[i]];
+    }
+    print("curves: {sum}");
+}
+
+fn floats() uses io {
+    var x: [f64] = [];
+    var y: [f64] = [];
+    for i in 0..8 {
+        x.push(to_f64(i) * 0.5);
+        y.push(to_f64(i) + 0.25);
+    }
+    var dot: f64 = 0.0;
+    for i in 0..8 {
+        y[i] = y[i] + x[i] * 2.0;
+        dot = dot + x[i] * y[i];
+    }
+    print("floats: {dot} {y[7]}");
+}
+
+fn counted_whiles() uses io {
+    let a: [i64] = numbers(10);
+    var out: [i64] = numbers(10);
+    var i: i64 = 0;
+    while i < 10 {
+        out[i] = a[9 - i] + 1;
+        i = i + 1;
+    }
+    print("while:{show(out)} {i}");
+    // In steps, reaching past the limit by the last step.
+    var sum: i64 = 0;
+    var k: i64 = 0;
+    let n4: i64 = 10 - 10 % 4;
+    while k < n4 {
+        sum = sum + a[k] + a[k + 1] * 10 + a[k + 2] * 100 + a[k + 3] * 1000;
+        k = k + 4;
+    }
+    print("steps: {sum} {k}");
+    // A step that does not land on the limit: the last round is below it.
+    var odd: i64 = 0;
+    var m: i64 = 1;
+    while m < 10 {
+        odd = odd + a[m];
+        m = m + 3;
+    }
+    print("uneven: {odd} {m}");
+    // A second test that may stop it first.
+    var j: i64 = 0;
+    while j < 10 && a[j] < 4 {
+        j = j + 1;
+    }
+    print("second test: {j}");
+    // No rounds at all, from the start, where every access would be out of the array.
+    rounds_from(a: a, start: 50);
+    rounds_from(a: a, start: 8);
+}
+
+fn rounds_from(a: [i64], start: i64) uses io {
+    var far: i64 = start;
+    var sum: i64 = 0;
+    while far < 10 {
+        sum = sum + a[far];
+        far = far + 1;
+    }
+    print("from {start}: {sum} {far}");
+}
+
+fn whiles_that_do_not_count() uses io {
+    let a: [i64] = numbers(10);
+    // The counter moves twice in a round.
+    var i: i64 = 0;
+    var sum: i64 = 0;
+    while i < 8 {
+        sum = sum + a[i];
+        if a[i] % 2 == 0 {
+            i = i + 1;
+        }
+        i = i + 1;
+    }
+    print("twice: {sum} {i}");
+    // The limit moves.
+    var limit: i64 = 2;
+    var j: i64 = 0;
+    var total: i64 = 0;
+    while j < limit {
+        total = total + a[j];
+        if limit < 6 {
+            limit = limit + 1;
+        }
+        j = j + 1;
+    }
+    print("limit moves: {total} {j} {limit}");
+    // Continue before the step, leaving by break.
+    var k: i64 = 0;
+    var rounds: i64 = 0;
+    while k < 5 {
+        rounds = rounds + 1;
+        if rounds == 3 {
+            break;
+        }
+        if rounds == 1 {
+            continue;
+        }
+        k = k + a[1];
+    }
+    print("continue: {k} {rounds}");
+    // Counting down is not counting up.
+    var d: i64 = 9;
+    var down: i64 = 0;
+    while 0 < d {
+        down = down + a[d];
+        d = d - 1;
+    }
+    print("down: {down}");
+}
+
+fn structs_in_arrays() uses io {
+    var names: [str] = ["a", "b", "c"];
+    for i in 0..3 {
+        names[i] = names[2 - i] + "!";
+    }
+    print("text: {names.join(",")}");
+}
+
+fn main() uses io {
+    forward_and_back();
+    scaled_and_shifted();
+    offset_by_locals(start: 2, step: 3);
+    overlapping();
+    shared_arrays();
+    written_sometimes();
+    field_arrays();
+    bytes_scanned();
+    no_rounds();
+    an_access_not_taken();
+    leaving_early();
+    what_the_loop_changes();
+    not_straight_lines();
+    floats();
+    counted_whiles();
+    whiles_that_do_not_count();
+    structs_in_arrays();
+}

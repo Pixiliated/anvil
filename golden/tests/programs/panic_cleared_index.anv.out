@@ -1,0 +1,7 @@
+exit: 101
+panic: index 4 out of bounds for length 4 at tests/programs/panic_cleared_index.anv:7:18
+---
+round 0: 2
+round 1: 4
+round 2: 6
+round 3: 8

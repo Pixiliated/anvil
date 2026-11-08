@@ -296,6 +296,268 @@ pub(crate) fn repeats(e: &Expr) -> bool {
     plain && children(e).into_iter().all(repeats)
 }
 
+/// An array access in a loop's body that a test before the loop can clear.
+pub(crate) struct Access<'e> {
+    pub key: Key,
+    /// The element's type; None for bytes, which live in their object.
+    pub elem: Option<Ty>,
+    pub index: &'e Expr,
+    pub write: bool,
+}
+
+/// Locals a loop's body empties, or whose array it grows or shortens, however that shows.
+fn not_held(body: &[Stmt]) -> HashSet<LocalId> {
+    fn expr(e: &Expr, out: &mut HashSet<LocalId>) {
+        match &e.kind {
+            ExprKind::Move(l)
+            | ExprKind::Take { local: l, .. }
+            | ExprKind::Push { local: l, .. }
+            | ExprKind::Pop { local: l, .. }
+            | ExprKind::MapSet { local: l, .. }
+            | ExprKind::MapRemove { local: l, .. } => {
+                out.insert(*l);
+            }
+            _ => {}
+        }
+        for c in children(e) {
+            expr(c, out);
+        }
+    }
+    fn block(b: &[Stmt], out: &mut HashSet<LocalId>) {
+        for s in b {
+            match s {
+                Stmt::Let(_, e) | Stmt::Expr(e) | Stmt::Return(Some(e)) => expr(e, out),
+                Stmt::Assign(_, path, e, _) => {
+                    for step in path {
+                        if let Step::Index { index, .. } = step {
+                            expr(index, out);
+                        }
+                    }
+                    expr(e, out);
+                }
+                Stmt::If(c, t, f) => {
+                    expr(c, out);
+                    block(t, out);
+                    block(f, out);
+                }
+                Stmt::Match { scrutinee, arms, .. } => {
+                    expr(scrutinee, out);
+                    for arm in arms {
+                        block(&arm.body, out);
+                    }
+                }
+                Stmt::Drop(l) => {
+                    out.insert(*l);
+                }
+                Stmt::While(..) | Stmt::For(..) | Stmt::ForEach { .. } => unreachable!("only innermost loops are asked about"),
+                Stmt::Return(None) | Stmt::Break | Stmt::Continue | Stmt::Reached(_) | Stmt::Line(_) => {}
+            }
+        }
+    }
+    let mut out = HashSet::new();
+    block(body, &mut out);
+    out
+}
+
+fn is_innermost(body: &[Stmt]) -> bool {
+    body.iter().all(|s| match s {
+        Stmt::While(..) | Stmt::For(..) | Stmt::ForEach { .. } => false,
+        Stmt::If(_, t, f) => is_innermost(t) && is_innermost(f),
+        Stmt::Match { arms, .. } => arms.iter().all(|a| is_innermost(&a.body)),
+        _ => true,
+    })
+}
+
+/// Whether `e` is a straight line in `counter`: its value is a * counter + b for numbers the loop
+/// does not change, and so are its parts, so each part lies between its values at the first and
+/// the last round. Nothing in it can do anything but compute. `None` when it is not one; otherwise
+/// whether it names the counter.
+pub(crate) fn straight(e: &Expr, counter: LocalId, fixed: &dyn Fn(LocalId) -> bool) -> Option<bool> {
+    match &e.kind {
+        ExprKind::Int(_) => Some(false),
+        ExprKind::Local(l) if *l == counter => Some(true),
+        ExprKind::Local(l) => fixed(*l).then_some(false),
+        ExprKind::Field(..) if e.ty == Ty::I64 => root(e).filter(|l| fixed(*l)).map(|_| false),
+        ExprKind::Builtin(Builtin::Len, args) => root(&args[0]).filter(|l| fixed(*l)).map(|_| false),
+        ExprKind::IArith { op, l, r, .. } => {
+            let (a, b) = (straight(l, counter, fixed)?, straight(r, counter, fixed)?);
+            match op {
+                IOp::Add | IOp::Sub => Some(a || b),
+                IOp::Mul if !(a && b) => Some(a || b),
+                _ => None,
+            }
+        }
+        _ => None,
+    }
+}
+
+struct Find<'p, 'e, 'f> {
+    program: &'p Program,
+    types: &'p [Ty],
+    counter: LocalId,
+    fixed: &'f dyn Fn(LocalId) -> bool,
+    out: Vec<Access<'e>>,
+}
+
+impl<'e> Find<'_, 'e, '_> {
+    fn add(&mut self, key: Option<Key>, array: &Ty, index: &'e Expr, write: bool) {
+        let elem = match array {
+            Ty::Array(t) => Some((**t).clone()),
+            Ty::Bytes => None,
+            _ => return,
+        };
+        let Some(key) = key.filter(|k| (self.fixed)(k.0)) else { return };
+        if straight(index, self.counter, self.fixed).is_some() {
+            self.out.push(Access { key, elem, index, write });
+        }
+    }
+
+    fn expr(&mut self, e: &'e Expr) {
+        if let ExprKind::Index { base, index, .. } = &e.kind {
+            self.add(key_of(self.program, base), &base.ty, index, false);
+        }
+        for c in children(e) {
+            self.expr(c);
+        }
+    }
+
+    /// The first index of a place reached through fields alone; indices after it are read.
+    fn place(&mut self, l: LocalId, path: &'e [Step]) {
+        let (mut ty, mut start) = (self.types[l].clone(), 0);
+        let mut first = true;
+        for step in path {
+            match step {
+                Step::Field(i) if first => {
+                    let Ty::Struct(sid) = ty else { return };
+                    start += crate::field_range(self.program, sid, *i).0;
+                    ty = self.program.structs[sid].fields[*i].1.clone();
+                }
+                Step::Field(_) => {}
+                Step::Index { index, .. } => {
+                    if first {
+                        self.add(Some((l, start)), &ty, index, true);
+                        first = false;
+                    }
+                    self.expr(index);
+                }
+            }
+        }
+    }
+
+    fn block(&mut self, b: &'e [Stmt]) {
+        for s in b {
+            match s {
+                Stmt::Let(_, e) | Stmt::Expr(e) | Stmt::Return(Some(e)) => self.expr(e),
+                Stmt::Assign(l, path, e, _) => {
+                    self.place(*l, path);
+                    self.expr(e);
+                }
+                Stmt::If(c, t, f) => {
+                    self.expr(c);
+                    self.block(t);
+                    self.block(f);
+                }
+                Stmt::Match { scrutinee, arms, .. } => {
+                    self.expr(scrutinee);
+                    for arm in arms {
+                        self.block(&arm.body);
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+}
+
+/// The accesses in the body of a `for` loop with no loop inside whose array stays put and whose
+/// index is a straight line in the counter: if the first and last round of each are in bounds,
+/// every round's is.
+pub(crate) fn clearable<'e>(program: &Program, types: &[Ty], counter: LocalId, body: &'e [Stmt]) -> Vec<Access<'e>> {
+    if !is_innermost(body) {
+        return Vec::new();
+    }
+    let mut changed = Changes::default();
+    for s in body {
+        changed.merge(changes(program, s));
+    }
+    if changed.touched.contains(&counter) {
+        return Vec::new();
+    }
+    let gone = not_held(body);
+    let fixed = |l: LocalId| !changed.touched.contains(&l) && !changed.shrunk.contains(&l) && !gone.contains(&l);
+    let mut find = Find { program, types, counter, fixed: &fixed, out: Vec::new() };
+    find.block(body);
+    find.out
+}
+
+/// `while counter < limit [&& ...] { ...; counter = counter + step; }` with no loop inside, what
+/// the counter's values allow to be tested before it starts.
+pub(crate) struct CountedWhile<'e> {
+    pub counter: LocalId,
+    pub limit: &'e Expr,
+    pub step: i64,
+    /// `counter + step`: it cannot overflow once the last round is known not to.
+    pub advance: &'e Expr,
+    pub accesses: Vec<Access<'e>>,
+}
+
+/// The leftmost test of a chain of `&&`, and the others.
+fn tests(e: &Expr) -> (&Expr, Vec<&Expr>) {
+    match &e.kind {
+        ExprKind::And(l, r) => {
+            let (first, mut rest) = tests(l);
+            rest.push(r);
+            (first, rest)
+        }
+        _ => (e, Vec::new()),
+    }
+}
+
+/// If the loop counts up by a fixed step to a limit it cannot change, as its first test and last
+/// statement say. Its counter changes nowhere else, so every round's counter is one of
+/// first, first + step, ... below the limit, whatever else the body does.
+pub(crate) fn counted_while<'e>(program: &Program, types: &[Ty], cond: &'e Expr, body: &'e [Stmt]) -> Option<CountedWhile<'e>> {
+    if !is_innermost(body) {
+        return None;
+    }
+    let (first, rest) = tests(cond);
+    let ExprKind::Cmp(CmpOp::Lt, l, limit) = &first.kind else { return None };
+    let counter = local_of(l).filter(|_| l.ty == Ty::I64)?;
+    let last = body.iter().rposition(|s| !matches!(s, Stmt::Line(_) | Stmt::Reached(_)))?;
+    let Stmt::Assign(target, path, advance, _) = &body[last] else { return None };
+    if *target != counter || !path.is_empty() {
+        return None;
+    }
+    let ExprKind::IArith { op: IOp::Add, l: from, r: by, .. } = &advance.kind else { return None };
+    let ExprKind::Int(step) = by.kind else { return None };
+    if local_of(from) != Some(counter) || step <= 0 {
+        return None;
+    }
+    let mut changed = Changes::default();
+    for s in body.iter().take(last) {
+        changed.merge(changes(program, s));
+    }
+    for t in &rest {
+        let mut c = Changes::default();
+        Walk { program, out: &mut c.touched, shrunk: Some(&mut c.shrunk) }.expr(t);
+        changed.merge(c);
+    }
+    if changed.touched.contains(&counter) {
+        return None;
+    }
+    let gone = not_held(body);
+    let fixed = |l: LocalId| !changed.touched.contains(&l) && !changed.shrunk.contains(&l) && !gone.contains(&l);
+    if straight(limit, counter, &fixed) != Some(false) {
+        return None;
+    }
+    let mut find = Find { program, types, counter, fixed: &fixed, out: Vec::new() };
+    for t in rest {
+        find.expr(t);
+    }
+    find.block(body);
+    Some(CountedWhile { counter, limit, step, advance, accesses: find.out })
+}
+
 /// Whether a block always ends by leaving it: what follows is not reached through its end.
 pub(crate) fn leaves(stmts: &[Stmt]) -> bool {
     let last = stmts.iter().rev().find(|s| !matches!(s, Stmt::Line(_) | Stmt::Reached(_)));

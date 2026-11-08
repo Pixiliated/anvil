@@ -1194,7 +1194,11 @@ the same lowered program the native backend compiles, before Cranelift optimizes
 the C compiler the linker comes with already compiles it (MSVC's `cl /O2` on Windows, `cc -O2`
 elsewhere), so nothing new needs installing. Every choice about what the program does is made
 before either backend sees it, and the C pins down what C leaves open: integers wrap, shifts are
-masked, floats are never fused into one rounding. `--asm` with `--release` gives the C.
+masked, floats are never fused into one rounding. A loop with no loop inside it, `for` or a `while`
+counting up to a limit by a fixed step, also tests before it starts whether any array access whose
+index is a straight line in its counter could fail. If none could, it runs without those checks,
+which lets the C compiler vectorize it; if one could, it runs as written and stops at the same round
+with the same message. `--asm` with `--release` gives the C, which says how many loops were cleared.
 `golden check --release`, `fuzz --release` and `compare --release` run release builds too.
 
 The interpreter and the native compiler must agree exactly: same stdout, same panic message,

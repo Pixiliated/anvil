@@ -1,0 +1,5 @@
+exit: 101
+panic: index 4 out of bounds for length 4 at tests/programs/panic_cleared_offset.anv:8:21
+---
+round 0: 1
+round 1: 3

@@ -1,0 +1,6 @@
+exit: 101
+panic: index -2 out of bounds for length 5 at tests/programs/panic_cleared_back.anv:9:21
+---
+at 2: 3
+at 3: 7
+at 4: 12

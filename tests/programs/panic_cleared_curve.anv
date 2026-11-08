@@ -1,0 +1,11 @@
+// Fine at both ends and not between, so this index is not tested from its ends.
+
+fn main() uses io {
+    let a: [i64] = [5, 6];
+    var sum: i64 = 0;
+    for i in 0..4 {
+        print("round {i}");
+        sum = sum + a[i * (3 - i)];
+    }
+    print("never {sum}");
+}

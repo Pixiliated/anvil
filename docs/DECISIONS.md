@@ -771,3 +771,14 @@ Short records of choices that are not obvious from the code. Newest last.
   outlived the script when a build failed and held its output pipe open: 3.5 hours of waiting for nothing.
   An idle thread dies with the command, and every run has a time limit. Whether a difference counts comes
   from the runs' own spread, so a program against itself says no difference.
+- **Loops are tested at run time, not proved.** Rust and C compilers remove a bounds check when they can
+  prove it holds; Anvil has no such facts at most loops, since lengths come from the program's data. One
+  test before the loop, of each index at its counter's first and last values, needs nothing proved, and
+  only a straight line in the counter can be judged from its two ends, so curves and indexes that depend
+  on what is read stay checked. A loop that would stop part way must print everything up to that round, so
+  it runs the checked copy rather than stopping early.
+- **Clearing is release-only.** Cranelift does not vectorize, so a copy of each loop would cost it build
+  time and gain little. Release builds are compared against the other two backends on every golden.
+- **`not_held` and "a local the loop changes" overlap.** Breaking the second on purpose was not noticed by
+  any program: every reassignment of a local in a loop also shows up as a `Drop` or `Move`, which the first
+  rejects. It stays as a backstop, and that is why no test covers it alone.

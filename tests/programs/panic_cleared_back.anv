@@ -1,0 +1,18 @@
+// The counter goes back past where it started, so its first value says nothing.
+
+fn main() uses io {
+    let a: [i64] = [1, 2, 3, 4, 5];
+    var i: i64 = 2;
+    var moved: bool = false;
+    var sum: i64 = 0;
+    while i < 5 {
+        sum = sum + a[i];
+        print("at {i}: {sum}");
+        if i == 4 && !moved {
+            moved = true;
+            i = i - 7;
+        }
+        i = i + 1;
+    }
+    print("never");
+}

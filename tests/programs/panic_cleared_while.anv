@@ -1,0 +1,13 @@
+// A counted while that runs off the end stops at the round that fails, the rounds before it done.
+
+fn main() uses io {
+    let a: [i64] = [1, 2, 3, 4, 5, 6];
+    var i: i64 = 0;
+    var sum: i64 = 0;
+    while i < 9 {
+        sum = sum + a[i + 2];
+        print("round {i}: {sum}");
+        i = i + 2;
+    }
+    print("never");
+}

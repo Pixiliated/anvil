@@ -1,0 +1,11 @@
+// A loop that runs off the end does its first rounds and stops at the round that fails.
+
+fn main() uses io {
+    var out: [i64] = [0, 0, 0, 0, 0];
+    let a: [i64] = [1, 2, 3, 4];
+    for i in 0..5 {
+        out[i] = a[i] * 2;
+        print("round {i}: {out[i]}");
+    }
+    print("never");
+}

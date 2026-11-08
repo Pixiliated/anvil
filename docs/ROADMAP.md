@@ -389,7 +389,14 @@ program to one, with nothing new to install.
 - [x] Three backends agree: `golden check --release`, `fuzz --release`; `compare --release` times
   release builds
 
-## M44: Proving ground, third round (v0.45)
+## M44: Loops without checks (v0.45)
+A release build's innermost loops run with no bounds or overflow checks when a test before them shows
+none could fail, so the C compiler can take them apart.
+- [x] `for` loops, and `while` loops counting up to a limit by a fixed step, tested before they start
+  at their counter's first and last values; a loop that would stop part way runs as written
+- [x] `--asm --release` says how many loops were cleared
+
+## M45: Proving ground, third round (v0.46)
 - [ ] Fresh agents on new kinds of program, against the same log format: do `let ... else`, `if`
   values and constants get used, and is the loop faster for them?
 - [ ] What round two asked for and did not get: describing a valid struct to the contract lint, so it

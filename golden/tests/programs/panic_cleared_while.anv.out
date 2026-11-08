@@ -1,0 +1,5 @@
+exit: 101
+panic: index 6 out of bounds for length 6 at tests/programs/panic_cleared_while.anv:8:21
+---
+round 0: 3
+round 2: 8

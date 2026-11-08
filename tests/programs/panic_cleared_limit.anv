@@ -1,0 +1,15 @@
+// The limit grows as the loop runs, past what it was when the loop started.
+
+fn main() uses io {
+    let a: [i64] = [1, 2, 3];
+    var limit: i64 = 1;
+    var j: i64 = 0;
+    var sum: i64 = 0;
+    while j < limit {
+        sum = sum + a[j];
+        print("at {j}: {sum}");
+        limit = limit + 1;
+        j = j + 1;
+    }
+    print("never");
+}

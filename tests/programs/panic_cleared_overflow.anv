@@ -1,0 +1,12 @@
+// An index that overflows on its way to a number in range still overflows, at that round.
+
+fn main() uses io {
+    let a: [i64] = [1, 2, 3];
+    let top: i64 = 9223372036854775807;
+    var sum: i64 = 0;
+    for i in 0..3 {
+        print("round {i}");
+        sum = sum + a[top + i - top];
+    }
+    print("never {sum}");
+}
