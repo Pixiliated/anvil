@@ -1027,7 +1027,7 @@ anvil usage [FILE]                          each run's steps, bytes and copies a
 anvil usage approve [FILE]                  approve a file's usage (or every changed one)
 anvil measure [FILE]                        run programs natively: heap bytes, peak, objects
                                             and time, beside the interpreter's counts
-anvil hot FILE [-- ARGS]                    run a program natively and sample where its time
+anvil hot FILE [--release] [-- ARGS]        run a program natively and sample where its time
                                             goes, by function and by what the runtime does
 anvil compare A B [-- ARGS]                 which of two programs runs faster, and whether
                                             that is more than the runs move on their own
@@ -1088,7 +1088,8 @@ given, looking at where it is about every millisecond. It reports the share of e
 of what the runtime does for them: copying arrays and maps, making and freeing objects, maps, sorting,
 text, printing, files and the system. Small functions are compiled into their callers and show
 there. It lists the arrays that a loop checks for a second owner on every round, as the compiler
-could not prove they have one. The numbers differ from run to run and nothing compares them; on
+could not prove they have one. With `--release` it samples a release build, as a program ships;
+more is compiled into its caller there. The numbers differ from run to run and nothing compares them; on
 Windows only the main thread is sampled, so `parallel_map`'s workers show as waiting. `anvil profile`
 is the exact count, in the interpreter, of steps, bytes and copies; use `hot` first to see whether
 they are what costs.

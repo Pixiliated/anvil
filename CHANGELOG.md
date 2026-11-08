@@ -3,6 +3,22 @@
 Each version is one roadmap milestone (docs/ROADMAP.md); docs/DECISIONS.md says why things are
 the way they are.
 
+## 0.46.0
+- A release build keeps the length and storage of the arrays a function indexes in loops in locals, and
+  reads them again only where the array is stored to, copied on a write, pushed to or popped from. The C
+  compiler has to assume any write might change them. N-body written plainly runs 1.23x faster, fannkuch
+  written plainly 1.11x.
+- Copying an array of numbers no longer walks its elements looking for references they do not have, which
+  cost more than the copy: the calculator runs 1.19x faster.
+- Output written to NUL on Windows is buffered, as output to a file always was; `_isatty` says yes for NUL.
+  The benchmarks write there, so this had been overstating the ledger's time: writing to a real file the
+  ledger is only 1.05x faster, against 1.39x to NUL.
+- `anvil hot --release` samples a release build, as a program ships.
+- Delivered programs went from 1.21x Rust's time to 1.11x, part of that the ledger's correction above; the
+  calculator from 3.55x to 2.12x and the ledger from 1.98x to 1.42x. Fannkuch, binary trees and the route planner stay faster than Rust. The other
+  benchmark programs are within what runs move, except a tight multiplication loop that lands worse in
+  memory (0.86x) and does not when anything else in the program changes.
+
 ## 0.45.0
 - A release build's innermost loops, `for` and a `while` counting up to a limit by a fixed step, test
   before they start whether an array access with an index that is a straight line in the counter could

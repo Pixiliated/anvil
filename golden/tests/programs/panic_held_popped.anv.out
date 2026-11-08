@@ -1,0 +1,5 @@
+exit: 101
+panic: index 1 out of bounds for length 1 at tests/programs/panic_held_popped.anv:9:27
+---
+round 0
+round 1

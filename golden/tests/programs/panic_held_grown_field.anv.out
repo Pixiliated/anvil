@@ -1,0 +1,6 @@
+exit: 101
+panic: index 3 out of bounds for length 2 at tests/programs/panic_held_grown_field.anv:13:21
+---
+round 0
+round 1
+round 2

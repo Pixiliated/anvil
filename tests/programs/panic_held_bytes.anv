@@ -1,0 +1,12 @@
+// Bytes cut shorter in the loop.
+
+fn main() uses io {
+    var b: bytes = "abcd".to_bytes();
+    var sum: i64 = 0;
+    for i in 0..3 {
+        print("round {i}");
+        sum = sum + b[2];
+        b = b[0..2];
+    }
+    print("never {sum}");
+}

@@ -396,7 +396,15 @@ none could fail, so the C compiler can take them apart.
   at their counter's first and last values; a loop that would stop part way runs as written
 - [x] `--asm --release` says how many loops were cleared
 
-## M45: Proving ground, third round (v0.46)
+## M45: What a release build reads again (v0.46)
+A release build stops rereading what cannot have changed, and the runtime stops doing work for nothing.
+- [x] A function keeps the length and storage of the arrays it indexes in loops in locals, read again only
+  where the array is stored to, copied on a write, pushed to or popped from
+- [x] Copying an array of numbers no longer walks its elements for references they do not have
+- [x] A program writing to NUL is buffered as it is writing to a file
+- [x] `anvil hot --release` samples what ships
+
+## M46: Proving ground, third round (v0.47)
 - [ ] Fresh agents on new kinds of program, against the same log format: do `let ... else`, `if`
   values and constants get used, and is the loop faster for them?
 - [ ] What round two asked for and did not get: describing a valid struct to the contract lint, so it

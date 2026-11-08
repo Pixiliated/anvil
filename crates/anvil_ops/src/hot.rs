@@ -55,6 +55,12 @@ fn group_of(name: &str) -> (&'static str, &'static str) {
 
 /// The source name of a generated symbol (`anv12_name`), by its function's index.
 fn program_function(program: &Program, symbol: &str) -> Option<String> {
+    // The program's entry, where a C compiler may have put all of it.
+    if symbol == "anvil_program" {
+        return Some("main".to_string());
+    }
+    // The release backend's C puts its own number first: `F95_anv21_process`.
+    let symbol = symbol.strip_prefix('F').and_then(|s| s.split_once('_')).map_or(symbol, |(_, name)| name);
     let rest = symbol.strip_prefix("anv")?;
     let digits = rest.find('_')?;
     let i: usize = rest[..digits].parse().ok()?;
@@ -140,7 +146,7 @@ fn rows(program: &Program, symbols: &[(u64, String)], base: u64, samples: &[u64]
 }
 
 /// Where a compiled program's time goes.
-pub fn hot(root: &Path, file: &str, input: &ProgramInput) -> Report {
+pub fn hot(root: &Path, file: &str, input: &ProgramInput, release: bool) -> Report {
     let program = match crate::with_main(root, file) {
         Ok((_, program)) => program,
         Err(r) => return r,
@@ -162,7 +168,7 @@ pub fn hot(root: &Path, file: &str, input: &ProgramInput) -> Report {
     let result = (|| {
         std::fs::create_dir_all(&scratch).map_err(|e| format!("cannot create {}: {e}", scratch.display()))?;
         let exe = scratch.join(format!("program{}", std::env::consts::EXE_SUFFIX));
-        let built = anvil_codegen::build_exe_with_symbols(&program, &exe, &scratch.join("work"))?;
+        let built = anvil_codegen::build_exe_with_symbols(&program, &exe, &scratch.join("work"), release)?;
         let sample_file = scratch.join("samples.txt");
         let started = std::time::Instant::now();
         let code = run(&exe, &run_input, root, &sample_file)?;

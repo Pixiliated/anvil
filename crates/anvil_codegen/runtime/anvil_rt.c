@@ -34,6 +34,7 @@ __declspec(dllimport) int __stdcall MultiByteToWideChar(unsigned int code_page, 
 __declspec(dllimport) int __stdcall WideCharToMultiByte(unsigned int code_page, unsigned long flags, const wchar_t *w,
                                                          int wn, char *s, int n, const char *fallback, int *used);
 __declspec(dllimport) unsigned long __stdcall GetFileAttributesW(const wchar_t *path);
+__declspec(dllimport) int __stdcall GetConsoleMode(void *console, unsigned long *mode);
 #include <process.h>
 #include <intrin.h>
 __declspec(dllimport) unsigned long __stdcall GetActiveProcessorCount(unsigned short group);
@@ -216,7 +217,9 @@ static void init_stdout(void) {
 #ifdef _WIN32
     _setmode(_fileno(stdout), _O_BINARY);
     _setmode(_fileno(stderr), _O_BINARY);
-    if (!_isatty(_fileno(stdout))) setvbuf(stdout, NULL, _IOFBF, 1 << 16);
+    /* Not _isatty: it also says yes for NUL, which then pays for a system call on every write. */
+    unsigned long console_mode;
+    if (!GetConsoleMode((void *)_get_osfhandle(_fileno(stdout)), &console_mode)) setvbuf(stdout, NULL, _IOFBF, 1 << 16);
 #else
     if (!isatty(fileno(stdout))) setvbuf(stdout, NULL, _IOFBF, 1 << 16);
 #endif
@@ -960,6 +963,15 @@ AnvArr *anvil_arr_new(const AnvTypeInfo *ti, int64_t cap) {
 
 static AnvMap *map_clone(const AnvMap *m);
 
+static void retain_elements(AnvArr *a) {
+    /* Numbers have nothing to retain, and walking them would cost more than copying them did. */
+    if (!a->ti->nptrs) return;
+    for (int64_t i = 0; i < a->len; i++) {
+        char *elem = a->data + i * a->ti->elem_size;
+        for (int64_t k = 0; k < a->ti->nptrs; k++) anvil_retain(*(AnvObj **)(elem + a->ti->offsets[k]));
+    }
+}
+
 /* Takes one reference to `a` and returns an array with a single owner: `a` itself if it has
  * no other owners, otherwise a copy (and `a` loses the reference). */
 AnvArr *anvil_arr_unique(AnvArr *a) {
@@ -967,10 +979,7 @@ AnvArr *anvil_arr_unique(AnvArr *a) {
     AnvArr *b = KIND_OF(a) == KIND_MAP ? &map_clone((const AnvMap *)a)->a : anvil_arr_new(a->ti, a->len);
     b->len = a->len;
     if (a->len) memcpy(b->data, a->data, (size_t)(a->len * a->ti->elem_size));
-    for (int64_t i = 0; i < b->len; i++) {
-        char *elem = b->data + i * b->ti->elem_size;
-        for (int64_t k = 0; k < b->ti->nptrs; k++) anvil_retain(*(AnvObj **)(elem + b->ti->offsets[k]));
-    }
+    retain_elements(b);
     a->rc--;
     return b;
 }
@@ -995,12 +1004,6 @@ char *anvil_arr_push_slot(AnvArr *a) {
     return a->data + a->len++ * a->ti->elem_size;
 }
 
-static void retain_elements(AnvArr *a) {
-    for (int64_t i = 0; i < a->len; i++) {
-        char *elem = a->data + i * a->ti->elem_size;
-        for (int64_t k = 0; k < a->ti->nptrs; k++) anvil_retain(*(AnvObj **)(elem + a->ti->offsets[k]));
-    }
-}
 
 /* Inserts an uninitialised slot at `pos` of a uniquely owned array and returns its address. */
 static char *arr_insert_slot(AnvArr *a, int64_t pos) {
@@ -1478,6 +1481,13 @@ static int utf8_valid(const unsigned char *s, int64_t len) {
         unsigned c = s[i];
         if (c < 0x80) {
             i++;
+            /* Text is mostly ASCII: eight bytes at a time until one is not. */
+            while (i + 8 <= len) {
+                uint64_t word;
+                memcpy(&word, s + i, 8);
+                if (word & 0x8080808080808080ull) break;
+                i += 8;
+            }
             continue;
         }
         int n;

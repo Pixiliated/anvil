@@ -2955,10 +2955,17 @@ fn hot_says_where_a_compiled_programs_time_goes() {
     assert!(unproved.iter().any(|n| n["local"] == "ys" && n["function"] == "churn"), "{v}");
     let out = String::from_utf8_lossy(&p.anvil(&["hot", "src/spin.anv", "--", "20000000"]).stdout).to_string();
     assert!(out.contains("samples over") && out.contains("`ys` in churn"), "{out}");
-    // Writing to a shared array shows as copying.
+    // A release build is sampled too, and its functions keep their names.
+    let v = json_of(&p.anvil(&["hot", "--json", "src/spin.anv", "--release", "--", "200000000"]));
+    assert_eq!(v["ok"], true, "{v}");
+    let rows = v["rows"].as_array().unwrap();
+    assert_eq!(rows[0]["kind"], "function", "{v}");
+    assert!(["churn", "main"].contains(&rows[0]["what"].as_str().unwrap()), "{v}");
+    // Writing to a shared array shows as copying. Its elements are text, as what `memcpy` does is in
+    // the C library on Linux, outside what the program's symbols can name.
     p.write(
         "src/copies.anv",
-        "fn main() uses io {\n    var xs: [i64] = [];\n    for i in 0..4000 {\n        xs.push(i);\n    }\n    var total: i64 = 0;\n    for i in 0..40000 {\n        var ys: [i64] = xs;\n        ys[0] = i;\n        total = total + ys[0];\n    }\n    print(\"{total} {xs[0]}\");\n}\n",
+        "fn main() uses io {\n    var xs: [str] = [];\n    for _i in 0..4000 {\n        xs.push(\"a\");\n    }\n    var total: i64 = 0;\n    for _i in 0..40000 {\n        var ys: [str] = xs;\n        ys[0] = \"bc\";\n        total = total + ys[0].len();\n    }\n    print(\"{total} {xs[0]}\");\n}\n",
     );
     let v = p.json(&["hot", "src/copies.anv"]);
     let rows = v["rows"].as_array().unwrap();

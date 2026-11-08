@@ -782,3 +782,12 @@ Short records of choices that are not obvious from the code. Newest last.
 - **`not_held` and "a local the loop changes" overlap.** Breaking the second on purpose was not noticed by
   any program: every reassignment of a local in a loop also shows up as a `Drop` or `Move`, which the first
   rejects. It stays as a backstop, and that is why no test covers it alone.
+- **The length and storage of an array are held per function, not per loop.** Cranelift knows a header
+  cannot alias elements; the C has no way to say so, and `cl` has no type-based aliasing at all, so after any
+  write it reads them again. Values are never changed in place while anything else holds them, calls
+  included, so what a local holds changes only at the few places that store to it, and those read again.
+  Every binding goes through `store_local`, so a `for` or a `match` needs no special case.
+- **`to_lower` does not reuse a text it owns.** It was built and took nothing measurable off word counting,
+  where the map's cache misses are the cost, so it came out again.
+- **`saxpy` is 0.86x and stays.** Timing its two phases with two clock calls added shows no difference at
+  all between v0.45 and v0.46 (462 ms and 455 ms), so it is where that tight loop lands in memory.

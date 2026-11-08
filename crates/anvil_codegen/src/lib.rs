@@ -55,7 +55,14 @@ pub fn build_exe(program: &Program, out: &Path, work_dir: &Path, asm: bool) -> R
 /// Like `build_exe`, through C and the platform's optimizing C compiler: slower to build, faster
 /// to run, the same program (see `c`).
 pub fn build_exe_release(program: &Program, out: &Path, work_dir: &Path) -> Result<(), String> {
-    let source = c_source(program)?;
+    let (object, _) = release_object(program, work_dir)?;
+    let objects = link::compile_c(&program.c_files, work_dir)?;
+    link::link_exe(&object, &objects, out, work_dir, None)
+}
+
+/// The object file of the program's C, and what the compiler could not prove.
+fn release_object(program: &Program, work_dir: &Path) -> Result<(Vec<u8>, Vec<Unproved>), String> {
+    let (source, _, notes) = compile(program, false, Entry::Main, true)?;
     std::fs::create_dir_all(work_dir).map_err(|e| format!("cannot create {}: {e}", work_dir.display()))?;
     let dir = work_dir.join("release");
     std::fs::create_dir_all(&dir).map_err(|e| format!("cannot create {}: {e}", dir.display()))?;
@@ -70,8 +77,7 @@ pub fn build_exe_release(program: &Program, out: &Path, work_dir: &Path) -> Resu
     }
     link::run_compiler(&mut cmd, &name, "the release build's C")?;
     let object = std::fs::read(dir.join(obj)).map_err(|e| format!("cannot read the release object: {e}"))?;
-    let objects = link::compile_c(&program.c_files, work_dir)?;
-    link::link_exe(&object, &objects, out, work_dir, None)
+    Ok((object, notes))
 }
 
 /// The C the release backend writes for `program`.
@@ -96,8 +102,13 @@ pub struct Built {
 }
 
 /// Like `build_exe`, also returning the executable's symbols and what the compiler could not prove.
-pub fn build_exe_with_symbols(program: &Program, out: &Path, work_dir: &Path) -> Result<Built, String> {
-    let (object, _, mut notes) = compile(program, false, Entry::Main, false)?;
+pub fn build_exe_with_symbols(program: &Program, out: &Path, work_dir: &Path, release: bool) -> Result<Built, String> {
+    let (object, mut notes) = if release {
+        release_object(program, work_dir)?
+    } else {
+        let (object, _, notes) = compile(program, false, Entry::Main, false)?;
+        (object, notes)
+    };
     let objects = link::compile_c(&program.c_files, work_dir)?;
     let map = work_dir.join("program.map");
     link::link_exe(&object, &objects, out, work_dir, Some(&map))?;
@@ -832,6 +843,8 @@ struct Gen<'a, 'b> {
     /// and free of overflow, and each array's storage, which the loop cannot move.
     cleared: HashSet<*const Expr>,
     storage: HashMap<unique::Key, Variable>,
+    /// Where a release build keeps the length and storage of arrays (see unique::held_arrays).
+    held: HashMap<unique::Key, (Variable, Option<Variable>)>,
     /// The function being generated, and its locals' names, for `Unproved`.
     function: String,
     local_names: Vec<String>,
@@ -882,6 +895,7 @@ impl<'a, 'b> Gen<'a, 'b> {
             function: String::new(),
             cleared: HashSet::new(),
             storage: HashMap::new(),
+            held: HashMap::new(),
             local_names: locals.iter().map(|l| l.name.clone()).collect(),
             known: unique::Known::default(),
             branching: 0,
@@ -1091,6 +1105,9 @@ impl<'a, 'b> Gen<'a, 'b> {
                 self.b.def_var(self.vars[l][k], z);
             }
         }
+        if self.be.c.is_some() {
+            self.hold_arrays(f);
+        }
         for c in &f.requires {
             let ok = self.expr(&c.expr)[0];
             let fail = self.b.ins().icmp_imm_s(IntCC::Equal, ok, 0);
@@ -1133,6 +1150,51 @@ impl<'a, 'b> Gen<'a, 'b> {
         self.b.finalize(config);
     }
 
+    /// Gives each array the function can keep the length and storage of its places, filled for
+    /// parameters and by `store_local` for the rest.
+    fn hold_arrays(&mut self, f: &Func) {
+        for (key, storage) in unique::held_arrays(self.program, &self.local_types, f) {
+            let zero = self.b.ins().iconst(I, 0);
+            let len = self.b.declare_var(I);
+            self.b.def_var(len, zero);
+            let data = storage.then(|| {
+                let data = self.b.declare_var(I);
+                self.b.def_var(data, zero);
+                data
+            });
+            self.held.insert(key, (len, data));
+            if f.params.contains(&key.0) {
+                self.refresh_held(key);
+            }
+        }
+    }
+
+    /// Reads the length and storage of the array `key` now holds, if they are kept.
+    fn refresh_held(&mut self, key: unique::Key) {
+        let Some(&(len, data)) = self.held.get(&key) else { return };
+        let arr = self.b.use_var(self.vars[key.0][key.1]);
+        let n = self.b.ins().load(I, self.header, arr, OBJ_LEN);
+        self.b.def_var(len, n);
+        if let Some(data) = data {
+            let at = self.b.ins().load(I, self.header, arr, ARR_DATA);
+            self.b.def_var(data, at);
+        }
+    }
+
+    fn refresh_held_at(&mut self, loc: &Loc) {
+        if let Loc::Vars(l, start, _) = loc {
+            self.refresh_held((*l, *start));
+        }
+    }
+
+    /// The length of `arr`, which `key` says which local holds if that is known.
+    fn len_of(&mut self, arr: Value, key: Option<unique::Key>) -> Value {
+        match key.and_then(|k| self.held.get(&k).copied()) {
+            Some((len, _)) => self.b.use_var(len),
+            None => self.b.ins().load(I, self.header, arr, OBJ_LEN),
+        }
+    }
+
     /// Continues codegen in a block nothing jumps to, after an unconditional transfer.
     fn dead_block(&mut self) {
         let dead = self.b.create_block();
@@ -1158,6 +1220,7 @@ impl<'a, 'b> Gen<'a, 'b> {
                 self.release_one(old);
             }
             self.b.def_var(var, *x);
+            self.refresh_held((l, start + k));
         }
     }
 
@@ -1177,21 +1240,24 @@ impl<'a, 'b> Gen<'a, 'b> {
     /// Address of element `index` of array `arr`, after a bounds check that panics at `site`,
     /// unless what is known already proves it. `key` says which local holds the array, if one does,
     /// and `named` which local the index is, if one is.
-    fn elem_addr(&mut self, arr: Value, index: Value, elem: &Ty, site: &str, key: Option<unique::Key>, named: Option<LocalId>) -> Value {
-        self.bounds_check(arr, index, site, key, named);
-        let data = self.b.ins().load(I, self.header, arr, ARR_DATA);
+    fn elem_addr(&mut self, arr: Value, index: Value, elem: &Ty, site: &str, key: Option<unique::Key>, named: Option<LocalId>, holder: Option<unique::Key>) -> Value {
+        self.bounds_check(arr, index, site, key, named, holder);
+        let data = match holder.and_then(|k| self.held.get(&k)).and_then(|h| h.1) {
+            Some(data) => self.b.use_var(data),
+            None => self.b.ins().load(I, self.header, arr, ARR_DATA),
+        };
         let size = flat_len(self.program, elem) as i64 * SLOT;
         let offset = self.b.ins().imul_imm_s(index, size);
         self.b.ins().iadd(data, offset)
     }
 
     /// Panics at `site` unless `index` is in bounds of `arr`, which needs no code if already proved.
-    fn bounds_check(&mut self, arr: Value, index: Value, site: &str, key: Option<unique::Key>, named: Option<LocalId>) {
+    fn bounds_check(&mut self, arr: Value, index: Value, site: &str, key: Option<unique::Key>, named: Option<LocalId>, holder: Option<unique::Key>) {
         let fact = key.zip(named);
         if fact.is_some_and(|f| self.known.in_bounds.contains(&f)) {
             return;
         }
-        let len = self.b.ins().load(I, self.header, arr, OBJ_LEN);
+        let len = self.len_of(arr, holder);
         // Unsigned comparison also catches negative indices.
         let oob = self.b.ins().icmp(IntCC::UnsignedGreaterThanOrEqual, index, len);
         let panic = self.b.create_block();
@@ -1299,6 +1365,7 @@ impl<'a, 'b> Gen<'a, 'b> {
                     let cur = self.b.use_var(var);
                     let next = self.call_rt("anvil_str_append", &[cur, v]).unwrap();
                     self.b.def_var(var, next);
+                    self.refresh_held((*l, 0));
                 }
             }
             Stmt::Assign(l, path, e, _) => {
@@ -1799,7 +1866,7 @@ impl<'a, 'b> Gen<'a, 'b> {
                     let named = unique::local_of(index_expr);
                     let addr = match key {
                         Some(k) if self.is_cleared(index_expr) => self.cleared_addr(k, index, &elem),
-                        _ => self.elem_addr(arr, index, &elem, site, key, named),
+                        _ => self.elem_addr(arr, index, &elem, site, key, named, key),
                     };
                     Loc::Mem(addr, elem)
                 }
@@ -1841,7 +1908,10 @@ impl<'a, 'b> Gen<'a, 'b> {
         self.b.seal_block(copy);
         let q = self.call_rt("anvil_arr_unique", &[p]).unwrap();
         match loc {
-            Loc::Vars(l, start, _) => self.b.def_var(self.vars[*l][*start], q),
+            Loc::Vars(l, start, _) => {
+                self.b.def_var(self.vars[*l][*start], q);
+                self.refresh_held((*l, *start));
+            }
             Loc::Mem(addr, _) => {
                 self.b.ins().store(self.trusted, q, *addr, 0);
             }
@@ -1967,7 +2037,7 @@ impl<'a, 'b> Gen<'a, 'b> {
         let arr = self.borrow(base).0[0];
         let i = self.expr(index)[0];
         let named = unique::local_of(index);
-        let addr = self.elem_addr(arr, i, ty, site, key, named);
+        let addr = self.elem_addr(arr, i, ty, site, key, named, key);
         self.load(addr, &lay)
     }
 
@@ -2078,7 +2148,7 @@ impl<'a, 'b> Gen<'a, 'b> {
                 let i = if cleared { self.unchecked(index) } else { self.expr(index)[0] };
                 let named = unique::local_of(index);
                 if !cleared {
-                    self.bounds_check(b[0], i, site, key, named);
+                    self.bounds_check(b[0], i, site, key, named, key);
                 }
                 let at = self.b.ins().iadd(b[0], i);
                 let v = self.b.ins().uload8(I, self.trusted, at, STR_BYTES);
@@ -2124,7 +2194,7 @@ impl<'a, 'b> Gen<'a, 'b> {
                 let i = if cleared.is_some() { self.unchecked(index) } else { self.expr(index)[0] };
                 let addr = match cleared {
                     Some(k) => self.cleared_addr(k, i, &e.ty),
-                    None => self.elem_addr(arr[0], i, &e.ty, site, None, None),
+                    None => self.elem_addr(arr[0], i, &e.ty, site, None, None, unique::key_of(self.program, base)),
                 };
                 let vals = self.load(addr, &lay);
                 self.retain(&lay, &vals);
@@ -2271,6 +2341,7 @@ impl<'a, 'b> Gen<'a, 'b> {
                 let arr = self.unique_at(&loc, site);
                 let slot = self.push_slot(arr, flat_len(self.program, &value.ty) as i64 * SLOT);
                 self.store(slot, &vals);
+                self.refresh_held_at(&loc);
                 Vec::new()
             }
             ExprKind::Pop { local, path, message, at: site } => {
@@ -2283,6 +2354,7 @@ impl<'a, 'b> Gen<'a, 'b> {
                 // The element's references move from the array to the result.
                 let last = self.b.ins().iadd_imm_s(len, -1);
                 self.b.ins().store(self.header, last, arr, OBJ_LEN);
+                self.refresh_held_at(&loc);
                 let slot = self.elem_at(arr, last, flat_len(self.program, &e.ty) as i64 * SLOT);
                 let lay = self.layout(&e.ty);
                 self.load(slot, &lay)
@@ -3197,7 +3269,7 @@ impl<'a, 'b> Gen<'a, 'b> {
             Builtin::Len => {
                 // str and arrays both keep their length at the same offset.
                 let (vals, owned) = self.borrow(&bargs[0]);
-                let len = self.b.ins().load(I, self.header, vals[0], OBJ_LEN);
+                let len = self.len_of(vals[0], unique::key_of(self.program, &bargs[0]));
                 if owned {
                     self.release_one(vals[0]);
                 }

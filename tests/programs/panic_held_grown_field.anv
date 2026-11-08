@@ -1,0 +1,19 @@
+// A field's array, grown and then replaced by a shorter one.
+
+struct Box {
+    xs: [i64],
+}
+
+fn main() uses io {
+    var b: Box = Box { xs: [1] };
+    var sum: i64 = 0;
+    for i in 0..4 {
+        print("round {i}");
+        b.xs.push(i);
+        sum = sum + b.xs[i + 1];
+        if i == 1 {
+            b.xs = [7];
+        }
+    }
+    print("never {sum}");
+}

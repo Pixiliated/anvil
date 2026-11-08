@@ -1,0 +1,29 @@
+exit: 0
+---
+replaced: 13 7
+branch: 170
+mid: 1 11
+shared: 0 1 2 3 / 0 11 2 13
+callee: 9 0 1 2
+pushed: 40 549755813888 1
+popped: 97531 1
+rebound: 15
+field: 408 6 4
+struct: 0 1 2 / 5 6 7
+moved: 9 5
+nested: 5 14 / 0 1
+captured: 153 50 50 50
+last: 120
+bytes: 8697 82
+cut: 303 3
+true
+true
+false
+false
+true
+false
+false
+true
+false
+none at 2
+others: 30

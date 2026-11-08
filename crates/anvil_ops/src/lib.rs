@@ -253,7 +253,7 @@ pub const COMMANDS: &[Command] = &[
     Command {
         name: "hot",
         positionals: &["file", "args*"],
-        options: &[INPUT],
+        options: &[INPUT, ("release", "", "sample a release build (through C), as a program ships")],
         summary: "run a program natively and sample where its time goes: its functions and the runtime's work, and which arrays a loop keeps checking",
     },
     Command {

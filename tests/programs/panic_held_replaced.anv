@@ -1,0 +1,14 @@
+// A shorter array took its place, so the length to check against is the new one.
+
+fn main() uses io {
+    var a: [i64] = [1, 2, 3, 4];
+    var sum: i64 = 0;
+    for i in 0..3 {
+        print("round {i}");
+        sum = sum + a[3];
+        if i == 1 {
+            a = [5, 6];
+        }
+    }
+    print("never {sum}");
+}

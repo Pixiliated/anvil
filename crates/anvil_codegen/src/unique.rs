@@ -13,7 +13,7 @@
 //! array's length never needs one.
 
 use anvil_front::ir::*;
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 /// The local an expression reads through fields alone, if it does.
 fn root(e: &Expr) -> Option<LocalId> {
@@ -357,6 +357,95 @@ fn not_held(body: &[Stmt]) -> HashSet<LocalId> {
     let mut out = HashSet::new();
     block(body, &mut out);
     out
+}
+
+/// Arrays and bytes a function indexes in a loop whose length and storage it can keep in locals: those
+/// in locals that nothing treats as a map. A value is never changed in place while anything else holds
+/// it, calls included, so what such a local holds changes its length or storage only where the local
+/// is stored to, copied on a write, pushed to or popped from, and each of those reads them again. The value is whether there is a storage pointer to keep,
+/// which bytes, living in their object, do not have.
+pub(crate) fn held_arrays(program: &Program, types: &[Ty], f: &Func) -> BTreeMap<Key, bool> {
+    #[derive(Default)]
+    struct Found {
+        wanted: BTreeMap<Key, bool>,
+        grown: HashSet<LocalId>,
+    }
+    fn expr(program: &Program, e: &Expr, looping: bool, found: &mut Found) {
+        match &e.kind {
+            ExprKind::MapSet { local, .. } | ExprKind::MapRemove { local, .. } => {
+                found.grown.insert(*local);
+            }
+            ExprKind::Index { base, .. } if looping => {
+                if let (Some(key), Ty::Array(_) | Ty::Bytes) = (key_of(program, base), &base.ty) {
+                    found.wanted.insert(key, base.ty != Ty::Bytes);
+                }
+            }
+            _ => {}
+        }
+        for c in children(e) {
+            expr(program, c, looping, found);
+        }
+    }
+    fn block(program: &Program, types: &[Ty], b: &[Stmt], looping: bool, found: &mut Found) {
+        for s in b {
+            match s {
+                Stmt::Let(_, e) | Stmt::Expr(e) | Stmt::Return(Some(e)) => expr(program, e, looping, found),
+                Stmt::Assign(l, path, e, _) => {
+                    let (mut ty, mut slot, mut first) = (&types[*l], 0, true);
+                    for step in path {
+                        match step {
+                            Step::Field(i) if first => {
+                                let Ty::Struct(sid) = ty else { unreachable!("field of {ty:?}") };
+                                slot += crate::field_range(program, *sid, *i).0;
+                                ty = &program.structs[*sid].fields[*i].1;
+                            }
+                            Step::Field(_) => {}
+                            Step::Index { index, .. } => {
+                                if first && looping && matches!(ty, Ty::Array(_)) {
+                                    found.wanted.insert((*l, slot), true);
+                                }
+                                first = false;
+                                expr(program, index, looping, found);
+                            }
+                        }
+                    }
+                    expr(program, e, looping, found);
+                }
+                Stmt::If(c, t, f) => {
+                    expr(program, c, looping, found);
+                    block(program, types, t, looping, found);
+                    block(program, types, f, looping, found);
+                }
+                Stmt::Match { scrutinee, arms, .. } => {
+                    expr(program, scrutinee, looping, found);
+                    for arm in arms {
+                        block(program, types, &arm.body, looping, found);
+                    }
+                }
+                Stmt::While(c, body) => {
+                    expr(program, c, true, found);
+                    block(program, types, body, true, found);
+                }
+                Stmt::For(_, start, end, body) => {
+                    expr(program, start, looping, found);
+                    expr(program, end, looping, found);
+                    block(program, types, body, true, found);
+                }
+                Stmt::ForEach { iter, body, .. } => {
+                    expr(program, iter, looping, found);
+                    block(program, types, body, true, found);
+                }
+                Stmt::Return(None) | Stmt::Drop(_) | Stmt::Break | Stmt::Continue | Stmt::Reached(_) | Stmt::Line(_) => {}
+            }
+        }
+    }
+    let mut found = Found::default();
+    for c in f.requires.iter().chain(&f.ensures) {
+        expr(program, &c.expr, false, &mut found);
+    }
+    block(program, types, &f.body, false, &mut found);
+    found.wanted.retain(|key, _| !found.grown.contains(&key.0));
+    found.wanted
 }
 
 fn is_innermost(body: &[Stmt]) -> bool {

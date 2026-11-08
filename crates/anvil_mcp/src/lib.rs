@@ -219,6 +219,8 @@ pub struct TraceArgs {
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct HotArgs {
+    /// Sample a release build (through C), as a program ships.
+    pub release: Option<bool>,
     /// Path of the .anv file, relative to the server's root or absolute.
     pub file: String,
     /// A file whose bytes are main's stdin (default: what the golden's input says).
@@ -578,7 +580,7 @@ impl AnvilServer {
     async fn hot(&self, Parameters(a): Parameters<HotArgs>) -> Result<CallToolResult, ErrorData> {
         self.op(move |root| {
             let input = program_input(a.args, a.input);
-            anvil_ops::hot(root, &a.file, &input)
+            anvil_ops::hot(root, &a.file, &input, a.release.unwrap_or(false))
         })
         .await
     }

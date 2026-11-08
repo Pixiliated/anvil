@@ -1,0 +1,269 @@
+// Arrays whose length and storage a release build keeps in locals, and each thing that changes them.
+
+struct Pair {
+    xs: [i64],
+    tag: i64,
+}
+
+fn numbers(n: i64) -> [i64] {
+    var out: [i64] = [];
+    for i in 0..n {
+        out.push(i);
+    }
+    return out;
+}
+
+fn show(a: [i64]) -> str {
+    var s: str = "";
+    for x in a {
+        s = s + " {x}";
+    }
+    return s;
+}
+
+fn replaced_in_the_loop() uses io {
+    var a: [i64] = numbers(2);
+    var sum: i64 = 0;
+    for round in 1..5 {
+        sum = sum + a[a.len() - 1];
+        a = numbers(round + 3);
+    }
+    print("replaced: {sum} {a.len()}");
+}
+
+fn replaced_in_a_branch() uses io {
+    var a: [i64] = numbers(3);
+    var sum: i64 = 0;
+    for r in 0..4 {
+        if r == 1 {
+            a = [7, 8, 9, 10, 11];
+        }
+        sum = sum + a[2] * (a.len() + 1);
+    }
+    print("branch: {sum}");
+}
+
+fn copied_when_shared() uses io {
+    let a: [i64] = numbers(4);
+    var b: [i64] = a;
+    for i in 0..4 {
+        if a[i] % 2 == 1 {
+            b[i] = a[i] + 10;
+        }
+        if i == 1 {
+            print("mid: {a[1]} {b[1]}");
+        }
+    }
+    print("shared:{show(a)} /{show(b)}");
+}
+
+fn doubled(xs: [i64]) -> [i64] {
+    var out: [i64] = xs;
+    for i in 0..out.len() {
+        out[i] = out[i] * 2;
+    }
+    return out;
+}
+
+fn callee_changes_its_copy() uses io {
+    let a: [i64] = numbers(3);
+    var total: i64 = 0;
+    for i in 0..3 {
+        let d: [i64] = doubled(a);
+        total = total + a[i] + d[i];
+    }
+    print("callee: {total}{show(a)}");
+}
+
+fn pushed_while_read() uses io {
+    var a: [i64] = [1];
+    var i: i64 = 0;
+    while a.len() < 40 {
+        a.push(a[i] + a[a.len() - 1]);
+        i = i + 1;
+    }
+    print("pushed: {a.len()} {a[39]} {a[0]}");
+}
+
+fn popped_while_read() uses io {
+    var a: [i64] = numbers(6);
+    var sum: i64 = 0;
+    while a.len() > 1 {
+        let top: i64 = a.pop();
+        sum = sum * 10 + top + a[a.len() - 1];
+    }
+    print("popped: {sum} {a.len()}");
+}
+
+fn bound_each_round() uses io {
+    var sum: i64 = 0;
+    for r in 1..5 {
+        let a: [i64] = numbers(r);
+        for i in 0..r {
+            sum = sum + a[r - 1 - i] * (i + 1);
+        }
+    }
+    print("rebound: {sum}");
+}
+
+fn fields_replaced_and_grown() uses io {
+    var p: Pair = Pair { xs: numbers(2), tag: 1 };
+    var sum: i64 = 0;
+    for r in 0..3 {
+        sum = sum + p.xs[p.xs.len() - 1];
+        p.xs.push(r + 100);
+        sum = sum + p.xs[p.xs.len() - 1];
+        if r == 1 {
+            p.xs = numbers(5);
+        }
+        p.tag = p.tag + 1;
+    }
+    print("field: {sum} {p.xs.len()} {p.tag}");
+}
+
+fn struct_copied() uses io {
+    let p: Pair = Pair { xs: numbers(3), tag: 5 };
+    var q: Pair = p;
+    for i in 0..3 {
+        q.xs[i] = p.xs[i] + q.tag;
+    }
+    print("struct:{show(p.xs)} /{show(q.xs)}");
+}
+
+fn consume(a: [i64]) -> i64 {
+    return a.len();
+}
+
+fn moved_and_given_again() uses io {
+    var a: [i64] = numbers(2);
+    var sum: i64 = 0;
+    var r: i64 = 0;
+    while r < 3 {
+        sum = sum + a[0] + consume(a);
+        a = numbers(r + 3);
+        r = r + 1;
+    }
+    print("moved: {sum} {a.len()}");
+}
+
+fn nested_rows() uses io {
+    var g: [[i64]] = [numbers(2), numbers(3)];
+    let row: [i64] = g[0];
+    for i in 0..2 {
+        g[0][i] = g[1][i] + 5;
+        g[1] = [9, 9, 9];
+    }
+    print("nested:{show(g[0])} /{show(row)}");
+}
+
+fn captured_stays_as_it_was() uses io {
+    var a: [i64] = numbers(3);
+    let first: fn(i64) -> i64 = fn(k: i64) -> i64 {
+        return a[k];
+    };
+    var sum: i64 = 0;
+    for i in 0..3 {
+        a[i] = 50;
+        sum = sum + first(i) + a[i];
+    }
+    print("captured: {sum}{show(a)}");
+}
+
+fn bytes_grown() uses io {
+    var b: bytes = "ab".to_bytes();
+    var sum: i64 = 0;
+    for r in 0..40 {
+        sum = sum + b[b.len() - 1] + b[0];
+        b = b + "xy".to_bytes();
+        if r == 39 {
+            print("last: {b[b.len() - 2]}");
+        }
+    }
+    print("bytes: {sum} {b.len()}");
+}
+
+fn bytes_replaced() uses io {
+    var b: bytes = "abcdef".to_bytes();
+    var sum: i64 = 0;
+    for r in 0..3 {
+        sum = sum + b[b.len() - 1];
+        b = b[0..5 - r];
+    }
+    print("cut: {sum} {b.len()}");
+}
+
+fn ascii(n: i64) -> bytes {
+    var out: [i64] = [];
+    for _i in 0..n {
+        out.push(97);
+    }
+    return bytes_of(out);
+}
+
+fn valid(b: bytes) -> bool {
+    match b.to_str() {
+        Some(value: t) => { return t.len() == b.len(); }
+        None => { return false; }
+    }
+}
+
+// Long runs of ASCII are checked in words, so what follows or ends one has to be noticed at every place.
+fn text_after_ascii() uses io {
+    print(valid(ascii(24)));
+    print(valid(ascii(16) + bytes_of([195, 169])));
+    print(valid(ascii(8) + bytes_of([255])));
+    print(valid(ascii(15) + bytes_of([195])));
+    print(valid(ascii(9) + bytes_of([226, 130, 172]) + ascii(9)));
+    print(valid(ascii(7) + bytes_of([128])));
+    print(valid(ascii(1) + bytes_of([255]) + ascii(14)));
+    print(valid(ascii(23) + bytes_of([240, 159, 146, 150])));
+    print(valid(ascii(17) + bytes_of([97, 98, 99, 100, 101, 102, 103, 128])));
+}
+
+fn row_at(rows: [[i64]], i: i64) -> Option[[i64]] {
+    if i >= rows.len() {
+        return None;
+    }
+    return Some(rows[i]);
+}
+
+// Bound by a loop or a match, not by a `let`.
+fn bound_by_others() uses io {
+    let rows: [[i64]] = [numbers(2), [5, 6]];
+    var sum: i64 = 0;
+    for row in rows {
+        for j in 0..2 {
+            sum = sum + row[j] * (j + 1);
+        }
+    }
+    for i in 1..3 {
+        match row_at(rows: rows, i: i) {
+            Some(value: r) => {
+                for j in 0..2 {
+                    sum = sum + r[j];
+                }
+            }
+            None => { print("none at {i}"); }
+        }
+    }
+    print("others: {sum}");
+}
+
+fn main() uses io {
+    replaced_in_the_loop();
+    replaced_in_a_branch();
+    copied_when_shared();
+    callee_changes_its_copy();
+    pushed_while_read();
+    popped_while_read();
+    bound_each_round();
+    fields_replaced_and_grown();
+    struct_copied();
+    moved_and_given_again();
+    nested_rows();
+    captured_stays_as_it_was();
+    bytes_grown();
+    bytes_replaced();
+    text_after_ascii();
+    bound_by_others();
+}
