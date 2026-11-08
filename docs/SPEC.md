@@ -920,15 +920,17 @@ backends disagree". Property tests run in the interpreter, the reference.
 anvil check   file.anv                 type-check
 anvil run     file.anv [--max-steps N] [--input FILE] [-- ARGS...]
                                        interpret (the reference semantics)
-anvil build   file.anv [-o out] [--asm]
+anvil build   file.anv [-o out] [--asm] [--release]
                                        native executable via Cranelift, for the host:
-                                       Windows x64 (MSVC), Linux or macOS (x86-64, ARM64)
+                                       Windows x64 (MSVC), Linux or macOS (x86-64, ARM64);
+                                       --release goes through C (see below)
 anvil test    file.anv [--native] [--cases N] [--seed N] [--max-steps N]
                                        run test blocks; `for all` tests on generated inputs
 anvil fmt     [file.anv] [--check]     put the file (or every project file) in canonical
                                        layout; --check changes nothing
 anvil fix     file.anv                 apply every mechanical fix until none is left
-anvil fuzz    [--seed N] [--count N]   random programs on both backends (see below)
+anvil fuzz    [--seed N] [--count N] [--release]
+                                       random programs on both backends (see below)
 anvil trace   file.anv [--test NAME] [--only F,G] [--limit N] [--input FILE] [-- ARGS...]
                                        a run as a timeline: calls, returns, prints
 anvil profile file.anv [--test NAME] [--input FILE] [-- ARGS...]
@@ -1015,7 +1017,8 @@ in the current directory or above:
 
 ```
 anvil list                                  files: functions, tests, main, golden
-anvil golden check [FILE] [--native]        compare output with approved goldens
+anvil golden check [FILE] [--native] [--release]
+                                            compare output with approved goldens
 anvil golden approve FILE                   approve a program's current output
 anvil api [FILE]                            public APIs against their approved ones
 anvil api approve FILE                      approve a file's current public API
@@ -1185,7 +1188,16 @@ The standard library's modules, which ship in the binary, are measured by their 
 failing check is a tool error. Over MCP, every run stops after 100,000,000 steps unless
 `max_steps` says otherwise.
 
+`anvil build --release` makes the executable a program ships as: slower to build (about a second,
+against a fifth of one), faster to run (a third faster across the benchmark programs). It writes
+the same lowered program the native backend compiles, before Cranelift optimizes it, as C, and
+the C compiler the linker comes with already compiles it (MSVC's `cl /O2` on Windows, `cc -O2`
+elsewhere), so nothing new needs installing. Every choice about what the program does is made
+before either backend sees it, and the C pins down what C leaves open: integers wrap, shifts are
+masked, floats are never fused into one rounding. `--asm` with `--release` gives the C.
+`golden check --release`, `fuzz --release` and `compare --release` run release builds too.
+
 The interpreter and the native compiler must agree exactly: same stdout, same panic message,
-same exit code. `anvil fuzz` checks it on random well-typed programs (seed N always makes the
+same exit code, and the release backend with them. `anvil fuzz` checks it on random well-typed programs (seed N always makes the
 same program); a program on which they differ is saved to `out/fuzz/<seed>.anv`. The one known difference: the interpreter panics past 10,000 nested calls,
 while native code recurses until its 64 MiB stack runs out.

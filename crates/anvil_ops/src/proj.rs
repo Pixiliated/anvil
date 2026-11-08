@@ -95,7 +95,7 @@ pub(crate) fn select(project: &Project, cwd: &Path, file: Option<&str>) -> Resul
     }
 }
 
-fn check_one(project: &Project, file: &str, native: bool, max_steps: Option<u64>) -> Checked {
+fn check_one(project: &Project, file: &str, native: bool, release: bool, max_steps: Option<u64>) -> Checked {
     let src = match load(&project.root, file) {
         Ok(s) => s,
         Err(r) => {
@@ -108,7 +108,7 @@ fn check_one(project: &Project, file: &str, native: bool, max_steps: Option<u64>
         }
     };
     match anvil_front::compile_with(&src, &loader(&project.root)).1 {
-        Ok(program) => golden::check_file(project, &src, program, native, max_steps),
+        Ok(program) => golden::check_file(project, &src, program, native, release, max_steps),
         Err(d) => Checked {
             file: file.into(),
             status: "error",
@@ -118,20 +118,24 @@ fn check_one(project: &Project, file: &str, native: bool, max_steps: Option<u64>
     }
 }
 
-pub fn golden_check(root: &Path, file: Option<&str>, native: bool, max_steps: Option<u64>) -> Report {
+pub fn golden_check(root: &Path, file: Option<&str>, native: bool, release: bool, max_steps: Option<u64>) -> Report {
     let project = try_or_usage!(Project::discover(root));
     let files = try_or_usage!(select(&project, root, file));
-    let results: Vec<Checked> = files.iter().map(|f| check_one(&project, f, native, max_steps)).collect();
+    let results: Vec<Checked> = files.iter().map(|f| check_one(&project, f, native, release, max_steps)).collect();
     let bad: Vec<&Checked> = results.iter().filter(|c| c.failed()).collect();
     let checked = results.iter().filter(|c| c.status != "no_main").count();
     let mut text = String::new();
     for c in &bad {
         text.push_str(&format!("{} {}: {}\n", c.status.to_uppercase(), c.file, c.detail.as_deref().unwrap_or("")));
     }
-    let backends = if native { "interpreter and native" } else { "interpreter" };
+    let backends = match (native, release) {
+        (_, true) => "interpreter, native and release",
+        (true, false) => "interpreter and native",
+        (false, false) => "interpreter",
+    };
     text.push_str(&format!("{} of {checked} program(s) match their goldens ({backends})\n", checked - bad.len()));
     let json = json!({
-        "ok": bad.is_empty(), "native": native, "checked": checked, "failed": bad.len(),
+        "ok": bad.is_empty(), "native": native || release, "release": release, "checked": checked, "failed": bad.len(),
         "results": results.iter().map(Checked::to_json).collect::<Vec<_>>(),
     });
     if bad.is_empty() {
@@ -294,7 +298,7 @@ fn verify_file(
     if !is_test_kit(file) {
         undocumented(&src, &mut add);
     }
-    let g = golden::check_file(project, &src, program, native, max_steps);
+    let g = golden::check_file(project, &src, program, native, false, max_steps);
     if g.failed() {
         add("golden", format!("{}: {}", g.status, g.detail.clone().unwrap_or_default()), String::new());
     }

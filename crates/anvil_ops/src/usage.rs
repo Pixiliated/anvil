@@ -215,7 +215,7 @@ pub(crate) fn measure(project: &Project, file: &str, max_steps: Option<u64>) -> 
         let mut rec = anvil_interp::Recorder::new(&p2);
         crate::testing::run_all(&p2, crate::PROPERTY_CASES, 0, max_steps, Some(&mut rec), &mut ffi, &root)
     });
-    let g = golden::check_file(project, &src, program, false, max_steps);
+    let g = golden::check_file(project, &src, program, false, false, max_steps);
     Ok(measured(&tests, (g.status, g.counts.as_ref())))
 }
 

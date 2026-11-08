@@ -366,7 +366,7 @@ fn rel(project: &Project, p: &Path) -> String {
 
 /// Removes what `write_actual` left for a file, so out/golden never shows a stale failure.
 pub fn clear_actual(project: &Project, file: &str) {
-    for suffix in [".out", ".diff", ".native.out", ".native.diff"] {
+    for suffix in [".out", ".diff", ".native.out", ".native.diff", ".release.out", ".release.diff"] {
         let _ = std::fs::remove_file(out_dir(project).join(format!("{file}{suffix}")));
     }
 }
@@ -375,9 +375,25 @@ pub fn clear_actual(project: &Project, file: &str) {
 /// build failure or a runtime error (a leak or a refcount fault, which are bugs in Anvil, not in
 /// the program).
 pub fn native(program: &Program, scratch: &Path, name: &str, root: &Path, input: &Input) -> Result<Output, String> {
+    native_as(program, scratch, name, root, input, false)
+}
+
+/// Like `native`, built by the release backend (through C) when `release`.
+pub fn native_as(
+    program: &Program,
+    scratch: &Path,
+    name: &str,
+    root: &Path,
+    input: &Input,
+    release: bool,
+) -> Result<Output, String> {
     std::fs::create_dir_all(scratch).map_err(|e| format!("cannot create {}: {e}", scratch.display()))?;
     let exe = scratch.join(format!("{}{}", name.replace(['/', '\\', '.'], "_"), std::env::consts::EXE_SUFFIX));
-    anvil_codegen::build_exe(program, &exe, &scratch.join("work"), false)?;
+    if release {
+        anvil_codegen::build_exe_release(program, &exe, &scratch.join("work"))?;
+    } else {
+        anvil_codegen::build_exe(program, &exe, &scratch.join("work"), false)?;
+    }
     let args: Vec<&str> = input.args.iter().map(String::as_str).collect();
     let result = run_native(&exe, &args, root, &input.stdin, &input.env);
     let _ = std::fs::remove_file(&exe);
@@ -487,6 +503,7 @@ pub fn check_file(
     src: &SourceFile,
     program: Program,
     native_too: bool,
+    release: bool,
     max_steps: Option<u64>,
 ) -> Checked {
     let file = src.name.clone();
@@ -508,7 +525,7 @@ pub fn check_file(
         Ok(i) => i,
         Err(e) => return done("error", Some(e)),
     };
-    let native_program = native_too.then(|| program.clone());
+    let native_program = (native_too || release).then(|| program.clone());
     let (got, counts) = match interpret(program, max_steps, &project.root, &input) {
         Ok(o) => o,
         Err(m) => return done("stopped", Some(m)),
@@ -520,17 +537,20 @@ pub fn check_file(
         return with("differs", Some(format!("interpreter {d}{written}")));
     }
     if let Some(p) = native_program {
-        let scratch = std::env::temp_dir().join(format!("anvil_golden_{}_{}", std::process::id(), crate::unique()));
-        let result = native(&p, &scratch, &file, &project.root, &input);
-        let _ = std::fs::remove_dir_all(&scratch);
-        match result {
-            Ok(n) => {
-                if let Some(d) = difference(&want, &n) {
-                    let written = write_actual(project, &file, ".native", &want, &n);
-                    return with("differs", Some(format!("native {d}{written}")));
+        let backends: &[(bool, &str)] = if release { &[(false, "native"), (true, "release")] } else { &[(false, "native")] };
+        for (build_release, name) in backends {
+            let scratch = std::env::temp_dir().join(format!("anvil_golden_{}_{}", std::process::id(), crate::unique()));
+            let result = native_as(&p, &scratch, &file, &project.root, &input, *build_release);
+            let _ = std::fs::remove_dir_all(&scratch);
+            match result {
+                Ok(n) => {
+                    if let Some(d) = difference(&want, &n) {
+                        let written = write_actual(project, &file, &format!(".{name}"), &want, &n);
+                        return with("differs", Some(format!("{name} {d}{written}")));
+                    }
                 }
+                Err(e) => return with("error", Some(format!("{name}: {e}"))),
             }
-            Err(e) => return with("error", Some(format!("native: {e}"))),
         }
     }
     with("ok", None)

@@ -136,7 +136,7 @@ fn dispatch(p: &Parsed) -> Result<Report, String> {
         "run" => anvil_ops::run(root, file, steps, &input(true), (&mut std::io::stdout(), &mut std::io::stderr())),
         "build" => {
             let out = p.options.get("out").and_then(|v| v.as_deref());
-            anvil_ops::build(root, file, out, p.options.contains_key("asm"))
+            anvil_ops::build(root, file, out, p.options.contains_key("asm"), p.options.contains_key("release"))
         }
         "test" => anvil_ops::test(root, file, steps, native, count("cases")?, count("seed")?),
         "fmt" => anvil_ops::fmt(root, pos(0), p.options.contains_key("check")),
@@ -155,7 +155,7 @@ fn dispatch(p: &Parsed) -> Result<Report, String> {
         "trace" => anvil_ops::trace(root, file, text("test"), text("only"), count("limit")?, steps, &input(false)),
         "profile" => anvil_ops::profile(root, file, text("test"), steps, &input(false)),
         "cost" => anvil_ops::cost(root, file, text("only")),
-        "fuzz" => anvil_ops::fuzz(root, count("seed")?, count("count")?),
+        "fuzz" => anvil_ops::fuzz(root, count("seed")?, count("count")?, p.options.contains_key("release")),
         "list" => anvil_ops::list(root),
         "verify" => anvil_ops::verify(root, native, steps),
         "review" => anvil_ops::review(root, native, steps),
@@ -164,10 +164,18 @@ fn dispatch(p: &Parsed) -> Result<Report, String> {
         "api approve" => anvil_ops::api_approve(root, file),
         "measure" => anvil_ops::measure(root, pos(0), steps, &input(false), p.options.contains_key("native-only")),
         "hot" => anvil_ops::hot(root, file, &input(false)),
-        "compare" => anvil_ops::compare(root, file, pos(1).unwrap(), count("rounds")?, count("limit")?, &input(false)),
+        "compare" => anvil_ops::compare(
+            root,
+            file,
+            pos(1).unwrap(),
+            count("rounds")?,
+            count("limit")?,
+            p.options.contains_key("release"),
+            &input(false),
+        ),
         "usage" => anvil_ops::usage(root, pos(0), steps),
         "usage approve" => anvil_ops::usage_approve(root, pos(0), steps),
-        "golden check" => anvil_ops::golden_check(root, pos(0), native, steps),
+        "golden check" => anvil_ops::golden_check(root, pos(0), native, p.options.contains_key("release"), steps),
         "golden approve" => anvil_ops::golden_approve(root, file, steps),
         "record query" => anvil_ops::record_query(root, pos(0), p.options.contains_key("open")),
         "record decide" => anvil_ops::record_decide(root, file, pos(1)),

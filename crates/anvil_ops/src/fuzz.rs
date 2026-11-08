@@ -669,7 +669,7 @@ pub fn program_for(seed: u64) -> String {
     }
 }
 
-pub fn fuzz(root: &Path, seed: Option<u64>, count: Option<u64>) -> Report {
+pub fn fuzz(root: &Path, seed: Option<u64>, count: Option<u64>, release: bool) -> Report {
     let first = seed.unwrap_or(1);
     let count = count.unwrap_or(10);
     if count == 0 {
@@ -681,7 +681,7 @@ pub fn fuzz(root: &Path, seed: Option<u64>, count: Option<u64>) -> Report {
     let mut bad = 0;
     for s in first..first + count {
         let program = program_for(s);
-        let (status, detail) = check_one(&program, s);
+        let (status, detail) = check_one(&program, s, release);
         if status != "same" {
             bad += 1;
             let file = out_dir.join(format!("{s}.anv"));
@@ -694,11 +694,13 @@ pub fn fuzz(root: &Path, seed: Option<u64>, count: Option<u64>) -> Report {
         }
     }
     text.push_str(&format!(
-        "{} of {count} program(s) agree on both backends (seeds {first}..{})\n",
+        "{} of {count} program(s) agree on {} (seeds {first}..{})\n",
         count - bad,
+        if release { "all three backends" } else { "both backends" },
         first + count - 1
     ));
-    let json = json!({ "ok": bad == 0, "seed": first, "count": count, "failed": bad, "programs": results });
+    let json =
+        json!({ "ok": bad == 0, "seed": first, "count": count, "release": release, "failed": bad, "programs": results });
     Report {
         json,
         stdout: text,
@@ -710,7 +712,7 @@ pub fn fuzz(root: &Path, seed: Option<u64>, count: Option<u64>) -> Report {
 
 /// "same", "differs", "invalid" (the generator made a program that does not check: a fuzzer
 /// bug), "stopped" or "error" (native build or runtime error), and what happened.
-fn check_one(text: &str, seed: u64) -> (&'static str, String) {
+fn check_one(text: &str, seed: u64, release: bool) -> (&'static str, String) {
     let src = SourceFile::new(format!("fuzz/{seed}.anv"), text.to_string());
     let program = match anvil_front::compile(&src) {
         Ok(p) => p,
@@ -724,15 +726,21 @@ fn check_one(text: &str, seed: u64) -> (&'static str, String) {
         Ok((o, _)) => o,
         Err(m) => return ("stopped", m),
     };
-    let native = golden::native(&native_program, &scratch, &format!("fuzz{seed}"), &std::env::temp_dir(), &none);
-    let _ = std::fs::remove_dir_all(&scratch);
-    match native {
-        Err(e) => ("error", format!("native: {e}")),
-        Ok(n) => match golden::difference(&interp, &n) {
-            None => ("same", String::new()),
-            Some(d) => ("differs", format!("native {d}, against the interpreter")),
-        },
+    let backends: &[(bool, &str)] = if release { &[(false, "native"), (true, "release")] } else { &[(false, "native")] };
+    for (build_release, name) in backends {
+        let got =
+            golden::native_as(&native_program, &scratch, &format!("fuzz{seed}"), &std::env::temp_dir(), &none, *build_release);
+        let _ = std::fs::remove_dir_all(&scratch);
+        match got {
+            Err(e) => return ("error", format!("{name}: {e}")),
+            Ok(n) => {
+                if let Some(d) = golden::difference(&interp, &n) {
+                    return ("differs", format!("{name} {d}, against the interpreter"));
+                }
+            }
+        }
     }
+    ("same", String::new())
 }
 
 #[cfg(test)]

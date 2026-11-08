@@ -751,6 +751,19 @@ Short records of choices that are not obvious from the code. Newest last.
   code. Three ways to steer it from outside all lost: saving idle values around loops (no gain, fannkuch
   0.90x), passing a loop's values through the stack (0.77x to 0.93x, matmul alone 1.10x), and new short
   ranges from an opaque zero (0.97x overall, fannkuch 0.79x). The next try belongs in the allocator.
+- **The release backend writes Cranelift's IR as C** (v0.44). Cranelift cannot vectorize and its
+  register allocator spills long-lived values, and steering it from outside lost three times. C
+  compilers do both well, and one already comes with the linker. Writing C from the IR `Gen` builds,
+  before Cranelift optimizes it, rather than from Anvil's IR, keeps one place deciding what a
+  program does: reference counts, checks, layouts and panics are the same instructions, so the
+  backends cannot drift. Hand-written C of three programs first showed it was worth it (1.45x to
+  1.9x). Only about 50 instructions occur; any other is an error. Integers are unsigned with `-fwrapv`
+  and masked shifts, floats are never contracted, memory is reached through casts with strict
+  aliasing off. Optimizing the runtime with the program (`/GL` and `/LTCG`) gave nothing (0.98x to
+  1.01x), so the runtime stays the library it was.
+- **Release is opt-in.** A release build takes about a second against a fifth of one, and tests,
+  goldens and fuzzing run many builds, so Cranelift stays the default and the release backend is
+  checked against it.
 - **One thread ends the program.** Workers overflow their stacks together, as they recurse alike, and each
   printed the panic: 3% of runs, nearly 10% on a busy machine, seen as a golden that failed now and then.
   The first thread to end it reports, and any other waits for the exit.

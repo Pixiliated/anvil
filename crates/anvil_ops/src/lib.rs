@@ -86,7 +86,8 @@ pub const COMMANDS: &[Command] = &[
         positionals: &["file"],
         options: &[
             ("out", "PATH", "executable to write (default: the file without .anv; .exe on Windows)"),
-            ("asm", "", "include each function's machine code"),
+            ("asm", "", "include each function's machine code (with --release, the C)"),
+            ("release", "", "through C and the platform's optimizing C compiler: slower to build, faster to run"),
         ],
         summary: "compile main to a native executable",
     },
@@ -175,6 +176,7 @@ pub const COMMANDS: &[Command] = &[
         options: &[
             ("seed", "N", "seed of the first program (default 1); program N is always the same"),
             ("count", "N", "programs to try (default 10)"),
+            ("release", "", "also build each with the release backend (through C)"),
         ],
         summary: "random well-typed programs on both backends; any difference is a backend bug",
     },
@@ -260,6 +262,7 @@ pub const COMMANDS: &[Command] = &[
         options: &[
             ("rounds", "N", "how many times to time each, at least 3 (default 7)"),
             ("limit", "SECONDS", "stop a run that takes longer than this, as an error (default 600)"),
+            ("release", "", "compare release builds (through C), as a program ships"),
             INPUT,
         ],
         summary: "which of two programs runs faster: in turn, on one fast core, and only called a difference when it is more than the runs move on their own; output must match",
@@ -267,7 +270,7 @@ pub const COMMANDS: &[Command] = &[
     Command {
         name: "golden check",
         positionals: &["file?"],
-        options: &[STEPS, NATIVE],
+        options: &[STEPS, NATIVE, ("release", "", "also build and run each program with the release backend (through C)")],
         summary: "compare programs' output, exit code and panic with their approved goldens",
     },
     Command {
@@ -584,14 +587,19 @@ pub fn run(
     }
 }
 
-pub fn build(root: &Path, file: &str, out: Option<&str>, asm: bool) -> Report {
+pub fn build(root: &Path, file: &str, out: Option<&str>, asm: bool, release: bool) -> Report {
     let (_, program) = try_report!(with_main(root, file));
     let out: PathBuf = match out {
         Some(o) => root.join(o),
         None => root.join(file).with_extension(std::env::consts::EXE_EXTENSION),
     };
     let work = std::env::temp_dir().join(format!("anvil_build_{}_{}", std::process::id(), unique()));
-    let result = anvil_codegen::build_exe(&program, &out, &work, asm);
+    let result = if release {
+        anvil_codegen::build_exe_release(&program, &out, &work)
+            .and_then(|()| if asm { anvil_codegen::c_source(&program) } else { Ok(String::new()) })
+    } else {
+        anvil_codegen::build_exe(&program, &out, &work, asm)
+    };
     let _ = std::fs::remove_dir_all(&work);
     match result {
         Ok(listing) => {

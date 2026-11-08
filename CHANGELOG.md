@@ -3,6 +3,16 @@
 Each version is one roadmap milestone (docs/ROADMAP.md); docs/DECISIONS.md says why things are
 the way they are.
 
+## 0.44.0
+- `anvil build --release`: the program through C and the C compiler that comes with the linker
+  (`cl /O2` on Windows, `cc -O2` elsewhere), so nothing new to install. Builds take about a second;
+  programs run 1.32x faster than v0.43's across the benchmark programs, every one faster (1.07x to
+  1.85x). As delivered, the benchmark programs went from 1.76x Rust's time to 1.39x: fannkuch, binary
+  trees and the route planner now run faster than Rust; matrix multiplication, the calculator, word
+  counting and the ledger are 2x to 3.4x behind it. `--asm --release` shows the C.
+- `golden check --release`, `fuzz --release` and `compare --release` check and time release builds;
+  the three backends agree on every golden and on 1000 random programs.
+
 ## 0.43.0
 - `anvil compare A B [-- ARGS]`: which of two programs runs faster, timed in turn on one fast core, and
   named only when the difference is more than the runs move on their own. A program against itself says

@@ -328,7 +328,15 @@ fn side(file: &str, seconds: &[f64], exit: i32) -> Value {
 
 /// Builds two programs and runs them in turn: which is faster, by how much, and whether that is more
 /// than these runs move by on their own.
-pub fn compare(root: &Path, a: &str, b: &str, rounds: Option<u64>, limit: Option<u64>, input: &ProgramInput) -> Report {
+pub fn compare(
+    root: &Path,
+    a: &str,
+    b: &str,
+    rounds: Option<u64>,
+    limit: Option<u64>,
+    release: bool,
+    input: &ProgramInput,
+) -> Report {
     let rounds = rounds.unwrap_or(DEFAULT_ROUNDS);
     if rounds < 3 {
         return Report::usage("--rounds must be at least 3: fewer cannot tell a difference from noise");
@@ -363,7 +371,12 @@ pub fn compare(root: &Path, a: &str, b: &str, rounds: Option<u64>, limit: Option
         let mut exes = Vec::new();
         for (i, program) in programs.iter().enumerate() {
             let exe = scratch.join(format!("program{i}{}", std::env::consts::EXE_SUFFIX));
-            anvil_codegen::build_exe(program, &exe, &scratch.join(format!("work{i}")), false)?;
+            let work = scratch.join(format!("work{i}"));
+            if release {
+                anvil_codegen::build_exe_release(program, &exe, &work)?;
+            } else {
+                anvil_codegen::build_exe(program, &exe, &work, false)?;
+            }
             exes.push(exe);
         }
         let stdin = scratch.join("stdin");
@@ -418,6 +431,7 @@ pub fn compare(root: &Path, a: &str, b: &str, rounds: Option<u64>, limit: Option
         "noise": noise,
         "same_output": same_output,
         "rounds": rounds,
+        "release": release,
         "pinned": pinned,
         "other_thread_idle": idle,
     });
@@ -443,7 +457,8 @@ pub fn compare(root: &Path, a: &str, b: &str, rounds: Option<u64>, limit: Option
         text.push_str("a run this short says little: give it a bigger input\n");
     }
     text.push_str(&format!(
-        "{rounds} rounds of the time charged to each, {}{}\n",
+        "{rounds} rounds of the time charged to each{}, {}{}\n",
+        if release { " (release builds)" } else { "" },
         if pinned { format!("on one fast processor {}", os::PRIORITY) } else { "NOT kept to one processor, so it may mislead".to_string() },
         if idle { ", its core's other one kept idle" } else { "" },
     ));

@@ -381,7 +381,15 @@ Fewer checks repeated round after round, and a way for agents to tell a real gai
   than the runs move on their own; output must match
 - [x] Workers running out of stack at once report it once
 
-## M43: Proving ground, third round (v0.44)
+## M43: Release backend (v0.44)
+Rust and C++ are compiled by optimizers far stronger than Cranelift; this hands Anvil's lowered
+program to one, with nothing new to install.
+- [x] `anvil build --release`: the native backend's lowered program as C, for the C compiler that
+  comes with the linker (`cl /O2`, `cc -O2`); `--asm` shows the C
+- [x] Three backends agree: `golden check --release`, `fuzz --release`; `compare --release` times
+  release builds
+
+## M44: Proving ground, third round (v0.45)
 - [ ] Fresh agents on new kinds of program, against the same log format: do `let ... else`, `if`
   values and constants get used, and is the loop faster for them?
 - [ ] What round two asked for and did not get: describing a valid struct to the contract lint, so it

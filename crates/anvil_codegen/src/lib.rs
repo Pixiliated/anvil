@@ -21,6 +21,7 @@
 //! - Array elements are stored as 8-byte slots, one per scalar, so an element of type T is
 //!   `8 * flat_len(T)` bytes.
 
+mod c;
 pub mod ffi;
 pub mod link;
 mod unique;
@@ -51,6 +52,34 @@ pub fn build_exe(program: &Program, out: &Path, work_dir: &Path, asm: bool) -> R
     Ok(listing)
 }
 
+/// Like `build_exe`, through C and the platform's optimizing C compiler: slower to build, faster
+/// to run, the same program (see `c`).
+pub fn build_exe_release(program: &Program, out: &Path, work_dir: &Path) -> Result<(), String> {
+    let source = c_source(program)?;
+    std::fs::create_dir_all(work_dir).map_err(|e| format!("cannot create {}: {e}", work_dir.display()))?;
+    let dir = work_dir.join("release");
+    std::fs::create_dir_all(&dir).map_err(|e| format!("cannot create {}: {e}", dir.display()))?;
+    std::fs::write(dir.join("program.c"), &source).map_err(|e| format!("cannot write the C program: {e}"))?;
+    let obj = if cfg!(windows) { "program.obj" } else { "program.o" };
+    let (mut cmd, name) = link::c_compiler()?;
+    cmd.current_dir(&dir).args(c::RELEASE_FLAGS);
+    if cfg!(windows) {
+        cmd.args(["/c", "program.c", &format!("/Fo{obj}")]);
+    } else {
+        cmd.args(["-c", "program.c", "-o", obj]);
+    }
+    link::run_compiler(&mut cmd, &name, "the release build's C")?;
+    let object = std::fs::read(dir.join(obj)).map_err(|e| format!("cannot read the release object: {e}"))?;
+    let objects = link::compile_c(&program.c_files, work_dir)?;
+    link::link_exe(&object, &objects, out, work_dir, None)
+}
+
+/// The C the release backend writes for `program`.
+pub fn c_source(program: &Program) -> Result<String, String> {
+    let (source, _, _) = compile(program, false, Entry::Main, true)?;
+    String::from_utf8(source).map_err(|e| e.to_string())
+}
+
 /// An array the compiler could not prove has one owner where a loop writes to it.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Unproved {
@@ -68,7 +97,7 @@ pub struct Built {
 
 /// Like `build_exe`, also returning the executable's symbols and what the compiler could not prove.
 pub fn build_exe_with_symbols(program: &Program, out: &Path, work_dir: &Path) -> Result<Built, String> {
-    let (object, _, mut notes) = compile(program, false, Entry::Main)?;
+    let (object, _, mut notes) = compile(program, false, Entry::Main, false)?;
     let objects = link::compile_c(&program.c_files, work_dir)?;
     let map = work_dir.join("program.map");
     link::link_exe(&object, &objects, out, work_dir, Some(&map))?;
@@ -106,7 +135,7 @@ pub fn build_test_exe(program: &Program, out: &Path, work_dir: &Path) -> Result<
         });
         entries.push((i, p.funcs.len() - 1));
     }
-    let (object, _, _) = compile(&p, false, Entry::Tests(&entries))?;
+    let (object, _, _) = compile(&p, false, Entry::Tests(&entries), false)?;
     let objects = link::compile_c(&program.c_files, work_dir)?;
     link::link_exe(&object, &objects, out, work_dir, None)?;
     Ok(entries.iter().map(|(i, _)| *i).collect())
@@ -236,14 +265,17 @@ struct Backend {
     /// parallel_map's workers by (element, result) type, and those declared but not yet generated.
     workers: HashMap<String, ClFuncId>,
     pending_workers: Vec<(ClFuncId, Ty, Ty)>,
+    /// For a release build: what is written out as C instead of compiled here.
+    c: Option<c::CProgram>,
 }
 
 pub fn compile_object(program: &Program, asm: bool) -> Result<(Vec<u8>, String), String> {
-    let (object, listing, _) = compile(program, asm, Entry::Main)?;
+    let (object, listing, _) = compile(program, asm, Entry::Main, false)?;
     Ok((object, listing))
 }
 
-fn compile(program: &Program, asm: bool, entry: Entry) -> Result<(Vec<u8>, String, Vec<Unproved>), String> {
+/// The object file, or with `release` the C program's text, with a listing and what went unproved.
+fn compile(program: &Program, asm: bool, entry: Entry, release: bool) -> Result<(Vec<u8>, String, Vec<Unproved>), String> {
     let mut listing = String::new();
     let mut flags = settings::builder();
     let set = |f: &mut settings::Builder, k: &str, v: &str| f.set(k, v).map_err(|e| format!("cranelift flag {k}: {e}"));
@@ -274,6 +306,7 @@ fn compile(program: &Program, asm: bool, entry: Entry) -> Result<(Vec<u8>, Strin
         fn_objects: HashMap::new(),
         workers: HashMap::new(),
         pending_workers: Vec::new(),
+        c: release.then(c::CProgram::default),
     };
 
     for (name, params, rets) in RUNTIME {
@@ -330,6 +363,11 @@ fn compile(program: &Program, asm: bool, entry: Entry) -> Result<(Vec<u8>, Strin
         let mut ctx = Context::new();
         ctx.set_disasm(asm);
         ctx.func = bodies.remove(&id).unwrap();
+        // The C compiler inlines for itself, and better.
+        if let Some(c) = &mut be.c {
+            c.functions.push((ClFuncId::from_u32(id), ctx.func));
+            continue;
+        }
         ctx.inline(SmallCallees { bodies: &inlined }).map_err(|e| format!("codegen of `{}` failed: {e:?}", names[&id]))?;
         if ctx.func.dfg.num_insts() <= INLINE_LARGEST {
             inlined.insert(id, ctx.func.clone());
@@ -349,7 +387,7 @@ fn compile(program: &Program, asm: bool, entry: Entry) -> Result<(Vec<u8>, Strin
             let b = FunctionBuilder::new(&mut ctx.func, &mut fbc);
             Gen::new(&mut be, program, b, &[]).worker_function(&elem, &ret);
         }
-        be.module.define_function(id, &mut ctx).map_err(|e| {
+        be.define(id, &mut ctx).map_err(|e| {
             format!("codegen of parallel_map for {} -> {} failed: {e:?}", show(program, &elem), show(program, &ret))
         })?;
     }
@@ -371,8 +409,7 @@ fn compile(program: &Program, asm: bool, entry: Entry) -> Result<(Vec<u8>, Strin
             b.ins().return_(&results);
             b.finalize(be.module.isa().frontend_config());
         }
-        be.module
-            .define_function(id, &mut ctx)
+        be.define(id, &mut ctx)
             .map_err(|e| format!("codegen of the value of `{}` failed: {e:?}", program.funcs[fid].name))?;
     }
     // Helpers can ask for more (an array of arrays), so generate until none is pending.
@@ -384,8 +421,7 @@ fn compile(program: &Program, asm: bool, entry: Entry) -> Result<(Vec<u8>, Strin
             let b = FunctionBuilder::new(&mut ctx.func, &mut fbc);
             Gen::new(&mut be, program, b, &[]).eq_function(&ty);
         }
-        be.module
-            .define_function(id, &mut ctx)
+        be.define(id, &mut ctx)
             .map_err(|e| format!("codegen of == for {} failed: {e:?}", show(program, &ty)))?;
     }
     match entry {
@@ -397,6 +433,9 @@ fn compile(program: &Program, asm: bool, entry: Entry) -> Result<(Vec<u8>, Strin
         Entry::Tests(tests) => be.c_test_main(tests, &mut fbc)?,
     }
     let notes = std::mem::take(&mut be.notes);
+    if let Some(c) = be.c.take() {
+        return Ok((c::emit(be.module.declarations(), &c)?.into_bytes(), listing, notes));
+    }
     let product = be.module.finish();
     Ok((product.emit().map_err(|e| e.to_string())?, listing, notes))
 }
@@ -543,6 +582,22 @@ fn show(program: &Program, ty: &Ty) -> String {
 }
 
 impl Backend {
+    /// Compiles a finished function, or keeps it for the C of a release build.
+    fn define(&mut self, id: ClFuncId, ctx: &mut Context) -> cranelift_module::ModuleResult<()> {
+        if let Some(c) = &mut self.c {
+            c.functions.push((id, ctx.func.clone()));
+            return Ok(());
+        }
+        self.module.define_function(id, ctx)
+    }
+
+    fn define_data(&mut self, id: DataId, desc: &DataDescription) {
+        self.module.define_data(id, desc).expect("define data");
+        if let Some(c) = &mut self.c {
+            c.data.push((id, desc.clone()));
+        }
+    }
+
     fn signature<'t>(&self, program: &Program, params: impl Iterator<Item = &'t Ty>, ret: &Ty) -> Signature {
         let mut sig = self.module.make_signature();
         for t in params {
@@ -598,7 +653,7 @@ impl Backend {
         desc.define(bytes.into_boxed_slice());
         let f = self.module.declare_func_in_data(code, &mut desc);
         desc.write_function_addr(FN_CODE as u32, f);
-        self.module.define_data(id, &desc).expect("define function object");
+        self.define_data(id, &desc);
         self.fn_objects.insert(code, id);
         id
     }
@@ -619,7 +674,7 @@ impl Backend {
         let mut desc = DataDescription::new();
         desc.set_align(8);
         desc.define(bytes.into_boxed_slice());
-        self.module.define_data(id, &desc).expect("define string");
+        self.define_data(id, &desc);
         self.strings.insert(s.to_string(), id);
         id
     }
@@ -667,7 +722,7 @@ impl Backend {
         let mut desc = DataDescription::new();
         desc.set_align(8);
         desc.define(bytes.into_boxed_slice());
-        self.module.define_data(id, &desc).expect("define type info");
+        self.define_data(id, &desc);
         self.type_infos.insert(key, id);
         id
     }
@@ -712,7 +767,7 @@ impl Backend {
             b.ins().return_(&[]);
             b.finalize(self.module.isa().frontend_config());
         }
-        self.module.define_function(id, &mut ctx).map_err(|e| format!("codegen of the test main failed: {e:?}"))
+        self.define(id, &mut ctx).map_err(|e| format!("codegen of the test main failed: {e:?}"))
     }
 
     /// The program's entry: calls anv_main, validates the exit code, flushes and exits. The C
@@ -744,7 +799,7 @@ impl Backend {
             b.ins().return_(&[]);
             b.finalize(self.module.isa().frontend_config());
         }
-        self.module.define_function(id, &mut ctx).map_err(|e| format!("codegen of main failed: {e:?}"))
+        self.define(id, &mut ctx).map_err(|e| format!("codegen of main failed: {e:?}"))
     }
 }
 

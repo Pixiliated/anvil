@@ -85,8 +85,10 @@ pub struct BuildArgs {
     pub file: String,
     /// Executable to write (default: the file with .exe).
     pub out: Option<String>,
-    /// Include each function's machine code in the result.
+    /// Include each function's machine code in the result (with release, the C).
     pub asm: Option<bool>,
+    /// Build through C and the platform's optimizing C compiler: slower to build, faster to run.
+    pub release: Option<bool>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -166,6 +168,8 @@ pub struct FuzzArgs {
     pub seed: Option<u64>,
     /// Programs to try (default 10); each is built natively, so each takes a second or two.
     pub count: Option<u64>,
+    /// Also build each with the release backend (through C), which takes about a second more.
+    pub release: Option<bool>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -249,6 +253,8 @@ pub struct CompareArgs {
     pub rounds: Option<u64>,
     /// Stop a run that takes longer than this many seconds, as an error (default 600).
     pub limit: Option<u64>,
+    /// Compare release builds (through C), as a program ships.
+    pub release: Option<bool>,
     /// A file whose bytes are main's stdin (default: what a's golden input says).
     pub input: Option<String>,
     /// main's command-line arguments (default: what a's golden input says).
@@ -287,6 +293,8 @@ pub struct GoldenCheckArgs {
     pub max_steps: Option<u64>,
     /// Also build and run each program natively.
     pub native: Option<bool>,
+    /// Also build and run each program with the release backend (through C), as well as natively.
+    pub release: Option<bool>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -395,7 +403,10 @@ impl AnvilServer {
     #[tool(description = "Compile main to a native executable (Windows x64) and return its path, \
         and with asm the machine code of every function.")]
     async fn build(&self, Parameters(a): Parameters<BuildArgs>) -> Result<CallToolResult, ErrorData> {
-        self.op(move |root| anvil_ops::build(root, &a.file, a.out.as_deref(), a.asm.unwrap_or(false))).await
+        self.op(move |root| {
+            anvil_ops::build(root, &a.file, a.out.as_deref(), a.asm.unwrap_or(false), a.release.unwrap_or(false))
+        })
+        .await
     }
 
     #[tool(description = "Run every test block. Any failing test is a tool error; each result has \
@@ -411,7 +422,7 @@ impl AnvilServer {
         run each in the interpreter and natively with the leak check. Any difference in output, panic \
         or exit code is a backend bug; failing programs are saved in out/fuzz/<seed>.anv.")]
     async fn fuzz(&self, Parameters(a): Parameters<FuzzArgs>) -> Result<CallToolResult, ErrorData> {
-        self.op(move |root| anvil_ops::fuzz(root, a.seed, a.count)).await
+        self.op(move |root| anvil_ops::fuzz(root, a.seed, a.count, a.release.unwrap_or(false))).await
     }
 
     #[tool(description = "Put a file (or, without file, every project file) in canonical layout, \
@@ -579,7 +590,7 @@ impl AnvilServer {
     async fn compare(&self, Parameters(a): Parameters<CompareArgs>) -> Result<CallToolResult, ErrorData> {
         self.op(move |root| {
             let input = program_input(a.args, a.input);
-            anvil_ops::compare(root, &a.a, &a.b, a.rounds, a.limit, &input)
+            anvil_ops::compare(root, &a.a, &a.b, a.rounds, a.limit, a.release.unwrap_or(false), &input)
         })
         .await
     }
@@ -613,7 +624,13 @@ impl AnvilServer {
         difference is a tool error naming the first differing line.")]
     async fn golden_check(&self, Parameters(a): Parameters<GoldenCheckArgs>) -> Result<CallToolResult, ErrorData> {
         self.op(move |root| {
-            anvil_ops::golden_check(root, a.file.as_deref(), a.native.unwrap_or(false), Some(steps(a.max_steps)))
+            anvil_ops::golden_check(
+                root,
+                a.file.as_deref(),
+                a.native.unwrap_or(false),
+                a.release.unwrap_or(false),
+                Some(steps(a.max_steps)),
+            )
         })
         .await
     }
