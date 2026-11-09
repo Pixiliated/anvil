@@ -1086,6 +1086,14 @@ int64_t anvil_str_find_from(const AnvStr *s, const AnvStr *t, int64_t at, const 
     return find_at(s, t, at);
 }
 
+void anvil_panic_word_at(int64_t at, int64_t len, const AnvStr *site) {
+    char buf[512];
+    int n = snprintf(buf, sizeof buf, "word at %lld out of bounds for length %lld at %.*s", (long long)at, (long long)len,
+                     (int)site->len, site->bytes);
+    if (n >= (int)sizeof buf) n = (int)sizeof buf - 1;
+    panic_bytes(buf, n);
+}
+
 int64_t anvil_str_starts(const AnvStr *s, const AnvStr *t) {
     return t->len <= s->len && memcmp(s->bytes, t->bytes, (size_t)t->len) == 0;
 }

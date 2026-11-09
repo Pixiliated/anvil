@@ -440,6 +440,11 @@ pub enum Builtin {
     StrFindFrom {
         site: String,
     },
+    /// `b.word_at(i)`: the eight bytes from `i` as a little-endian i64; panics naming `site` when
+    /// they are not all there.
+    BytesWordAt {
+        site: String,
+    },
     /// str methods; args are the receiver and the other str. Find gives an Option of the byte offset.
     StrContains,
     StrFind,
@@ -895,6 +900,9 @@ pub fn slice_char_message(from: i64, to: i64, site: &str) -> String {
 }
 pub fn find_from_message(at: i64, len: i64, site: &str) -> String {
     format!("find from {at} out of bounds for length {len} at {site}")
+}
+pub fn word_at_message(at: i64, len: i64, site: &str) -> String {
+    format!("word at {at} out of bounds for length {len} at {site}")
 }
 pub fn split_message(site: &str) -> String {
     format!("split with an empty separator at {site}")

@@ -1,0 +1,6 @@
+// Fewer than eight bytes, so no place is good.
+
+fn main() uses io {
+    let b: bytes = "abc".to_bytes();
+    print(b.word_at(0));
+}

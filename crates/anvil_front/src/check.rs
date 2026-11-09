@@ -90,6 +90,7 @@ pub const METHODS: &[(&str, &str, &str)] = &[
     ("str", "ends_with", "ends_with(t: str) -> bool"),
     ("str", "find", "find(t: str) -> Option[i64]"),
     ("str", "find_from", "find_from(t: str, at: i64) -> Option[i64]"),
+    ("bytes", "word_at", "word_at(at: i64) -> i64"),
     ("str", "split", "split(sep: str) -> [str]"),
     ("str", "trim", "trim() -> str"),
     ("str", "parse_i64", "parse_i64() -> Option[i64]"),
@@ -4766,7 +4767,7 @@ impl<'a> Checker<'a> {
             | "to_array" | "to_upper" | "to_lower" | "chars" | "sorted" | "reversed" | "bit_len" => Some(0),
             "push" | "remove" | "has" | "get" | "contains" | "find" | "starts_with" | "ends_with" | "split" | "xor"
             | "unsigned_shr" | "wrapping_add" | "wrapping_sub" | "wrapping_mul" | "join" | "fixed"
-            | "parallel_map" => Some(1),
+            | "parallel_map" | "word_at" => Some(1),
             "replace" | "find_from" => Some(2),
             _ => None,
         };
@@ -4878,6 +4879,7 @@ impl<'a> Checker<'a> {
             ("to_str", Ty::Bytes) => (Builtin::BytesToStr, self.option_of(Ty::Str)),
             ("hex", Ty::Bytes) => (Builtin::BytesHex, Ty::Str),
             ("to_array", Ty::Bytes) => (Builtin::BytesToArray, Ty::Array(Box::new(Ty::I64))),
+            ("word_at", Ty::Bytes) => (Builtin::BytesWordAt { site }, Ty::I64),
             ("contains", Ty::Str) => (Builtin::StrContains, Ty::Bool),
             ("starts_with", Ty::Str) => (Builtin::StrStartsWith, Ty::Bool),
             ("ends_with", Ty::Str) => (Builtin::StrEndsWith, Ty::Bool),
@@ -4906,7 +4908,7 @@ impl<'a> Checker<'a> {
                          to_bytes, replace, to_upper, to_lower and chars"
                     }
                     Ty::I64 => "i64 has xor, unsigned_shr, wrapping_add, wrapping_sub and wrapping_mul",
-                    Ty::Bytes => "bytes have len, to_str, hex and to_array",
+                    Ty::Bytes => "bytes have len, to_str, hex, to_array and word_at",
                     Ty::Map(..) => "maps have len, has, get, set, remove, keys and values",
                     _ => "only arrays, str and maps have methods; write a function that takes the value",
                 };
@@ -4940,7 +4942,7 @@ impl<'a> Checker<'a> {
         }
         let arg_ty = match &x.ty {
             Ty::Map(k, _) => (**k).clone(),
-            Ty::I64 | Ty::F64(_) => Ty::I64,
+            Ty::I64 | Ty::F64(_) | Ty::Bytes => Ty::I64,
             _ => Ty::Str,
         };
         let mut vals = vec![x];

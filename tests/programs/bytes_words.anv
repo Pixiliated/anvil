@@ -1,0 +1,42 @@
+// Reading eight bytes at once, at the edges of what it may reach.
+
+fn ones(n: i64) -> bytes {
+    var out: [i64] = [];
+    for _i in 0..n {
+        out.push(255);
+    }
+    return bytes_of(out);
+}
+
+fn words() uses io {
+    let b: bytes = "abcdefghij".to_bytes();
+    print(b.word_at(0));
+    print(b.word_at(2).unsigned_shr(56));
+    print(b.word_at(1) & 255);
+    print(bytes_of([0, 0, 0, 0, 0, 0, 0, 128]).word_at(0));
+    print(ones(8).word_at(0));
+    print(bytes_of([1, 2, 3, 4, 5, 6, 7, 8]).word_at(0));
+    // Every offset, so none of them can be taken for one a word is aligned to.
+    var sum: i64 = 0;
+    for i in 0..3 {
+        sum = sum + (b.word_at(i) & 255);
+    }
+    print(sum);
+}
+
+fn grown_while_read() uses io {
+    var g: bytes = "abcdefgh".to_bytes();
+    for r in 0..3 {
+        print(g.word_at(g.len() - 8) & 255);
+        g = g + "12345678".to_bytes();
+        if r == 1 {
+            g = "zyxwvuts".to_bytes();
+        }
+    }
+    print(g.len());
+}
+
+fn main() uses io {
+    words();
+    grown_while_read();
+}

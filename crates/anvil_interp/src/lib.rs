@@ -2182,6 +2182,15 @@ impl<'p, 'h> Interp<'p, 'h> {
                 let Value::Bytes(bs) = x else { unreachable!() };
                 Value::Str(hex_text(&bs).into())
             }
+            Builtin::BytesWordAt { site } => {
+                let Value::Bytes(bs) = x else { unreachable!() };
+                let at = self.int(&args[1], frame)?;
+                if at < 0 || at > bs.len() as i64 - 8 {
+                    return panic(word_at_message(at, bs.len() as i64, site));
+                }
+                let start = at as usize;
+                Value::I64(i64::from_le_bytes(bs[start..start + 8].try_into().unwrap()))
+            }
             Builtin::BytesToArray => {
                 let Value::Bytes(bs) = x else { unreachable!() };
                 Value::Array(Rc::new(bs.iter().map(|b| Value::I64(*b as i64)).collect()))

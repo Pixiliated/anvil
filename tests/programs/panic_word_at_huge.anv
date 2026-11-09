@@ -1,0 +1,7 @@
+// Far enough that adding eight to it would wrap around.
+
+fn main() uses io {
+    let b: bytes = "abcdefghij".to_bytes();
+    let at: i64 = 9223372036854775807;
+    print(b.word_at(at));
+}

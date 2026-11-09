@@ -1,0 +1,4 @@
+exit: 101
+panic: word at 3 out of bounds for length 10 at tests/programs/panic_word_at_short.anv:6:11
+---
+99

@@ -57,6 +57,7 @@ ANV_INLINE uint64_t anv_clz(uint64_t x) { return x ? (uint64_t)__builtin_clzll(x
  * the remainder is 0. C leaves both undefined. */
 ANV_INLINE uint64_t anv_sdiv(uint64_t a, uint64_t b) { return (int64_t)b == -1 ? 0 - a : (uint64_t)((int64_t)a / (int64_t)b); }
 ANV_INLINE uint64_t anv_srem(uint64_t a, uint64_t b) { return (int64_t)b == -1 ? 0 : (uint64_t)((int64_t)a % (int64_t)b); }
+ANV_INLINE uint64_t anv_read64(uint64_t at) { uint64_t v; memcpy(&v, (const void *)(uintptr_t)at, 8); return v; }
 ANV_INLINE double anv_f64(uint64_t bits) { double d; memcpy(&d, &bits, 8); return d; }
 ANV_INLINE uint64_t anv_bits(double d) { uint64_t b; memcpy(&b, &d, 8); return b; }
 "#;
@@ -461,10 +462,11 @@ fn instruction(w: &mut Writer, inst: cranelift_codegen::ir::Inst) -> Result<(), 
             };
             w.line(format!("{} = {e};", res(0)));
         }
-        InstructionData::Load { opcode, arg, offset, .. } => {
+        InstructionData::Load { opcode, arg, flags, offset } => {
             let a = w.addr(arg, offset.into());
             let to = rty(0);
             let e = match opcode {
+                Opcode::Load if !w.f.dfg.mem_flags[flags].aligned() && to == types::I64 => format!("anv_read64({a})"),
                 Opcode::Load => format!("*({} *){a}", c_type(to)?),
                 Opcode::Uload8 => format!("({})*(uint8_t *){a}", c_type(to)?),
                 Opcode::Sload8 => format!("({})(int64_t)*(int8_t *){a}", c_type(to)?),

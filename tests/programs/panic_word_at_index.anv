@@ -1,0 +1,12 @@
+// A good place to read a word from is small, but not so small that any product of it fits.
+
+fn big(b: bytes, k: i64) -> i64 {
+    let w: i64 = b.word_at(k);
+    return (w & 1) + k * 4611686018427387904;
+}
+
+fn main() uses io {
+    let b: bytes = "abcdefghij".to_bytes();
+    print(big(b: b, k: 1));
+    print(big(b: b, k: 2));
+}

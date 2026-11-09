@@ -799,3 +799,11 @@ Short records of choices that are not obvious from the code. Newest last.
   and with every bounds check gone 1.08x, so no further work on checks can be worth much more than that.
 - **The comparison with Rust is timed in turn on one core.** Runs left to the scheduler moved the same Rust
   binary from 0.14 s to 0.23 s, which said v0.46 was 1.11x Rust when it was 1.25x.
+- **The gap to Rust on word counting is the program's design, not the compiler.** Ported line for line to
+  Rust, with the same slots and hash, the delivered word counter runs in 0.94 s against Anvil's 1.03 s, and
+  the tuned Rust in 0.53 s. The same design in Anvil takes 0.70 s, of which `word_at` accounts for 1.09x and
+  the design for 1.39x. So the specification now says what the design is.
+- **Compiling the same C with gcc on Linux gives the same result as `cl`** (1.25x Rust, against 1.23x), and
+  `-O3` adds nothing, so a better C compiler would not close this gap.
+- **Not kept, measured on one core:** a `same_at` comparing byte ranges (the ledger using it was no faster:
+  1.64x Rust against 1.56x), aligning big arrays to cache lines (1.00x).

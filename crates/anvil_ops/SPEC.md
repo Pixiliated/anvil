@@ -590,8 +590,16 @@ UTF-8.
 | `b.to_str()` | `Option[str]`: `Some` when the bytes are UTF-8 |
 | `b.hex()` | two lowercase hex digits per byte: `"00ff"` |
 | `b.to_array()` | each byte as an `i64` |
+| `b.word_at(i)` | the eight bytes from `i` as a little-endian `i64`; panics unless all eight are there |
 | `read_bytes(path)` | `Result[bytes, FileError]`: the whole file, any bytes; needs `uses fs` |
 | `write_bytes(path: p, data: d)` | like `write_file`; needs `uses fs` |
+
+How a program holds its data can decide its speed more than the compiler does. A word counter written
+the same way in Anvil and in Rust ran within about 10% of each other, while changing its design took the
+Anvil one from 1.06 s to 0.70 s. Scan with `word_at` rather than a byte at a time (add spare bytes at the
+end so a read near it fits). Keep each table slot to two numbers, packing fields into one `i64`
+with shifts and masks. Copy what must be compared into one flat array rather than reaching back into
+the input. Pick the top few by walking the table once rather than sorting everything.
 
 Bytes cannot be changed in place (E0310) or printed: print `b.hex()`. Traces show them as
 `bytes_of([104, 105])`, and property tests generate them.

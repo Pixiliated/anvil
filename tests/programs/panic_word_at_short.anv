@@ -1,0 +1,7 @@
+// Seven bytes are left, and a word takes eight.
+
+fn main() uses io {
+    let b: bytes = "abcdefghij".to_bytes();
+    print(b.word_at(2) & 255);
+    print(b.word_at(3) & 255);
+}

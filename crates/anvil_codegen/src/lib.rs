@@ -180,6 +180,7 @@ const RUNTIME: &[(&str, &[Type], &[Type])] = &[
     ("anvil_panic_at", &[I, I], &[]),
     ("anvil_panic_sides", &[I, I, I, I], &[]),
     ("anvil_str_find_from", &[I, I, I, I], &[I]),
+    ("anvil_panic_word_at", &[I, I, I], &[]),
     ("anvil_read_stdin", &[], &[I]),
     ("anvil_print_i64", &[I, I], &[]),
     ("anvil_print_bool", &[I, I], &[]),
@@ -3190,6 +3191,35 @@ impl<'a, 'b> Gen<'a, 'b> {
                     _ => self.b.ins().imul(a, c),
                 }];
             }
+            Builtin::BytesWordAt { site } => {
+                let (b, owned) = self.borrow(&bargs[0]);
+                let at = self.expr(&bargs[1])[0];
+                let len = self.len_of(b[0], unique::key_of(self.program, &bargs[0]));
+                let room = self.b.ins().iadd_imm_s(len, -8);
+                let short = self.b.ins().icmp_imm_s(IntCC::SignedLessThan, room, 0);
+                let past = self.b.ins().icmp(IntCC::UnsignedGreaterThan, at, room);
+                let bad = self.b.ins().bor(short, past);
+                let (panic, fine) = (self.b.create_block(), self.b.create_block());
+                self.b.set_cold_block(panic);
+                self.b.ins().brif(bad, panic, &[], fine, &[]);
+                self.b.switch_to_block(panic);
+                self.b.seal_block(panic);
+                let where_ = self.str_obj(site);
+                self.call_rt("anvil_panic_word_at", &[at, len, where_]);
+                self.b.ins().trap(TrapCode::user(1).unwrap());
+                self.b.switch_to_block(fine);
+                self.b.seal_block(fine);
+                if self.branching == 0 {
+                    self.narrow_local(&bargs[1], (0, range::LONGEST));
+                }
+                let addr = self.b.ins().iadd(b[0], at);
+                // Not on an eight-byte boundary, which a plain load would promise.
+                let word = self.b.ins().load(I, MemFlagsData::new().with_notrap(), addr, STR_BYTES);
+                if owned {
+                    self.release_one(b[0]);
+                }
+                return vec![word];
+            }
             Builtin::StrFindFrom { site } => {
                 let s = self.expr(&bargs[0])[0];
                 let t = self.expr(&bargs[1])[0];
@@ -3396,6 +3426,7 @@ impl<'a, 'b> Gen<'a, 'b> {
             | Builtin::BitLen
             | Builtin::AssertCmp { .. }
             | Builtin::StrFindFrom { .. }
+            | Builtin::BytesWordAt { .. }
             | Builtin::BytesOf { .. }
             | Builtin::ReadBytes
             | Builtin::WriteBytes

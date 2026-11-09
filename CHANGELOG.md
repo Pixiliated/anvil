@@ -3,6 +3,15 @@
 Each version is one roadmap milestone (docs/ROADMAP.md); docs/DECISIONS.md says why things are
 the way they are.
 
+## 0.48.0
+- `b.word_at(i)` reads eight bytes as a little-endian number; it panics unless all eight are there.
+- The specification says what makes programs fast, measured on a word counter: scan by the word, keep table
+  slots to two numbers, copy what must be compared into one flat array, and pick the top few without sorting.
+  Rewritten that way the word counter takes 1.39x the time of tuned Rust, against 2.14x as delivered.
+- Programs that do not use `word_at` run as they did: delivered programs stay at 1.24x Rust's time and are
+  1.23x C++'s, timed in turn on one core. Fannkuch, binary trees and the route planner are faster than both,
+  and n-body is faster than C++.
+
 ## 0.47.0
 - A release build works out what each integer can be, from its assignments, comparisons just passed, indices
   just checked, lengths, bytes, masks and remainders, and leaves out overflow checks that could never fail.

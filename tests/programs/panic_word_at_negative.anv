@@ -1,0 +1,5 @@
+fn main() uses io {
+    let b: bytes = "abcdefghij".to_bytes();
+    let at: i64 = 0 - 1;
+    print(b.word_at(at));
+}

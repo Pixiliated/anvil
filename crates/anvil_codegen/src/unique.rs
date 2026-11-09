@@ -382,6 +382,11 @@ pub(crate) fn held_arrays(program: &Program, types: &[Ty], f: &Func) -> BTreeMap
             ExprKind::MapSet { local, .. } | ExprKind::MapRemove { local, .. } => {
                 found.grown.insert(*local);
             }
+            ExprKind::Builtin(Builtin::BytesWordAt { .. }, args) if looping => {
+                if let Some(key) = key_of(program, &args[0]) {
+                    found.wanted.insert(key, false);
+                }
+            }
             ExprKind::Index { base, .. } if looping => {
                 if let (Some(key), Ty::Array(_) | Ty::Bytes) = (key_of(program, base), &base.ty) {
                     found.wanted.insert(key, base.ty != Ty::Bytes);

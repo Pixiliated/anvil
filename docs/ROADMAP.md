@@ -409,7 +409,12 @@ A release build works out what each integer can be, and leaves out overflow chec
 - [x] From assignments, comparisons just passed, indices just checked, lengths, bytes, masks and remainders
 - [x] `--asm --release` says how many sums were proved to fit
 
-## M47: Proving ground, third round (v0.48)
+## M47: Bytes by the word (v0.48)
+What the fastest programs in other languages do with bytes, written so an agent can find it.
+- [x] `b.word_at(i)` reads eight bytes as one number
+- [x] The specification says what actually makes a program fast
+
+## M48: Proving ground, third round (v0.49)
 - [ ] Fresh agents on new kinds of program, against the same log format: do `let ... else`, `if`
   values and constants get used, and is the loop faster for them?
 - [ ] What round two asked for and did not get: describing a valid struct to the contract lint, so it
