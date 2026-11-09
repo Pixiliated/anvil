@@ -1,0 +1,13 @@
+// Above the lowest number by one, and two taken away.
+
+fn down(x: i64) -> i64 {
+    if x > -9223372036854775807 - 1 {
+        return x - 2;
+    }
+    return 0;
+}
+
+fn main() uses io {
+    print(down(5));
+    print(down(-9223372036854775807));
+}

@@ -42,6 +42,8 @@ pub(crate) struct Known {
     pub lengths: HashMap<LocalId, Key>,
     /// Counters of `for` loops from a number not below 0, which nothing else changes.
     pub counters: HashSet<LocalId>,
+    /// What locals are known to be here, beyond what any assignment to them gives (see `range`).
+    pub ranges: HashMap<LocalId, crate::range::Range>,
 }
 
 impl Known {
@@ -52,6 +54,7 @@ impl Known {
         self.in_bounds.retain(|((a, _), i)| !cut(a) && !gone(i));
         self.lengths.retain(|n, (a, _)| !gone(n) && !cut(a));
         self.counters.retain(|i| !gone(i));
+        self.ranges.retain(|i, _| !gone(i));
     }
 
     /// Keeps what also holds in `other`: where two paths join.
@@ -60,6 +63,10 @@ impl Known {
         self.in_bounds.retain(|k| other.in_bounds.contains(k));
         self.lengths.retain(|n, a| other.lengths.get(n) == Some(a));
         self.counters.retain(|i| other.counters.contains(i));
+        self.ranges.retain(|i, _| other.ranges.contains_key(i));
+        for (i, r) in self.ranges.iter_mut() {
+            *r = crate::range::either(*r, other.ranges[i]);
+        }
     }
 }
 

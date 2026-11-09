@@ -1,0 +1,4 @@
+exit: 101
+panic: integer overflow in `+` at tests/programs/panic_range_step.anv:8:13
+---
+at 1

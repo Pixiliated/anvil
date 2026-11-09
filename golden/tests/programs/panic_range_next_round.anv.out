@@ -1,0 +1,6 @@
+exit: 101
+panic: integer overflow in `+` at tests/programs/panic_range_next_round.anv:9:28
+---
+1
+round 0: 1
+1

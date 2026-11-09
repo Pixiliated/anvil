@@ -1,0 +1,6 @@
+exit: 101
+panic: integer overflow in `+` at tests/programs/panic_range_branch.anv:9:12
+---
+2
+2
+looked

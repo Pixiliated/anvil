@@ -1,0 +1,4 @@
+exit: 101
+panic: integer overflow in `-` at tests/programs/panic_range_remainder.anv:4:12
+---
+-9223372036854775791

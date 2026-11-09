@@ -1,0 +1,11 @@
+// Below the limit by one, and a step of two: what the guard says is not enough for this sum.
+
+fn main() uses io {
+    let limit: i64 = 9223372036854775807;
+    var i: i64 = limit - 1;
+    while i < limit {
+        print("at {limit - i}");
+        i = i + 2;
+    }
+    print("never");
+}

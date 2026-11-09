@@ -791,3 +791,11 @@ Short records of choices that are not obvious from the code. Newest last.
   where the map's cache misses are the cost, so it came out again.
 - **`saxpy` is 0.86x and stays.** Timing its two phases with two clock calls added shows no difference at
   all between v0.45 and v0.46 (462 ms and 455 ms), so it is where that tight loop lands in memory.
+- **Ranges are worked out, not tested at run time as clearing is.** A sum is left unchecked only where what
+  its operands can be shows it fits. Every assignment to a local counts, and a comparison or a bounds check
+  narrows that only until the local changes, or across every round of a loop that changes it.
+- **What was tried first and not kept, measured on one core:** profile-guided C (0.99x, trained on a tenth of
+  the data), `/arch:AVX2` (1.01x), `/Ob3` (1.00x). With every overflow check gone programs run 1.08x faster
+  and with every bounds check gone 1.08x, so no further work on checks can be worth much more than that.
+- **The comparison with Rust is timed in turn on one core.** Runs left to the scheduler moved the same Rust
+  binary from 0.14 s to 0.23 s, which said v0.46 was 1.11x Rust when it was 1.25x.

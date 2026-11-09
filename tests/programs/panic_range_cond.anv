@@ -1,0 +1,11 @@
+// One arm is small and the other is not.
+
+fn pick(big: bool) -> i64 {
+    let x: i64 = if big { 1 } else { 9223372036854775807 };
+    return x + 1;
+}
+
+fn main() uses io {
+    print(pick(true));
+    print(pick(false));
+}

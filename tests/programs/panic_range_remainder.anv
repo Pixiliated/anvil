@@ -1,0 +1,10 @@
+// A remainder takes the sign of what was divided.
+
+fn low(x: i64) -> i64 {
+    return (x % 10) - 9223372036854775800;
+}
+
+fn main() uses io {
+    print(low(9));
+    print(low(-9));
+}

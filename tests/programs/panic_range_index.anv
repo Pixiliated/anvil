@@ -1,0 +1,11 @@
+// A good index is small, but not so small that any product of it fits.
+
+fn big(a: [i64], k: i64) -> i64 {
+    let v: i64 = a[k];
+    return v + k * 4611686018427387904;
+}
+
+fn main() uses io {
+    print(big(a: [1, 2, 3], k: 1));
+    print(big(a: [1, 2, 3], k: 2));
+}

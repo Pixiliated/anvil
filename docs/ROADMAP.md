@@ -404,7 +404,12 @@ A release build stops rereading what cannot have changed, and the runtime stops 
 - [x] A program writing to NUL is buffered as it is writing to a file
 - [x] `anvil hot --release` samples what ships
 
-## M46: Proving ground, third round (v0.47)
+## M46: Sums that cannot overflow (v0.47)
+A release build works out what each integer can be, and leaves out overflow checks that could never fail.
+- [x] From assignments, comparisons just passed, indices just checked, lengths, bytes, masks and remainders
+- [x] `--asm --release` says how many sums were proved to fit
+
+## M47: Proving ground, third round (v0.48)
 - [ ] Fresh agents on new kinds of program, against the same log format: do `let ... else`, `if`
   values and constants get used, and is the loop faster for them?
 - [ ] What round two asked for and did not get: describing a valid struct to the contract lint, so it

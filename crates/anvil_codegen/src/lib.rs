@@ -24,6 +24,7 @@
 mod c;
 pub mod ffi;
 pub mod link;
+mod range;
 mod unique;
 
 use anvil_front::ir::*;
@@ -843,6 +844,8 @@ struct Gen<'a, 'b> {
     /// and free of overflow, and each array's storage, which the loop cannot move.
     cleared: HashSet<*const Expr>,
     storage: HashMap<unique::Key, Variable>,
+    /// What a release build knows each `i64` local can be anywhere (see range::of_locals).
+    ranges: HashMap<LocalId, range::Range>,
     /// Where a release build keeps the length and storage of arrays (see unique::held_arrays).
     held: HashMap<unique::Key, (Variable, Option<Variable>)>,
     /// The function being generated, and its locals' names, for `Unproved`.
@@ -895,6 +898,7 @@ impl<'a, 'b> Gen<'a, 'b> {
             function: String::new(),
             cleared: HashSet::new(),
             storage: HashMap::new(),
+            ranges: HashMap::new(),
             held: HashMap::new(),
             local_names: locals.iter().map(|l| l.name.clone()).collect(),
             known: unique::Known::default(),
@@ -1107,6 +1111,7 @@ impl<'a, 'b> Gen<'a, 'b> {
         }
         if self.be.c.is_some() {
             self.hold_arrays(f);
+            self.ranges = range::of_locals(&self.local_types, f);
         }
         for c in &f.requires {
             let ok = self.expr(&c.expr)[0];
@@ -1148,6 +1153,70 @@ impl<'a, 'b> Gen<'a, 'b> {
         self.b.seal_all_blocks();
         let config = self.be.module.isa().frontend_config();
         self.b.finalize(config);
+    }
+
+    /// What `e` can be at this point of the function.
+    fn range(&self, e: &Expr) -> range::Range {
+        range::eval(e, &|l| {
+            let anywhere = self.ranges.get(&l).copied().unwrap_or(range::ANY);
+            self.known.ranges.get(&l).map_or(anywhere, |here| range::narrow(anywhere, *here))
+        })
+    }
+
+    /// Whether `l op r` is sure to fit, in a release build, so that it needs no check.
+    fn surely_fits(&self, op: IOp, l: &Expr, r: &Expr) -> bool {
+        self.be.c.is_some() && range::fits(range::arith(op, self.range(l), self.range(r)))
+    }
+
+    /// Records that `e`, if it is a local, lies within `r` from here on.
+    fn narrow_local(&mut self, e: &Expr, r: range::Range) {
+        if let ExprKind::Local(l) = e.kind {
+            if self.local_types[l] == Ty::I64 {
+                let was = self.known.ranges.get(&l).copied().unwrap_or(range::ANY);
+                self.known.ranges.insert(l, range::narrow(was, r));
+            }
+        }
+    }
+
+    /// What `c` having just come out true says about the locals it compares, in a release build.
+    fn learn(&mut self, c: &Expr) {
+        if self.be.c.is_none() {
+            return;
+        }
+        match &c.kind {
+            ExprKind::And(a, b) => {
+                self.learn(a);
+                self.learn(b);
+            }
+            ExprKind::Cmp(op, l, r) if l.ty == Ty::I64 => {
+                let (a, b) = (self.range(l), self.range(r));
+                let (lowest, highest) = (range::ANY.0, range::ANY.1);
+                match op {
+                    CmpOp::Lt => {
+                        self.narrow_local(l, (lowest, b.1 - 1));
+                        self.narrow_local(r, (a.0 + 1, highest));
+                    }
+                    CmpOp::Le => {
+                        self.narrow_local(l, (lowest, b.1));
+                        self.narrow_local(r, (a.0, highest));
+                    }
+                    CmpOp::Gt => {
+                        self.narrow_local(l, (b.0 + 1, highest));
+                        self.narrow_local(r, (lowest, a.1 - 1));
+                    }
+                    CmpOp::Ge => {
+                        self.narrow_local(l, (b.0, highest));
+                        self.narrow_local(r, (lowest, a.1));
+                    }
+                    CmpOp::Eq => {
+                        self.narrow_local(l, b);
+                        self.narrow_local(r, a);
+                    }
+                    CmpOp::Ne => {}
+                }
+            }
+            _ => {}
+        }
     }
 
     /// Gives each array the function can keep the length and storage of its places, filled for
@@ -1274,6 +1343,10 @@ impl<'a, 'b> Gen<'a, 'b> {
         if let (Some(f), 0) = (fact, self.branching) {
             self.known.in_bounds.insert(f);
         }
+        if let (Some(i), 0, true) = (named, self.branching, self.be.c.is_some()) {
+            let was = self.known.ranges.get(&i).copied().unwrap_or(range::ANY);
+            self.known.ranges.insert(i, range::narrow(was, (0, range::LONGEST)));
+        }
     }
 
     fn stmt(&mut self, s: &Stmt) {
@@ -1281,7 +1354,13 @@ impl<'a, 'b> Gen<'a, 'b> {
             return;
         }
         let changes = unique::changes(self.program, s);
+        // `i = i + 1` reads `i` before changing it, so what is known of it holds for that read. A loop
+        // is different: a later round reads what an earlier one left.
+        let ranges = (!matches!(s, Stmt::While(..) | Stmt::For(..) | Stmt::ForEach { .. })).then(|| self.known.ranges.clone());
         self.known.forget(&changes);
+        if let Some(ranges) = ranges {
+            self.known.ranges = ranges;
+        }
         self.emit(s);
         self.known.forget(&changes);
         if let Stmt::Let(l, e) = s {
@@ -1388,6 +1467,7 @@ impl<'a, 'b> Gen<'a, 'b> {
                 let known = self.known.clone();
                 self.b.switch_to_block(then_b);
                 self.b.seal_block(then_b);
+                self.learn(c);
                 self.block(t);
                 self.b.ins().jump(merge, &[]);
                 let after_then = std::mem::replace(&mut self.known, known);
@@ -1666,6 +1746,7 @@ impl<'a, 'b> Gen<'a, 'b> {
         self.b.ins().brif(cond, body_b, &[], exit, &[]);
         self.b.switch_to_block(body_b);
         self.b.seal_block(body_b);
+        self.learn(c);
         self.loops.push((header, exit));
         self.block(body);
         self.loops.pop();
@@ -2194,7 +2275,7 @@ impl<'a, 'b> Gen<'a, 'b> {
                 let i = if cleared.is_some() { self.unchecked(index) } else { self.expr(index)[0] };
                 let addr = match cleared {
                     Some(k) => self.cleared_addr(k, i, &e.ty),
-                    None => self.elem_addr(arr[0], i, &e.ty, site, None, None, unique::key_of(self.program, base)),
+                    None => self.elem_addr(arr[0], i, &e.ty, site, None, unique::local_of(index), unique::key_of(self.program, base)),
                 };
                 let vals = self.load(addr, &lay);
                 self.retain(&lay, &vals);
@@ -2391,6 +2472,16 @@ impl<'a, 'b> Gen<'a, 'b> {
             }
             // A counter plus 1 is at most its limit, and minus a number at least its start less it.
             ExprKind::IArith { .. } if self.is_cleared(e) => vec![self.unchecked(e)],
+            ExprKind::IArith { op: op @ (IOp::Add | IOp::Sub | IOp::Mul), l, r, .. } if self.surely_fits(*op, l, r) => {
+                let a = self.expr(l)[0];
+                let c = self.expr(r)[0];
+                self.be.c.as_mut().expect("only a release build knows ranges").proved_sums += 1;
+                vec![match op {
+                    IOp::Add => self.b.ins().iadd(a, c),
+                    IOp::Sub => self.b.ins().isub(a, c),
+                    _ => self.b.ins().imul(a, c),
+                }]
+            }
             ExprKind::IArith { op: op @ (IOp::Add | IOp::Sub), l, r, .. }
                 if unique::local_of(l).is_some_and(|i| self.known.counters.contains(&i))
                     && matches!((&r.kind, op), (ExprKind::Int(1), IOp::Add) | (ExprKind::Int(0..), IOp::Sub)) =>

@@ -1,0 +1,13 @@
+// Either of two things being true says neither one is.
+
+fn step(x: i64, go: bool) -> i64 {
+    if x < 5 || go {
+        return x + 1;
+    }
+    return 0;
+}
+
+fn main() uses io {
+    print(step(x: 1, go: false));
+    print(step(x: 9223372036854775807, go: true));
+}

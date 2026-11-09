@@ -1,0 +1,10 @@
+// Good as an index, then given another value.
+
+fn main() uses io {
+    let a: [i64] = [1, 2, 3];
+    var x: i64 = 1;
+    print(a[x]);
+    x = 9223372036854775807;
+    print("given");
+    print(x + 1);
+}

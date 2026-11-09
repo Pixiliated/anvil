@@ -165,6 +165,31 @@ fn release_builds_clear_the_loops_they_can() {
     assert_eq!(cleared("    for i in 0..2 {\n        s = s + a[i];\n        for j in 0..2 {\n            s = s + a[j];\n        }\n    }\n"), 1);
 }
 
+#[test]
+fn release_builds_leave_out_the_checks_that_cannot_fail() {
+    // How many sums are proved to fit shows in the C, so this cannot quietly stop.
+    let p = hello_project("proved");
+    let proved = |function: &str| {
+        p.write("src/l.anv", &format!("{function}\nfn main() uses io {{\n    print(f(3));\n}}\n"));
+        let exe = p.0.join(format!("l{}", std::env::consts::EXE_SUFFIX));
+        let v = json_of(&p.anvil(&["build", "src/l.anv", "--release", "--asm", "--json", "-o", exe.to_str().unwrap()]));
+        assert_eq!(v["ok"], true, "{v}");
+        let c = v["asm"].as_str().unwrap().to_string();
+        let at = c.find("/* sums proved to fit: ").unwrap() + 23;
+        c[at..c[at..].find(' ').unwrap() + at].parse::<usize>().unwrap()
+    };
+    assert_eq!(proved("fn f(n: i64) -> i64 {\n    return n + 1;\n}\n"), 0);
+    assert_eq!(proved("fn f(n: i64) -> i64 {\n    if n < 10 {\n        return n + 1;\n    }\n    return n;\n}\n"), 1);
+    // The guard says nothing about how low it can go.
+    assert_eq!(proved("fn f(n: i64) -> i64 {\n    if n < 10 {\n        return n - 1;\n    }\n    return n;\n}\n"), 0);
+    assert_eq!(proved("fn f(n: i64) -> i64 {\n    if n >= 0 {\n        return n - 1;\n    }\n    return n;\n}\n"), 1);
+    // A local read while changing it: the guard's fact holds for the read.
+    assert_eq!(proved("fn f(n: i64) -> i64 {\n    var i: i64 = n;\n    while i < 10 {\n        i = i + 1;\n    }\n    return i;\n}\n"), 1);
+    // A byte, and a length, are small.
+    assert_eq!(proved("fn f(n: i64) -> i64 {\n    let b: bytes = \"abc\".to_bytes();\n    return b[n % 3] + 1;\n}\n"), 1);
+    assert_eq!(proved("fn f(n: i64) -> i64 {\n    let b: bytes = \"abc\".to_bytes();\n    return b.len() + n * 0 + 1;\n}\n"), 3);
+}
+
 fn check_json(path: &str) -> (bool, serde_json::Value) {
     let out = anvil(&["check", path, "--json"]);
     let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap_or_else(|e| {

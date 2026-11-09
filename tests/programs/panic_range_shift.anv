@@ -1,0 +1,10 @@
+// All ones, shifted once: the highest number there is.
+
+fn half(x: i64) -> i64 {
+    return x.unsigned_shr(1) + 1;
+}
+
+fn main() uses io {
+    print(half(8));
+    print(half(-1));
+}

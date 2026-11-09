@@ -1,0 +1,14 @@
+// Some paths give a small number, and one does not.
+
+fn pick(big: bool) -> i64 {
+    var x: i64 = 9223372036854775807;
+    if !big {
+        x = 1;
+    }
+    return x + 1;
+}
+
+fn main() uses io {
+    print(pick(false));
+    print(pick(true));
+}

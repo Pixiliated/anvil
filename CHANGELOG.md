@@ -3,6 +3,17 @@
 Each version is one roadmap milestone (docs/ROADMAP.md); docs/DECISIONS.md says why things are
 the way they are.
 
+## 0.47.0
+- A release build works out what each integer can be, from its assignments, comparisons just passed, indices
+  just checked, lengths, bytes, masks and remainders, and leaves out overflow checks that could never fail.
+  A sum that could overflow is still checked and still stops the program. `--asm --release` says how many
+  were proved. Fannkuch written plainly runs 1.11x faster than v0.46's release build, the calculator 1.06x
+  and the rest within what runs move: 1.02x across the benchmark programs.
+- Timed in turn on one core with Rust, delivered programs take 1.23x Rust's time, against 1.25x for v0.46:
+  faster than Rust on fannkuch (0.74x), binary trees (0.38x) and the route planner (0.67x), behind it on n-body
+  (1.14x), matrix multiplication (1.90x), the ledger (2.10x), word counting (2.24x) and the calculator (2.67x).
+  The 1.11x given for v0.46 came from timings not kept to one core, which load had moved: it was 1.25x.
+
 ## 0.46.0
 - A release build keeps the length and storage of the arrays a function indexes in loops in locals, and
   reads them again only where the array is stored to, copied on a write, pushed to or popped from. The C

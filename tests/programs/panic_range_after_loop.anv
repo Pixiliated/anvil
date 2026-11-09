@@ -1,0 +1,10 @@
+// What a loop's guard says stops with the loop.
+
+fn main() uses io {
+    var i: i64 = 9223372036854775807;
+    while i < 5 {
+        i = i + 1;
+    }
+    print("past the loop");
+    print(i + 1);
+}

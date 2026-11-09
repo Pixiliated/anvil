@@ -1,0 +1,9 @@
+// A counter just under the limit, and more than one added to it.
+
+fn main() uses io {
+    let top: i64 = 9223372036854775807;
+    for i in top - 3..top {
+        print(top - i);
+        print(i + 2 - top);
+    }
+}

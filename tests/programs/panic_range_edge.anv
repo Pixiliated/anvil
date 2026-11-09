@@ -1,0 +1,13 @@
+// Below 100 means 99 at most, and from there this sum is one too many.
+
+fn near(i: i64) -> i64 {
+    if i < 100 {
+        return i + 9223372036854775709;
+    }
+    return 0;
+}
+
+fn main() uses io {
+    print(near(98));
+    print(near(99));
+}

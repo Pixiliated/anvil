@@ -1,0 +1,15 @@
+// Learned on one path only.
+
+fn step(a: [i64], x: i64, look: bool) -> i64 uses io {
+    if look {
+        print("looked");
+    } else {
+        print(a[x]);
+    }
+    return x + 1;
+}
+
+fn main() uses io {
+    print(step(a: [1, 2, 3], x: 1, look: false));
+    print(step(a: [1, 2, 3], x: 9223372036854775807, look: true));
+}

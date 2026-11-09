@@ -1,0 +1,14 @@
+// Checked late in the first round, and read early in the next, when it has changed.
+
+fn main() uses io {
+    let a: [i64] = [1, 2, 3];
+    var x: i64 = 0;
+    var r: i64 = 0;
+    print(a[x]);
+    while r < 3 {
+        print("round {r}: {x + 1 - x}");
+        print(a[x]);
+        x = 9223372036854775807;
+        r = r + 1;
+    }
+}

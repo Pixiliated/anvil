@@ -1,0 +1,87 @@
+// Sums a release build can tell will fit, so it leaves their checks out: the values must not change.
+
+fn byte_sum(data: bytes) -> i64 {
+    var i: i64 = 0;
+    var sum: i64 = 0;
+    while i < data.len() {
+        sum = sum + data[i] + 1;
+        i = i + 1;
+    }
+    return sum;
+}
+
+fn masks(x: i64) -> i64 {
+    return (x & 255) * 256 + (x & 15);
+}
+
+fn choices(x: i64) -> i64 {
+    let y: i64 = if x > 5 { x & 7 } else { 3 };
+    return y + 1;
+}
+
+fn remainders(x: i64) -> i64 {
+    return (x % 5) + 1;
+}
+
+fn divided(x: i64) -> i64 {
+    return x / 3 + 1;
+}
+
+fn checked_index(a: [i64], k: i64) -> i64 {
+    let v: i64 = a[k];
+    return v * 2 + k * 4 + (k + 1);
+}
+
+fn counters() -> i64 {
+    var total: i64 = 0;
+    for i in 0..5 {
+        total = total + i * i + (i - 1);
+    }
+    return total;
+}
+
+fn two_ends(a: [i64]) -> [i64] {
+    var out: [i64] = a;
+    var i: i64 = 0;
+    var j: i64 = out.len() - 1;
+    while i < j {
+        let x: i64 = out[i];
+        out[i] = out[j];
+        out[j] = x;
+        i = i + 1;
+        j = j - 1;
+    }
+    return out;
+}
+
+fn joined(flag: bool) -> i64 {
+    var x: i64 = 5;
+    if flag {
+        x = 500;
+    }
+    return x + 1;
+}
+
+fn shifts(x: i64) -> i64 {
+    return x.unsigned_shr(60) + (x >> 60) * 2;
+}
+
+fn main() uses io {
+    print(byte_sum("abc".to_bytes()));
+    print(masks(1000));
+    print(choices(9));
+    print(choices(2));
+    print(remainders(-17));
+    print(remainders(17));
+    print(divided(-7));
+    print(divided(7));
+    print(checked_index(a: [10, 20, 30], k: 2));
+    print(counters());
+    for x in two_ends([1, 2, 3, 4, 5]) {
+        print(x);
+    }
+    print(joined(true));
+    print(joined(false));
+    print(shifts(-1));
+    print(shifts(1 << 62));
+}

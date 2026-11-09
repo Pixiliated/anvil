@@ -1,0 +1,10 @@
+// A mask of every bit but the sign can still be the highest number there is.
+
+fn top(x: i64) -> i64 {
+    return (x & 9223372036854775807) + 1;
+}
+
+fn main() uses io {
+    print(top(5));
+    print(top(-1));
+}

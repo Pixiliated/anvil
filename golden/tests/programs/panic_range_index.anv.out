@@ -1,0 +1,4 @@
+exit: 101
+panic: integer overflow in `*` at tests/programs/panic_range_index.anv:5:16
+---
+4611686018427387906

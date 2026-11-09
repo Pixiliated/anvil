@@ -1199,7 +1199,10 @@ masked, floats are never fused into one rounding. A loop with no loop inside it,
 counting up to a limit by a fixed step, also tests before it starts whether any array access whose
 index is a straight line in its counter could fail. If none could, it runs without those checks,
 which lets the C compiler vectorize it; if one could, it runs as written and stops at the same round
-with the same message. `--asm` with `--release` gives the C, which says how many loops were cleared.
+with the same message. A sum, difference or product also goes unchecked where what its operands can
+be, from comparisons just passed, indices just checked, lengths, bytes and masks, shows it fits; a sum
+that could overflow is still checked and still stops the program. `--asm` with `--release` gives the
+C, which says how many loops were cleared and how many sums were proved to fit.
 `golden check --release`, `fuzz --release` and `compare --release` run release builds too.
 
 The interpreter and the native compiler must agree exactly: same stdout, same panic message,
