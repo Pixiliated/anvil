@@ -111,6 +111,8 @@ pub const METHODS: &[(&str, &str, &str)] = &[
     ("i64", "wrapping_sub", "wrapping_sub(other: i64) -> i64"),
     ("i64", "wrapping_mul", "wrapping_mul(other: i64) -> i64"),
     ("i64", "bit_len", "bit_len() -> i64"),
+    ("i64", "leading_zeros", "leading_zeros() -> i64"),
+    ("i64", "trailing_zeros", "trailing_zeros() -> i64"),
     ("bytes", "len", "len() -> i64"),
     ("bytes", "to_str", "to_str() -> Option[str]"),
     ("bytes", "hex", "hex() -> str"),
@@ -4764,7 +4766,8 @@ impl<'a> Checker<'a> {
         }
         let want_args = match m {
             "pop" | "len" | "keys" | "values" | "trim" | "parse_i64" | "parse_f64" | "to_bytes" | "to_str" | "hex"
-            | "to_array" | "to_upper" | "to_lower" | "chars" | "sorted" | "reversed" | "bit_len" => Some(0),
+            | "to_array" | "to_upper" | "to_lower" | "chars" | "sorted" | "reversed" | "bit_len" | "leading_zeros"
+            | "trailing_zeros" => Some(0),
             "push" | "remove" | "has" | "get" | "contains" | "find" | "starts_with" | "ends_with" | "split" | "xor"
             | "unsigned_shr" | "wrapping_add" | "wrapping_sub" | "wrapping_mul" | "join" | "fixed"
             | "parallel_map" | "word_at" => Some(1),
@@ -4875,6 +4878,8 @@ impl<'a> Checker<'a> {
             ("wrapping_sub", Ty::I64) => (Builtin::WrappingSub, Ty::I64),
             ("wrapping_mul", Ty::I64) => (Builtin::WrappingMul, Ty::I64),
             ("bit_len", Ty::I64) => (Builtin::BitLen, Ty::I64),
+            ("leading_zeros", Ty::I64) => (Builtin::LeadingZeros, Ty::I64),
+            ("trailing_zeros", Ty::I64) => (Builtin::TrailingZeros, Ty::I64),
             ("to_bytes", Ty::Str) => (Builtin::StrToBytes, Ty::Bytes),
             ("to_str", Ty::Bytes) => (Builtin::BytesToStr, self.option_of(Ty::Str)),
             ("hex", Ty::Bytes) => (Builtin::BytesHex, Ty::Str),
@@ -4907,7 +4912,10 @@ impl<'a> Checker<'a> {
                         "str has len, contains, find, starts_with, ends_with, split, trim, parse_i64, parse_f64, \
                          to_bytes, replace, to_upper, to_lower and chars"
                     }
-                    Ty::I64 => "i64 has xor, unsigned_shr, wrapping_add, wrapping_sub and wrapping_mul",
+                    Ty::I64 => {
+                        "i64 has xor, unsigned_shr, wrapping_add, wrapping_sub, wrapping_mul, bit_len, leading_zeros \
+                         and trailing_zeros"
+                    }
                     Ty::Bytes => "bytes have len, to_str, hex, to_array and word_at",
                     Ty::Map(..) => "maps have len, has, get, set, remove, keys and values",
                     _ => "only arrays, str and maps have methods; write a function that takes the value",

@@ -807,3 +807,10 @@ Short records of choices that are not obvious from the code. Newest last.
   `-O3` adds nothing, so a better C compiler would not close this gap.
 - **Not kept, measured on one core:** a `same_at` comparing byte ranges (the ledger using it was no faster:
   1.64x Rust against 1.56x), aligning big arrays to cache lines (1.00x).
+- **Speed comes from what agents are told.** Given the Performance advice, three fresh agents each chose the
+  design it describes and closed most of the gap to Rust; compiler work on the same programs had found only
+  a few percent. The proving ground is how the language is tuned now: agents write, `hot` and the friction
+  logs say what stopped them, and that is what gets built.
+- **A program computing only what it prints is allowed.** The matrix agent summed just the two printed
+  values, O(N^2), checked against its own full product; it is reported apart from the comparison, as the
+  Rust and C++ programs compute the whole product.

@@ -415,7 +415,9 @@ What the fastest programs in other languages do with bytes, written so an agent 
 - [x] The specification says what actually makes a program fast
 
 ## M48: Proving ground, third round (v0.49)
-- [ ] Fresh agents on new kinds of program, against the same log format: do `let ... else`, `if`
-  values and constants get used, and is the loop faster for them?
+- [x] Fresh agents rewrote the four slowest programs from the specification alone: every hidden test
+  passes, and following its advice they came within 1.6x, 1.1x and 1.2x of Rust, from 2.6x, 1.7x and 2.0x
+- [x] What they asked for: `trailing_zeros()` and `leading_zeros()`, numbers written straight onto
+  growing text, a range end that may shift, and the advice in a section of its own
 - [ ] What round two asked for and did not get: describing a valid struct to the contract lint, so it
   need not be switched off; several goldens per program; tuples

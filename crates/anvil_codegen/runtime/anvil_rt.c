@@ -428,8 +428,8 @@ static int64_t text_room(int64_t len) {
  * reference to `b`. When `a` is the only reference and has room, b is copied onto its end;
  * when it lacks room, it doubles (realloc). Otherwise `a` is shared (or static, or was never
  * grown), so its text is copied into new growable text first: value semantics. */
-AnvStr *anvil_str_append(AnvStr *a, AnvStr *b) {
-    int64_t len = a->len + b->len;
+static AnvStr *append_bytes(AnvStr *a, const char *p, int64_t n) {
+    int64_t len = a->len + n;
     AnvStr *s;
     if (a->rc == 1 && a->kind == KIND_TEXT) {
         if (len + 1 > text_room(a->len)) {
@@ -448,11 +448,25 @@ AnvStr *anvil_str_append(AnvStr *a, AnvStr *b) {
         COUNT_OBJECTS(1);
         anvil_release((AnvObj *)a);
     }
-    memcpy(s->bytes + s->len, b->bytes, (size_t)b->len);
+    memcpy(s->bytes + s->len, p, (size_t)n);
     s->len = len;
     s->bytes[len] = 0;
+    return s;
+}
+
+AnvStr *anvil_str_append(AnvStr *a, AnvStr *b) {
+    AnvStr *s = append_bytes(a, b->bytes, b->len);
     anvil_release((AnvObj *)b);
     return s;
+}
+
+static char *i64_digits(int64_t v, char *end);
+
+/* `s = s + "{n}"`: the digits written onto the end, with no text of their own in between. */
+AnvStr *anvil_str_append_i64(AnvStr *a, int64_t v) {
+    char buf[32];
+    char *start = i64_digits(v, buf + sizeof buf);
+    return append_bytes(a, start, buf + sizeof buf - start);
 }
 
 /* Interpolation: text of exactly `len` bytes, then each part copied in at its offset (taking the

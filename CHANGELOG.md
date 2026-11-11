@@ -3,6 +3,20 @@
 Each version is one roadmap milestone (docs/ROADMAP.md); docs/DECISIONS.md says why things are
 the way they are.
 
+## 0.49.0
+- Fresh agents rewrote the calculator, the ledger and the word counter from the specification alone, with
+  the same brief and hidden tests as the Rust and C++ programs. Every hidden test passes, and following the
+  specification's advice, timed in turn on one core, they take 1.60x, 1.22x and 1.23x Rust's time, against
+  2.67x, 1.88x and 1.92x as first delivered; the calculator is now faster than the C++ one (0.89x). With
+  them, the eight programs take 0.99x Rust's time and 1.00x C++'s. They had the advice and a second try;
+  the Rust and C++ programs had neither.
+- `a.leading_zeros()` and `a.trailing_zeros()` on `i64`, one instruction each, which two of them asked for.
+- `s = s + "{n} ..."` writes each piece of the interpolation onto the end of `s`, numbers as their digits,
+  with no text of its own in between. It saves an allocation per line; the calculator's time moved by
+  one tick of the clock at most, so no gain is claimed.
+- A `for` range's ends may hold any arithmetic or bit operation: `for i in 0..n >> 1` parses.
+- The specification's advice on speed is a section of its own, Performance, with what the agents found.
+
 ## 0.48.0
 - `b.word_at(i)` reads eight bytes as a little-endian number; it panics unless all eight are there.
 - The specification says what makes programs fast, measured on a word counter: scan by the word, keep table

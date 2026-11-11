@@ -1,0 +1,29 @@
+// Counting zero bits, and a range whose end shifts.
+
+fn main() uses io {
+    let xs: [i64] = [
+        0,
+        1,
+        2,
+        8,
+        255,
+        256,
+        -1,
+        -9223372036854775807 - 1,
+        9223372036854775807,
+        6,
+        4611686018427387904,
+    ];
+    for x in xs {
+        print("{x}: {x.leading_zeros()} {x.trailing_zeros()} {x.bit_len()}");
+    }
+    let n: i64 = 20;
+    var sum: i64 = 0;
+    for i in 0..n >> 1 {
+        sum = sum + i;
+    }
+    for i in n >> 2..n >> 1 | 1 {
+        sum = sum + i * 100;
+    }
+    print(sum);
+}

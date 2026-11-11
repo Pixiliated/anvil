@@ -2108,6 +2108,8 @@ impl<'p, 'h> Interp<'p, 'h> {
                 })
             }
             Builtin::BitLen => Value::I64(64 - (x.as_i64() as u64).leading_zeros() as i64),
+            Builtin::LeadingZeros => Value::I64((x.as_i64() as u64).leading_zeros() as i64),
+            Builtin::TrailingZeros => Value::I64((x.as_i64() as u64).trailing_zeros() as i64),
             Builtin::BytesOf { site } => {
                 let Value::Array(items) = x else { unreachable!("bytes_of {x:?}") };
                 let mut out = Vec::with_capacity(items.len());

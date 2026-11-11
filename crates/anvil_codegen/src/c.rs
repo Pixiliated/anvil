@@ -45,6 +45,7 @@ ANV_INLINE uint8_t anv_sadd(uint64_t a, uint64_t b, uint64_t *r) { int64_t o; ui
 ANV_INLINE uint8_t anv_ssub(uint64_t a, uint64_t b, uint64_t *r) { int64_t o; uint8_t f = _sub_overflow_i64(0, (int64_t)a, (int64_t)b, &o); *r = (uint64_t)o; return f; }
 ANV_INLINE uint8_t anv_smul(uint64_t a, uint64_t b, uint64_t *r) { int64_t o; uint8_t f = _mul_overflow_i64((int64_t)a, (int64_t)b, &o); *r = (uint64_t)o; return f; }
 ANV_INLINE uint64_t anv_clz(uint64_t x) { unsigned long i; return _BitScanReverse64(&i, x) ? 63 - i : 64; }
+ANV_INLINE uint64_t anv_ctz(uint64_t x) { unsigned long i; return _BitScanForward64(&i, x) ? i : 64; }
 #else
 #define ANV_ALIGN(n) __attribute__((aligned(n)))
 #define ANV_INLINE static inline __attribute__((always_inline))
@@ -52,6 +53,7 @@ ANV_INLINE uint8_t anv_sadd(uint64_t a, uint64_t b, uint64_t *r) { int64_t o; ui
 ANV_INLINE uint8_t anv_ssub(uint64_t a, uint64_t b, uint64_t *r) { int64_t o; uint8_t f = __builtin_sub_overflow((int64_t)a, (int64_t)b, &o); *r = (uint64_t)o; return f; }
 ANV_INLINE uint8_t anv_smul(uint64_t a, uint64_t b, uint64_t *r) { int64_t o; uint8_t f = __builtin_mul_overflow((int64_t)a, (int64_t)b, &o); *r = (uint64_t)o; return f; }
 ANV_INLINE uint64_t anv_clz(uint64_t x) { return x ? (uint64_t)__builtin_clzll(x) : 64; }
+ANV_INLINE uint64_t anv_ctz(uint64_t x) { return x ? (uint64_t)__builtin_ctzll(x) : 64; }
 #endif
 /* Cranelift's sdiv and srem of the lowest number by -1: the quotient wraps (the IR checks first),
  * the remainder is 0. C leaves both undefined. */
@@ -456,6 +458,7 @@ fn instruction(w: &mut Writer, inst: cranelift_codegen::ir::Inst) -> Result<(), 
                 Opcode::FcvtFromSint if t == types::I64 => format!("({})(int64_t){x}", c_type(to)?),
                 Opcode::FcvtToSint if to == types::I64 => format!("(uint64_t)(int64_t){x}"),
                 Opcode::Clz if t == types::I64 => format!("anv_clz({x})"),
+                Opcode::Ctz if t == types::I64 => format!("anv_ctz({x})"),
                 Opcode::Bitcast if t == types::I64 && to == types::F64 => format!("anv_f64({x})"),
                 Opcode::Bitcast if t == types::F64 && to == types::I64 => format!("anv_bits({x})"),
                 _ => return Err(format!("the release backend cannot write `{opcode}` from {t} to {to}")),

@@ -180,6 +180,7 @@ const RUNTIME: &[(&str, &[Type], &[Type])] = &[
     ("anvil_panic_at", &[I, I], &[]),
     ("anvil_panic_sides", &[I, I, I, I], &[]),
     ("anvil_str_find_from", &[I, I, I, I], &[I]),
+    ("anvil_str_append_i64", &[I, I], &[I]),
     ("anvil_panic_word_at", &[I, I, I], &[]),
     ("anvil_read_stdin", &[], &[I]),
     ("anvil_print_i64", &[I, I], &[]),
@@ -1441,11 +1442,18 @@ impl<'a, 'b> Gen<'a, 'b> {
             Stmt::Assign(l, path, e, _) if path.is_empty() && append_parts(*l, e).is_some() => {
                 let var = self.vars[*l][0];
                 for part in append_parts(*l, e).unwrap() {
-                    let v = self.expr(part)[0];
-                    let cur = self.b.use_var(var);
-                    let next = self.call_rt("anvil_str_append", &[cur, v]).unwrap();
-                    self.b.def_var(var, next);
-                    self.refresh_held((*l, 0));
+                    // Nothing in a part reads the local (see append_parts), so each piece of an
+                    // interpolation can go onto its end as it is made.
+                    let pieces = match &part.kind {
+                        ExprKind::Interp(pieces) => pieces.iter().collect(),
+                        _ => vec![part],
+                    };
+                    for piece in pieces {
+                        let cur = self.b.use_var(var);
+                        let next = self.append_piece(cur, piece);
+                        self.b.def_var(var, next);
+                        self.refresh_held((*l, 0));
+                    }
                 }
             }
             Stmt::Assign(l, path, e, _) => {
@@ -2935,6 +2943,17 @@ impl<'a, 'b> Gen<'a, 'b> {
         }
     }
 
+    /// Appends `piece` to `cur`, which the append takes: text and bytes as they are, a number as its
+    /// digits, anything else as its text.
+    fn append_piece(&mut self, cur: Value, piece: &Expr) -> Value {
+        if piece.ty == Ty::I64 {
+            let v = self.expr(piece)[0];
+            return self.call_rt("anvil_str_append_i64", &[cur, v]).unwrap();
+        }
+        let t = if matches!(piece.ty, Ty::Str | Ty::Bytes) { self.expr(piece)[0] } else { self.text(piece) };
+        self.call_rt("anvil_str_append", &[cur, t]).unwrap()
+    }
+
     fn text(&mut self, e: &Expr) -> Value {
         let v = self.expr(e);
         self.text_of(&e.ty, &v)
@@ -3284,6 +3303,14 @@ impl<'a, 'b> Gen<'a, 'b> {
                 let all = self.b.ins().iconst(I, 64);
                 return vec![self.b.ins().isub(all, zeros)];
             }
+            Builtin::LeadingZeros => {
+                let a = self.expr(&bargs[0])[0];
+                return vec![self.b.ins().clz(a)];
+            }
+            Builtin::TrailingZeros => {
+                let a = self.expr(&bargs[0])[0];
+                return vec![self.b.ins().ctz(a)];
+            }
             Builtin::BytesOf { site } => {
                 let xs = self.expr(&bargs[0])[0];
                 let s = self.str_obj(site);
@@ -3424,6 +3451,8 @@ impl<'a, 'b> Gen<'a, 'b> {
             | Builtin::WrappingSub
             | Builtin::WrappingMul
             | Builtin::BitLen
+            | Builtin::LeadingZeros
+            | Builtin::TrailingZeros
             | Builtin::AssertCmp { .. }
             | Builtin::StrFindFrom { .. }
             | Builtin::BytesWordAt { .. }

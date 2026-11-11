@@ -594,13 +594,6 @@ UTF-8.
 | `read_bytes(path)` | `Result[bytes, FileError]`: the whole file, any bytes; needs `uses fs` |
 | `write_bytes(path: p, data: d)` | like `write_file`; needs `uses fs` |
 
-How a program holds its data can decide its speed more than the compiler does. A word counter written
-the same way in Anvil and in Rust ran within about 10% of each other, while changing its design took the
-Anvil one from 1.06 s to 0.70 s. Scan with `word_at` rather than a byte at a time (add spare bytes at the
-end so a read near it fits). Keep each table slot to two numbers, packing fields into one `i64`
-with shifts and masks. Copy what must be compared into one flat array rather than reaching back into
-the input. Pick the top few by walking the table once rather than sorting everything.
-
 Bytes cannot be changed in place (E0310) or printed: print `b.hex()`. Traces show them as
 `bytes_of([104, 105])`, and property tests generate them.
 
@@ -791,6 +784,8 @@ Rust.
   units, and `x ^ 2` would be read both ways.
 - **Wrapping arithmetic**, for hashes and generators: `a.wrapping_add(b)`, `a.wrapping_sub(b)`
   and `a.wrapping_mul(b)` wrap around at the ends of i64 instead of panicking.
+- `a.leading_zeros()` and `a.trailing_zeros()` count the zero bits above the highest set bit and below
+  the lowest, `a` taken as unsigned: 64 for 0. Each is one machine instruction.
 - `a.bit_len()` is the number of bits it takes to write `a` taken as unsigned: 0 for 0, 8 for 255,
   64 for a negative. It is what a logarithmic `steps` bound is written with.
 - `if c { a } else { b }` is a value, of the type both branches have, each branch one expression;
@@ -921,6 +916,25 @@ shrunk while it still fails, and reported with its smallest inputs: `for all: xs
 `anvil test --native` also builds the plain tests into one executable and runs each natively,
 with the leak check; a test that passes, panics or prints differently there fails as "the
 backends disagree". Property tests run in the interpreter, the reference.
+
+## Performance
+
+How a program holds its data can decide its speed more than the compiler does. A word counter written
+the same way in Anvil and in Rust ran within about 10% of each other, while changing its design took
+the Anvil one from 1.06 s to 0.70 s; agents who wrote a calculator, a ledger and a word counter this way
+came within 1.6x, 1.1x and 1.2x of Rust, from 2.6x, 1.7x and 2.0x.
+
+- Read the input once (`read_bytes`, `read_stdin`) and work on it in place, without making a `str` per
+  line or field. Add spare bytes at the end so a read near it stays in range.
+- Scan with `b.word_at(i)`, eight bytes at a time, finding the byte you want with masks and
+  `trailing_zeros()`, rather than a byte at a time.
+- Keep each table slot to two numbers, packing fields into one `i64` with shifts and masks. Copy what
+  must be compared into one flat array rather than reaching back into the input.
+- Pick the top few by walking the table once rather than sorting everything.
+- Build output in one `str` with `s = s + ...`: interpolated numbers are written onto its end with no
+  text of their own in between. Print it once.
+- Measure with `anvil compare A.anv B.anv --release`, which charges CPU time on one core; a wall clock on a
+  busy machine moves several times over. `anvil hot FILE --release` says where the time goes.
 
 ## Tooling
 

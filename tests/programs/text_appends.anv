@@ -1,0 +1,43 @@
+// Text grown by `s = s + "..."`, with numbers and other values written onto its end as it goes.
+
+struct P {
+    x: i64,
+}
+
+fn line(n: i64) -> str {
+    return "<{n}>";
+}
+
+fn main() uses io {
+    var s: str = "";
+    for i in 0..4 {
+        s = s + "{i * 7 - 10} {i}," + "|";
+    }
+    print(s);
+    var t: str = "start";
+    t = t + "{-9223372036854775807 - 1} {9223372036854775807} {0} {-5}";
+    print(t);
+    var u: str = "";
+    let w: f64 = 2.5;
+    let flag: bool = true;
+    u = u + "{w} {flag} {line(3)} {"x" + "y"} {[1, 2].len()}";
+    print(u);
+    // A number that is a sum of interpolations, and one built in a call.
+    var v: str = "a";
+    let p: P = P { x: 42 };
+    v = v + "{p.x}{p.x + 1}" + line(p.x);
+    print(v);
+    // Many rounds, so the text grows past its room more than once.
+    var big: str = "";
+    for i in 0..300 {
+        big = big + "{i}\n";
+    }
+    print("{big.len()} {big[0..6]}");
+    // The text has grown already, so it has room, and is shared before it grows again: the copy keeps
+    // what it had.
+    var a: str = "";
+    a = a + "base";
+    let b: str = a;
+    a = a + "{1}{2}";
+    print("{a} {b}");
+}

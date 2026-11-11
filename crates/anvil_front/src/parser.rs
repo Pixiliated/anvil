@@ -787,9 +787,10 @@ impl Parser {
                 self.bump();
                 let var = self.ident("loop variable")?;
                 self.expect(Tok::In)?;
-                let s = self.add_no_struct()?;
+                // A range's ends may hold any arithmetic or bit operation, as `0..n >> 1`.
+                let s = self.bit_or(false)?;
                 if self.eat(&Tok::DotDot) {
-                    let e = self.add_no_struct()?;
+                    let e = self.bit_or(false)?;
                     let body = self.block()?;
                     StmtKind::For { var, start: s, end: e, body }
                 } else {
@@ -1020,10 +1021,6 @@ impl Parser {
             l = Self::bin(op, l, r);
         }
         Ok(l)
-    }
-
-    fn add_no_struct(&mut self) -> PResult<Expr> {
-        self.add_s(false)
     }
 
     fn add_s(&mut self, s: bool) -> PResult<Expr> {

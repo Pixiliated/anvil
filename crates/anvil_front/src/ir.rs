@@ -528,6 +528,10 @@ pub enum Builtin {
     /// `x.bit_len()`: the bits it takes to write an i64 taken as unsigned, so 0 for 0 and 64 for
     /// a negative.
     BitLen,
+    /// `a.leading_zeros()`, `a.trailing_zeros()`: zero bits above the highest set bit, or below the
+    /// lowest; 64 for 0.
+    LeadingZeros,
+    TrailingZeros,
     /// Like Print, to stderr.
     EPrint,
     /// Ends the program with the code; panics naming `site` outside 0..=255, or in a test.

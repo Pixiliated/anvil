@@ -1,0 +1,10 @@
+// A count of zero bits can be 64, so a product of it does not always fit.
+
+fn scaled(x: i64) -> i64 {
+    return x.leading_zeros() * 144115188075855872;
+}
+
+fn main() uses io {
+    print(scaled(1));
+    print(scaled(0));
+}
