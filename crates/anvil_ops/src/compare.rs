@@ -36,8 +36,9 @@ mod os {
     use std::os::windows::process::CommandExt;
     use std::process::{Child, Command};
 
-    /// The smallest time the system charges a process in.
-    pub const TICK: f64 = 1.0 / 64.0;
+    /// The smallest time worth telling apart. Windows charges process time in steps of 1/64 s, so
+    /// runs are timed by the processor cycles charged to the process instead (`ended`).
+    pub const TICK: f64 = 0.001;
     pub const PRIORITY: &str = "at high priority";
     const HIGH_PRIORITY_CLASS: u32 = 0x80;
     const THREAD_PRIORITY_TIME_CRITICAL: i32 = 15;
@@ -63,6 +64,44 @@ mod os {
             kernel: *mut FileTime,
             user: *mut FileTime,
         ) -> i32;
+        fn QueryProcessCycleTime(process: *mut c_void, cycles: *mut u64) -> i32;
+        fn QueryThreadCycleTime(thread: *mut c_void, cycles: *mut u64) -> i32;
+        fn QueryPerformanceCounter(count: *mut i64) -> i32;
+        fn QueryPerformanceFrequency(frequency: *mut i64) -> i32;
+    }
+
+    /// The cycles the system counts in a second, found by spinning this thread for a moment while the
+    /// clock runs: the most of a few tries, as a try this thread loses part of counts too few.
+    fn cycle_rate() -> Option<f64> {
+        static RATE: std::sync::OnceLock<Option<f64>> = std::sync::OnceLock::new();
+        *RATE.get_or_init(|| {
+            let mut frequency = 0i64;
+            // SAFETY: each pointer is to a value of the size the call writes.
+            if unsafe { QueryPerformanceFrequency(&mut frequency) } == 0 || frequency <= 0 {
+                return None;
+            }
+            let mut best: Option<f64> = None;
+            for _ in 0..3 {
+                let (mut c0, mut c1, mut t0, mut t1) = (0u64, 0u64, 0i64, 0i64);
+                // SAFETY: as above; the pseudo-handle stands for this thread.
+                unsafe {
+                    QueryPerformanceCounter(&mut t0);
+                    QueryThreadCycleTime(GetCurrentThread(), &mut c0);
+                }
+                let until = std::time::Instant::now() + std::time::Duration::from_millis(30);
+                while std::time::Instant::now() < until {
+                    std::hint::spin_loop();
+                }
+                // SAFETY: as above.
+                let read = unsafe { QueryThreadCycleTime(GetCurrentThread(), &mut c1) != 0 && QueryPerformanceCounter(&mut t1) != 0 };
+                let seconds = (t1 - t0) as f64 / frequency as f64;
+                if read && seconds > 0.0 && c1 > c0 {
+                    let rate = (c1 - c0) as f64 / seconds;
+                    best = Some(best.map_or(rate, |b| b.max(rate)));
+                }
+            }
+            best
+        })
     }
 
     /// The last core of the fastest class, by the processor records the system gives.
@@ -120,7 +159,14 @@ mod os {
             return Err("cannot read the time a run took".to_string());
         }
         let ticks = |t: &FileTime| ((t.high as u64) << 32 | t.low as u64) as f64 / 1e7;
-        Ok(Some((status.code().unwrap_or(-1), ticks(&kernel) + ticks(&user))))
+        let code = status.code().unwrap_or(-1);
+        let mut cycles = 0u64;
+        // SAFETY: the handle is the child's, and the pointer is to a u64.
+        let counted = unsafe { QueryProcessCycleTime(child.as_raw_handle(), &mut cycles) } != 0;
+        match cycle_rate() {
+            Some(rate) if counted && cycles > 0 => Ok(Some((code, cycles as f64 / rate))),
+            _ => Ok(Some((code, ticks(&kernel) + ticks(&user)))),
+        }
     }
 
     pub fn stop(child: &mut Child) {

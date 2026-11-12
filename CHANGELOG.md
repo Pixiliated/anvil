@@ -3,6 +3,18 @@
 Each version is one roadmap milestone (docs/ROADMAP.md); docs/DECISIONS.md says why things are
 the way they are.
 
+## 0.50.0
+- Fresh agents rewrote matrix multiplication and n-body from the specification, with the brief the Rust and
+  C++ programs had; every hidden test passes. The matrix program, blocked in k and tiled two rows by four,
+  takes 0.73x Rust's time and the same as C++, timed in turn on one core; the n-body one was no faster than
+  the first. Taking each program's fastest Anvil version, the eight take 0.89x Rust's time and 0.89x C++'s
+  (geometric mean). The Anvil programs had the specification's advice and more tries; the Rust and C++ ones
+  are their first versions.
+- `anvil compare` counts the processor cycles a run uses on Windows, where charged time moves in steps of
+  1/64 s: a 0.14 s program's runs now move by about 4% instead of 22%, so short timed runs can be compared.
+- `--asm` says that the code goes to stdout and `--out` still names the executable, which three agents
+  had taken the other way.
+
 ## 0.49.0
 - Fresh agents rewrote the calculator, the ledger and the word counter from the specification alone, with
   the same brief and hidden tests as the Rust and C++ programs. Every hidden test passes, and following the

@@ -814,3 +814,12 @@ Short records of choices that are not obvious from the code. Newest last.
 - **A program computing only what it prints is allowed.** The matrix agent summed just the two printed
   values, O(N^2), checked against its own full product; it is reported apart from the comparison, as the
   Rust and C++ programs compute the whole product.
+- **The release C is not written for MSVC's vectorizer.** `/Qvec-report:2` shows it vectorizes none of
+  Anvil's loops: it rejects a signed compare of an unsigned value, an index summed unsigned and cast, and, in
+  a loop inside another, any address that is not a typed pointer the loop holds fixed. Signed values, plain
+  arithmetic where the generator has proved it fits, and typed indexing made the C look hand-written and
+  still vectorized nothing, and ran 0.99x overall (0.80x on the blocked matrix program), so it came out. A
+  C writer that declares typed pointers per loop is what it would take.
+- **`compare` counts cycles on Windows.** Process time there moves in 1/64 s steps, which hid differences
+  under 20% on the timed runs agents were given; the cycle count is converted at a rate measured once, by
+  spinning a thread against the performance counter, and falls back to process time if it cannot be read.

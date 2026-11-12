@@ -1121,10 +1121,10 @@ other work and cores of different speeds, where separate timings can move by 2x.
 runs each once untimed, to compare what they print and how they exit, then times them in turn on one
 logical processor of a fast core, at high priority on Windows, with the core's other one kept idle and
 one worker (`ANVIL_THREADS=1`), `--rounds` times (7 unless asked, at least 3). The time is what the system
-charged the process. A program is named as faster only when its best and its typical run both beat the
-other's by more than these runs move on their own, which is reported: at least 2%, and more for short
-runs, since Windows charges time in steps of about 16 ms, so give it an input that runs for a second or
-more. A run past `--limit` seconds (600 unless asked) is stopped, as an error. Output or exit codes that
+charged the process: on Windows the processor cycles it used, at the rate measured when `compare` starts,
+since its charged time moves in steps of about 16 ms. A program is named as faster only when its best and
+its typical run both beat the other's by more than these runs move on their own, which is reported: at
+least 2%, and more for runs under a few tenths of a second. A run past `--limit` seconds (600 unless asked) is stopped, as an error. Output or exit codes that
 differ are a failure, with the times still shown, as the two are then not doing the same work.
 
 `anvil measure` builds a program (or every project file with a main) and runs it natively under

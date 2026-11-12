@@ -421,3 +421,9 @@ What the fastest programs in other languages do with bytes, written so an agent 
   growing text, a range end that may shift, and the advice in a section of its own
 - [ ] What round two asked for and did not get: describing a valid struct to the contract lint, so it
   need not be switched off; several goldens per program; tuples
+
+## M49: Proving ground, fourth round (v0.50)
+- [x] Fresh agents rewrote matrix multiplication and n-body from the specification: every hidden test
+  passes; the matrix program, blocked and tiled, runs in 0.53x Rust's time
+- [x] `anvil compare` counts processor cycles on Windows, so runs of a tenth of a second can be told apart
+- [x] `--asm` says the code goes to stdout, which three agents took for the `--out` file

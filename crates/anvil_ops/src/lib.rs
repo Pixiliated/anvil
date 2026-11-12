@@ -86,7 +86,7 @@ pub const COMMANDS: &[Command] = &[
         positionals: &["file"],
         options: &[
             ("out", "PATH", "executable to write (default: the file without .anv; .exe on Windows)"),
-            ("asm", "", "include each function's machine code (with --release, the C)"),
+            ("asm", "", "print each function's machine code (with --release, the C) on stdout; --out still names the executable"),
             ("release", "", "through C and the platform's optimizing C compiler: slower to build, faster to run"),
         ],
         summary: "compile main to a native executable",
