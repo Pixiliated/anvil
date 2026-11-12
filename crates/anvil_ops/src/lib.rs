@@ -351,7 +351,7 @@ impl ProgramInput {
 /// docs/SPEC.md, copied into this crate so it ships with the package (a test keeps them equal).
 pub const SPEC: &str = include_str!("../SPEC.md");
 
-/// `0.11.0 (x86_64-unknown-linux-gnu)`: the version and the target native builds produce.
+/// `<version> (x86_64-unknown-linux-gnu)`: the version and the target native builds produce.
 pub fn version() -> String {
     format!("{} ({})", env!("CARGO_PKG_VERSION"), anvil_codegen::link::TARGET)
 }

@@ -1,4 +1,4 @@
-# Anvil language specification (v0.40)
+# Anvil language specification
 
 Anvil is a small, compiled, general-purpose language designed to be written mostly by AI agents
 and read by humans. Its rules aim at three things: one obvious way to write each thing, code

@@ -83,7 +83,7 @@ in full (`anvil spec` prints it).
 
 ## Status
 
-v0.40: programs of one or more files (modules with explicit imports and `pub`), generic
+The language has programs of one or more files (modules with explicit imports and `pub`), generic
 functions, structs and enums with built-in constraints, i64, f64 with units, bool, strings with interpolation,
 search and split (`s = s + x` appends in place, so building text is linear), growable arrays and slices (a variable, field or element read for the last time moves, so `xs = f(xs)` and `s.items = f(s.items)` change it in place), maps in key order, structs, enums with
 exhaustive `match`, structural `==`, `Option` and `Result` with `?`, function values and
@@ -238,6 +238,8 @@ An agent starts with `spec` (the whole language), writes a file, then loops on `
 Contributing: CONTRIBUTING.md. Changes by version: CHANGELOG.md.
 
 ## License
+
+Copyright (c) 2026 Pixiliated.
 
 Licensed under either of [Apache License 2.0](LICENSE-APACHE) or [MIT](LICENSE-MIT) at your
 option. Contributions are accepted under the same terms.
