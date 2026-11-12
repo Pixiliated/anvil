@@ -378,11 +378,13 @@ fn union(a: &Live, b: &Live) -> Live {
     a.union(b).copied().collect()
 }
 
+/// An argument handed to a call: (call site, local, place, why it is not moved).
+type HandedArg = (String, LocalId, Vec<Seg>, Option<&'static str>);
+
 struct Walk<'a> {
     locals: &'a [Local],
     pinned: Live,
-    /// Arguments: (call site, local, place, why it is not moved).
-    handed: RefCell<Vec<(String, LocalId, Vec<Seg>, Option<&'static str>)>>,
+    handed: RefCell<Vec<HandedArg>>,
 }
 
 impl Walk<'_> {
@@ -496,7 +498,11 @@ impl Walk<'_> {
         let why = if !apart {
             NAMED_AGAIN
         } else if target.is_some_and(|t| overlap(t, &o.path)) {
-            if o.path.is_empty() { WRITTEN_INTO } else { MAY_BE_WRITTEN }
+            if o.path.is_empty() {
+                WRITTEN_INTO
+            } else {
+                MAY_BE_WRITTEN
+            }
         } else if !dead {
             READ_LATER
         } else {
@@ -532,7 +538,8 @@ impl Walk<'_> {
                     }
                 }
                 if mark && !append {
-                    let (target, written) = if path.is_empty() { (None, Some(*l)) } else { (Some((*l, segs(path))), None) };
+                    let (target, written) =
+                        if path.is_empty() { (None, Some(*l)) } else { (Some((*l, segs(path))), None) };
                     let mut exprs = vec![e];
                     for step in path.iter_mut() {
                         if let Step::Index { index, .. } = step {
@@ -746,7 +753,9 @@ mod tests {
         fn block(stmts: &[Stmt], f: &Func, out: &mut Vec<String>) {
             for s in stmts {
                 match s {
-                    Stmt::Let(_, e) | Stmt::Assign(_, _, e, _) | Stmt::Expr(e) | Stmt::Return(Some(e)) => expr(e, f, out),
+                    Stmt::Let(_, e) | Stmt::Assign(_, _, e, _) | Stmt::Expr(e) | Stmt::Return(Some(e)) => {
+                        expr(e, f, out)
+                    }
                     Stmt::If(c, a, b) => {
                         expr(c, f, out);
                         block(a, f, out);
@@ -766,7 +775,12 @@ mod tests {
                         expr(scrutinee, f, out);
                         arms.iter().for_each(|a| block(&a.body, f, out));
                     }
-                    Stmt::Return(None) | Stmt::Break | Stmt::Continue | Stmt::Reached(_) | Stmt::Drop(_) | Stmt::Line(_) => {}
+                    Stmt::Return(None)
+                    | Stmt::Break
+                    | Stmt::Continue
+                    | Stmt::Reached(_)
+                    | Stmt::Drop(_)
+                    | Stmt::Line(_) => {}
                 }
             }
         }
@@ -873,7 +887,8 @@ mod tests {
         assert_eq!(shape(src, "f"), ["let a", "return"]);
     }
 
-    const ADD: &str = "fn add(xs: [i64], x: i64) -> [i64] {\n    var ys: [i64] = xs;\n    ys.push(x);\n    return ys;\n}\n";
+    const ADD: &str =
+        "fn add(xs: [i64], x: i64) -> [i64] {\n    var ys: [i64] = xs;\n    ys.push(x);\n    return ys;\n}\n";
 
     #[test]
     fn last_reads_move() {
@@ -928,9 +943,7 @@ mod tests {
         );
         assert!(!moved(&src, "f").contains(&"xs".to_string()), "{:?}", moved(&src, "f"));
         // Named whole twice: one of the two would see the other's move.
-        let src = format!(
-            "fn same(a: [i64], b: [i64]) -> i64 {{\n    return a.len() + b.len();\n}}\n\nfn f(xs: [i64]) -> i64 {{\n    return same(a: xs, b: xs);\n}}\n"
-        );
+        let src = "fn same(a: [i64], b: [i64]) -> i64 {\n    return a.len() + b.len();\n}\n\nfn f(xs: [i64]) -> i64 {\n    return same(a: xs, b: xs);\n}\n".to_string();
         assert!(moved(&src, "f").is_empty(), "{:?}", moved(&src, "f"));
     }
 

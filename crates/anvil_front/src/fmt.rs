@@ -194,8 +194,12 @@ impl Printer<'_> {
     // ---- items ----
 
     fn items(&mut self, items: &[Item]) {
-        let together =
-            |a: &Item, b: &Item| matches!((a, b), (Item::Unit(_), Item::Unit(_)) | (Item::Const(_), Item::Const(_)) | (Item::Import(_), Item::Import(_)));
+        let together = |a: &Item, b: &Item| {
+            matches!(
+                (a, b),
+                (Item::Unit(_), Item::Unit(_)) | (Item::Const(_), Item::Const(_)) | (Item::Import(_), Item::Import(_))
+            )
+        };
         self.entries(items, 0, self.text.len(), |a, b| !together(a, b), |p, item| p.item(item));
     }
 
@@ -215,7 +219,13 @@ impl Printer<'_> {
                 self.line(&line);
             }
             Item::Const(c) => {
-                let line = format!("{}const {}: {} = {};", vis(c.public), c.name.name, self.squash(c.ty.span), self.expr(&c.value));
+                let line = format!(
+                    "{}const {}: {} = {};",
+                    vis(c.public),
+                    c.name.name,
+                    self.squash(c.ty.span),
+                    self.expr(&c.value)
+                );
                 self.line(&line);
             }
             Item::Struct(s) => {

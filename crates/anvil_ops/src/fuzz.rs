@@ -478,7 +478,9 @@ impl Gen {
         if matches!(t, T::I | T::F | T::B) {
             return Vec::new();
         }
-        (0..self.fns.len()).filter(|i| self.fns[*i].ret == t && self.fns[*i].params.iter().any(|(_, pt)| *pt == t)).collect()
+        (0..self.fns.len())
+            .filter(|i| self.fns[*i].ret == t && self.fns[*i].params.iter().any(|(_, pt)| *pt == t))
+            .collect()
     }
 
     /// `var v = ...; for i in 0..k { v = f(.., v, ..); }`: a value handed to a call and given
@@ -699,8 +701,7 @@ pub fn fuzz(root: &Path, seed: Option<u64>, count: Option<u64>, release: bool) -
         if release { "all three backends" } else { "both backends" },
         first + count - 1
     ));
-    let json =
-        json!({ "ok": bad == 0, "seed": first, "count": count, "release": release, "failed": bad, "programs": results });
+    let json = json!({ "ok": bad == 0, "seed": first, "count": count, "release": release, "failed": bad, "programs": results });
     Report {
         json,
         stdout: text,
@@ -726,10 +727,17 @@ fn check_one(text: &str, seed: u64, release: bool) -> (&'static str, String) {
         Ok((o, _)) => o,
         Err(m) => return ("stopped", m),
     };
-    let backends: &[(bool, &str)] = if release { &[(false, "native"), (true, "release")] } else { &[(false, "native")] };
+    let backends: &[(bool, &str)] =
+        if release { &[(false, "native"), (true, "release")] } else { &[(false, "native")] };
     for (build_release, name) in backends {
-        let got =
-            golden::native_as(&native_program, &scratch, &format!("fuzz{seed}"), &std::env::temp_dir(), &none, *build_release);
+        let got = golden::native_as(
+            &native_program,
+            &scratch,
+            &format!("fuzz{seed}"),
+            &std::env::temp_dir(),
+            &none,
+            *build_release,
+        );
         let _ = std::fs::remove_dir_all(&scratch);
         match got {
             Err(e) => return ("error", format!("{name}: {e}")),
@@ -776,11 +784,16 @@ mod tests {
     #[test]
     fn some_programs_update_places() {
         let progs: Vec<String> = (1..=300).map(super::program_for).collect();
-        let fields = progs.iter().filter(|p| p.contains("// handed over and back in a place") && p.contains(".v = ")).count();
+        let fields =
+            progs.iter().filter(|p| p.contains("// handed over and back in a place") && p.contains(".v = ")).count();
         let rebuilt = progs.iter().filter(|p| p.contains(".n + 1")).count();
-        let elements = progs.iter().filter(|p| p.contains("// handed over and back in a place") && p.contains("] = ")).count();
+        let elements =
+            progs.iter().filter(|p| p.contains("// handed over and back in a place") && p.contains("] = ")).count();
         let counts = (fields, rebuilt, elements);
-        assert!(fields >= 3 && rebuilt >= 3 && elements >= 3, "fuzz programs (fields, rebuilt, elements) of 300: {counts:?}");
+        assert!(
+            fields >= 3 && rebuilt >= 3 && elements >= 3,
+            "fuzz programs (fields, rebuilt, elements) of 300: {counts:?}"
+        );
         eprintln!("place updates in 300 fuzz programs (fields, rebuilt, elements): {counts:?}");
     }
 

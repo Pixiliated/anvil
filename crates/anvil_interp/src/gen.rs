@@ -151,7 +151,11 @@ pub fn generate_with(ty: &Ty, program: &Program, rng: &mut Rng, size: u64, wide:
         }
         // Wide, a struct's arrays grow as a parameter's would: recursion still goes through arrays.
         Ty::Struct(id) => Value::Struct(
-            program.structs[*id].fields.iter().map(|(_, t)| generate(t, rng, if wide { size } else { size / 2 })).collect(),
+            program.structs[*id]
+                .fields
+                .iter()
+                .map(|(_, t)| generate(t, rng, if wide { size } else { size / 2 }))
+                .collect(),
         ),
         Ty::Enum(id) => {
             let variants = &program.enums[*id].variants;

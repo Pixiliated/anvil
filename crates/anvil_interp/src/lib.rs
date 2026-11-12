@@ -533,7 +533,7 @@ impl Recorder {
     }
 
     /// Counts what happened since the last change of line to the line that was running.
-    fn to_line(&mut self, next: Option<usize>, now: [u64; 2]) {
+    fn change_line(&mut self, next: Option<usize>, now: [u64; 2]) {
         if let Some(l) = self.line {
             for (total, (n, from)) in self.lines[l].iter_mut().zip(now.iter().zip(&self.line_from)) {
                 *total += n - from;
@@ -621,8 +621,8 @@ impl Recorder {
             self.funcs[func].bytes += inclusive[1];
         }
         if let Some(parent) = self.stack.last_mut() {
-            for k in 0..3 {
-                parent.callees[k] += inclusive[k];
+            for (callee, n) in parent.callees.iter_mut().zip(&inclusive) {
+                *callee += n;
             }
         }
         if let Some(v) = result {
@@ -957,9 +957,13 @@ fn call_bounded(
     match (r, bound_enforced) {
         // The cap lets a call take one step past its bound, to tell the two apart: one that
         // returns on that step broke it too.
-        (Ok(_), Some((b, c))) if steps > b => Called::Panicked(format!("takes more than {b} steps, past {}", c.message)),
+        (Ok(_), Some((b, c))) if steps > b => {
+            Called::Panicked(format!("takes more than {b} steps, past {}", c.message))
+        }
         (Ok(_), _) => match alloc_enforced {
-            Some((b, c)) if bytes > b => Called::Panicked(format!("allocates {bytes} bytes, more than {b}, past {}", c.message)),
+            Some((b, c)) if bytes > b => {
+                Called::Panicked(format!("allocates {bytes} bytes, more than {b}, past {}", c.message))
+            }
             _ => Called::Returned(Usage {
                 steps,
                 steps_bound: bound.map(|(b, _)| b),
@@ -1075,7 +1079,8 @@ pub fn check_contract(
                             tries += 1;
                             let mut trial = inputs.clone();
                             trial[i] = c;
-                            if let Called::Panicked(m) = call_checked(program, fid, &trial, max_steps, host.reborrow()) {
+                            if let Called::Panicked(m) = call_checked(program, fid, &trial, max_steps, host.reborrow())
+                            {
                                 (inputs, message) = (trial, m);
                                 kept += 1;
                                 continue 'smaller;
@@ -1140,7 +1145,11 @@ pub fn print_text(v: &Value, ty: &Ty) -> String {
 /// What writing to `items` in place copies first: all of it, `per` bytes an element, when the
 /// storage is shared (value semantics), else nothing.
 fn copy_bytes<T>(items: &Rc<Vec<T>>, per: u64) -> u64 {
-    if Rc::strong_count(items) > 1 { per * items.len() as u64 } else { 0 }
+    if Rc::strong_count(items) > 1 {
+        per * items.len() as u64
+    } else {
+        0
+    }
 }
 
 /// The bytes a value just made holds, by the model the tools count with: a str or bytes, its
@@ -1402,7 +1411,7 @@ impl<'p, 'h> Interp<'p, 'h> {
             while !r.stack.is_empty() {
                 r.leave(None, [self.taken, self.allocated, self.copied], 0);
             }
-            r.to_line(None, [self.taken, self.allocated]);
+            r.change_line(None, [self.taken, self.allocated]);
             r.steps = self.taken;
             r.bytes = self.allocated;
             r.copied = self.copied;
@@ -1420,7 +1429,7 @@ impl<'p, 'h> Interp<'p, 'h> {
     /// `line` runs from here on.
     fn at_line(&mut self, line: Option<usize>) {
         if let Some(r) = &mut self.rec {
-            r.to_line(line, [self.taken, self.allocated]);
+            r.change_line(line, [self.taken, self.allocated]);
         }
     }
 
@@ -1711,7 +1720,8 @@ impl<'p, 'h> Interp<'p, 'h> {
                         unreachable!("match on something else")
                     };
                     let tag = *tag;
-                    let arm = arms.iter().find(|a| a.variant == tag || a.also.contains(&tag)).expect("match is exhaustive");
+                    let arm =
+                        arms.iter().find(|a| a.variant == tag || a.also.contains(&tag)).expect("match is exhaustive");
                     for (field, local) in &arm.bindings {
                         let Value::Enum(_, fields) = walk(scrutinee, frame, &indices).0 else { unreachable!() };
                         frame[*local] = fields[*field].clone();
@@ -1771,7 +1781,9 @@ impl<'p, 'h> Interp<'p, 'h> {
                 };
             }
             ExprKind::StructLit(_, fields) => return Ok(Value::Struct(self.eval_fields(fields, frame)?)),
-            ExprKind::Variant { variant, fields, .. } => return Ok(Value::Enum(*variant, self.eval_fields(fields, frame)?)),
+            ExprKind::Variant { variant, fields, .. } => {
+                return Ok(Value::Enum(*variant, self.eval_fields(fields, frame)?))
+            }
             ExprKind::Str(s) => return Ok(self.literal(s)),
             ExprKind::Builtin(Builtin::Len, args) if peek(&args[0], frame).is_some() => {
                 return Ok(Value::I64(length_of(peek(&args[0], frame).unwrap())));
@@ -1955,13 +1967,13 @@ impl<'p, 'h> Interp<'p, 'h> {
             ExprKind::Pop { local, path, message, at } => {
                 let indices = self.indices(path, frame)?;
                 match self.place_mut(&mut frame[*local], path, &indices)? {
-                    Value::Array(items) => match {
+                    Value::Array(items) => {
                         self.allocated += self.copy_of(items, 8, at);
-                        Rc::make_mut(items).pop()
-                    } {
-                        Some(v) => v,
-                        None => return panic(message.clone()),
-                    },
+                        match Rc::make_mut(items).pop() {
+                            Some(v) => v,
+                            None => return panic(message.clone()),
+                        }
+                    }
                     other => unreachable!("pop from {other:?}"),
                 }
             }
@@ -1977,7 +1989,9 @@ impl<'p, 'h> Interp<'p, 'h> {
             }
             ExprKind::BitNot(_) => Value::I64(self.int(e, frame)?),
             ExprKind::FArith(..) | ExprKind::FNeg(_) => Value::F64(self.float(e, frame)?),
-            ExprKind::Cmp(_, l, _) if matches!(l.ty, Ty::I64 | Ty::F64(_) | Ty::Str) => Value::Bool(self.truth(e, frame)?),
+            ExprKind::Cmp(_, l, _) if matches!(l.ty, Ty::I64 | Ty::F64(_) | Ty::Str) => {
+                Value::Bool(self.truth(e, frame)?)
+            }
             ExprKind::Cmp(op, l, r) => {
                 let a = self.eval(l, frame)?;
                 let b = self.eval(r, frame)?;
@@ -1990,7 +2004,8 @@ impl<'p, 'h> Interp<'p, 'h> {
                 })
             }
             ExprKind::Cond { cond, then, otherwise, then_branch, else_branch } => {
-                let (branch, id) = if self.truth(cond, frame)? { (then, then_branch) } else { (otherwise, else_branch) };
+                let (branch, id) =
+                    if self.truth(cond, frame)? { (then, then_branch) } else { (otherwise, else_branch) };
                 if let (Some(id), Some(rec)) = (id, &mut self.rec) {
                     rec.branches[*id] += 1;
                 }

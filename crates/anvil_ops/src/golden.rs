@@ -104,7 +104,9 @@ pub fn orphans(project: &Project) -> Vec<String> {
         let name = if name.ends_with(".anv") { name.to_string() } else { format!("{name}.anv") };
         let meant = project.files.iter().find(|f| f.rsplit('/').next() == Some(name.as_str()));
         out.push(match meant {
-            Some(source) => format!("{shown} is not read: for {source} it would be {}/{source}.{kind}", project.golden_dir),
+            Some(source) => {
+                format!("{shown} is not read: for {source} it would be {}/{source}.{kind}", project.golden_dir)
+            }
             None => format!("{shown} is not read: no project file is named {base}"),
         });
     }
@@ -537,7 +539,8 @@ pub fn check_file(
         return with("differs", Some(format!("interpreter {d}{written}")));
     }
     if let Some(p) = native_program {
-        let backends: &[(bool, &str)] = if release { &[(false, "native"), (true, "release")] } else { &[(false, "native")] };
+        let backends: &[(bool, &str)] =
+            if release { &[(false, "native"), (true, "release")] } else { &[(false, "native")] };
         for (build_release, name) in backends {
             let scratch = std::env::temp_dir().join(format!("anvil_golden_{}_{}", std::process::id(), crate::unique()));
             let result = native_as(&p, &scratch, &file, &project.root, &input, *build_release);

@@ -61,7 +61,9 @@ pub(crate) fn eval(e: &Expr, local: &dyn Fn(LocalId) -> Range) -> Range {
         ExprKind::Builtin(Builtin::Len, _) => (0, LONGEST),
         ExprKind::Builtin(Builtin::BitLen | Builtin::LeadingZeros | Builtin::TrailingZeros, _) => (0, 64),
         ExprKind::Index { base, .. } if base.ty == Ty::Bytes => (0, 255),
-        ExprKind::IArith { op: op @ (IOp::Add | IOp::Sub | IOp::Mul), l, r, .. } => narrow(arith(*op, of(l), of(r)), ANY),
+        ExprKind::IArith { op: op @ (IOp::Add | IOp::Sub | IOp::Mul), l, r, .. } => {
+            narrow(arith(*op, of(l), of(r)), ANY)
+        }
         ExprKind::IArith { op: IOp::Div, l, r, .. } if of(r).0 >= 1 => {
             let a = of(l);
             (a.0.min(0), a.1.max(0))

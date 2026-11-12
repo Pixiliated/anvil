@@ -788,7 +788,11 @@ impl<'a> Checker<'a> {
         if self.module == 0 {
             for d in &const_decls {
                 let name = &d.name.name;
-                if !d.public && !name.starts_with('_') && !self.used_consts.contains(name) && self.consts.contains_key(name) {
+                if !d.public
+                    && !name.starts_with('_')
+                    && !self.used_consts.contains(name)
+                    && self.consts.contains_key(name)
+                {
                     self.err(Diagnostic::new("E0340", d.name.span, format!("`{name}` is never used")));
                 }
             }
@@ -1601,7 +1605,11 @@ impl<'a> Checker<'a> {
                 || BUILTINS.contains(&name)
                 || CONSTRUCTORS.contains(&name);
             if taken {
-                self.err(Diagnostic::new("E0201", d.name.span, format!("constant `{name}` has the name of a function or a type")));
+                self.err(Diagnostic::new(
+                    "E0201",
+                    d.name.span,
+                    format!("constant `{name}` has the name of a function or a type"),
+                ));
                 self.failed_imports.insert(name.to_string());
             } else if self.check_new_name(&d.name, "constant", &mut seen) {
                 own.insert(name, d);
@@ -1767,13 +1775,19 @@ impl<'a> Checker<'a> {
             rename_fix: None,
         };
         let inner = match &e.ty {
-            Ty::Enum(id) if self.enums[*id].name.starts_with("Option[") || self.enums[*id].name.starts_with("Result[") => {
+            Ty::Enum(id)
+                if self.enums[*id].name.starts_with("Option[") || self.enums[*id].name.starts_with("Result[") =>
+            {
                 Some(*id)
             }
             Ty::Error => None,
             other_ty => {
                 let shown = self.show(other_ty);
-                self.err(Diagnostic::new("E0352", init.span, format!("`let ... else` takes an Option or a Result, not {shown}")));
+                self.err(Diagnostic::new(
+                    "E0352",
+                    init.span,
+                    format!("`let ... else` takes an Option or a Result, not {shown}"),
+                ));
                 None
             }
         };
@@ -1787,7 +1801,11 @@ impl<'a> Checker<'a> {
         let value_ty = def.variants[0].fields[0].1.clone();
         if value_ty != t && t != Ty::Error {
             let (holds, declared) = (self.show(&value_ty), self.show(&t));
-            self.err(Diagnostic::new("E0300", init.span, format!("this holds {holds}, but `{}` is declared {declared}", name.name)));
+            self.err(Diagnostic::new(
+                "E0300",
+                init.span,
+                format!("this holds {holds}, but `{}` is declared {declared}", name.name),
+            ));
         }
         b.scopes.push(HashMap::new());
         let mut bindings = Vec::new();
@@ -1802,7 +1820,9 @@ impl<'a> Checker<'a> {
         }
         let (at, end) = (other.body.span, other.body.span.end);
         let body = self.block(b, &other.body);
-        let leaves = |st: &[ast::Stmt]| always_returns(st) || st.iter().any(|x| matches!(x.kind, StmtKind::Break | StmtKind::Continue));
+        let leaves = |st: &[ast::Stmt]| {
+            always_returns(st) || st.iter().any(|x| matches!(x.kind, StmtKind::Break | StmtKind::Continue))
+        };
         if !leaves(&other.body.stmts) {
             self.err(Diagnostic::new(
                 "E0352",
@@ -2796,7 +2816,10 @@ impl<'a> Checker<'a> {
                     scrutinee.span,
                     format!("match on `{ename}` does not handle {}", names.join(", ")),
                 )
-                .note("every variant needs an arm; there is no catch-all, but one arm can name several: A | B => { ... }", None)
+                .note(
+                    "every variant needs an arm; there is no catch-all, but one arm can name several: A | B => { ... }",
+                    None,
+                )
                 .fix1(
                     FixKind::ChangesMeaning,
                     "add empty arms for the missing variants",
@@ -3304,7 +3327,11 @@ impl<'a> Checker<'a> {
                 let then = self.expr_hint(b, yes, hint);
                 let otherwise = self.expect(b, no, &then.ty);
                 if then.ty == Ty::Void {
-                    self.err(Diagnostic::new("E0300", yes.span, "an `if` that gives a value needs one from each branch"));
+                    self.err(Diagnostic::new(
+                        "E0300",
+                        yes.span,
+                        "an `if` that gives a value needs one from each branch",
+                    ));
                 }
                 let then_branch = self.branch_id(b, yes.span, BranchKind::Then);
                 let else_branch = self.branch_id(b, no.span, BranchKind::Else);
@@ -4333,7 +4360,10 @@ impl<'a> Checker<'a> {
                 if let ExprKind::Cmp(op, l, r) = &x.kind {
                     if !matches!(l.ty, Ty::Param(_) | Ty::Error) {
                         let sides = vec![(**l).clone(), (**r).clone()];
-                        return Expr { kind: ExprKind::Builtin(Builtin::AssertCmp { message, op: *op }, sides), ty: Ty::Void };
+                        return Expr {
+                            kind: ExprKind::Builtin(Builtin::AssertCmp { message, op: *op }, sides),
+                            ty: Ty::Void,
+                        };
                     }
                 }
                 Expr { kind: ExprKind::Builtin(Builtin::Assert { message }, vec![x]), ty: Ty::Void }
@@ -4769,8 +4799,8 @@ impl<'a> Checker<'a> {
             | "to_array" | "to_upper" | "to_lower" | "chars" | "sorted" | "reversed" | "bit_len" | "leading_zeros"
             | "trailing_zeros" => Some(0),
             "push" | "remove" | "has" | "get" | "contains" | "find" | "starts_with" | "ends_with" | "split" | "xor"
-            | "unsigned_shr" | "wrapping_add" | "wrapping_sub" | "wrapping_mul" | "join" | "fixed"
-            | "parallel_map" | "word_at" => Some(1),
+            | "unsigned_shr" | "wrapping_add" | "wrapping_sub" | "wrapping_mul" | "join" | "fixed" | "parallel_map"
+            | "word_at" => Some(1),
             "replace" | "find_from" => Some(2),
             _ => None,
         };
@@ -5025,7 +5055,13 @@ impl<'a> Checker<'a> {
                 let key = self.expect(b, &args[0].value, &params[0].1);
                 let value = self.expect(b, &args[1].value, &params[1].1);
                 Expr {
-                    kind: ExprKind::MapSet { local, path, key: Box::new(key), value: Box::new(value), at: self.site(e.span) },
+                    kind: ExprKind::MapSet {
+                        local,
+                        path,
+                        key: Box::new(key),
+                        value: Box::new(value),
+                        at: self.site(e.span),
+                    },
                     ty: Ty::Void,
                 }
             }

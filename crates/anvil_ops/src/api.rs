@@ -24,7 +24,8 @@ pub(crate) fn lines(src: &SourceFile) -> Result<Vec<String>, String> {
         let line = match item {
             Item::Fn(f) if f.public => text(Span::new(f.span.start, f.body.span.start)),
             Item::Struct(s) if s.public => {
-                let fields: Vec<String> = s.fields.iter().map(|(f, t)| format!("{}: {}", f.name, text(t.span))).collect();
+                let fields: Vec<String> =
+                    s.fields.iter().map(|(f, t)| format!("{}: {}", f.name, text(t.span))).collect();
                 format!("{} {{ {} }}", header(s.span.start, s.name.span), fields.join(", "))
             }
             Item::Enum(e) if e.public => {
@@ -32,7 +33,8 @@ pub(crate) fn lines(src: &SourceFile) -> Result<Vec<String>, String> {
                 format!("{} {{ {} }}", header(e.span.start, e.name.span), variants.join(", "))
             }
             Item::Interface(i) if i.public => {
-                let methods: Vec<String> = i.methods.iter().map(|m| text(m.span).trim_end_matches(';').to_string()).collect();
+                let methods: Vec<String> =
+                    i.methods.iter().map(|m| text(m.span).trim_end_matches(';').to_string()).collect();
                 format!("{} {{ {} }}", header(i.span.start, i.name.span), methods.join("; "))
             }
             Item::Unit(u) if u.public => text(u.span),
@@ -208,7 +210,11 @@ pub fn api_approve(root: &Path, file: &str) -> Report {
             if let Err(e) = written {
                 return Report::error(format!("cannot write {}: {e}", p.display()));
             }
-            if c.status == "missing" { "new" } else { "changed" }
+            if c.status == "missing" {
+                "new"
+            } else {
+                "changed"
+            }
         }
     };
     let mut text = format!("approved the API of {rel} ({what}):\n");

@@ -175,7 +175,8 @@ impl Checked {
             .iter()
             .map(|u| json!({ "run": u.run, "steps": u.counts[0], "bytes": u.counts[1], "copied": u.counts[2] }))
             .collect();
-        let skipped: Vec<Value> = self.measured.skipped.iter().map(|(r, why)| json!({ "run": r, "why": why })).collect();
+        let skipped: Vec<Value> =
+            self.measured.skipped.iter().map(|(r, why)| json!({ "run": r, "why": why })).collect();
         let changes: Vec<Value> = self.changes.iter().map(|c| json!({ "kind": c.kind, "text": c.text })).collect();
         json!({ "file": self.file, "status": self.status, "runs": runs, "skipped": skipped, "changes": changes })
     }
@@ -206,7 +207,14 @@ pub(crate) fn measure(project: &Project, file: &str, max_steps: Option<u64>) -> 
     let src = Files::disk(&project.root).load(file).map_err(|r| r.json["error"].as_str().unwrap_or("").to_string())?;
     let program = match anvil_front::compile_with(&src, &crate::loader(&project.root)) {
         (_, Ok(p)) => p,
-        (_, Err(d)) => return Err(format!("{file} does not compile: {} error(s), the first {}: {}", d.len(), d[0].code, d[0].message)),
+        (_, Err(d)) => {
+            return Err(format!(
+                "{file} does not compile: {} error(s), the first {}: {}",
+                d.len(),
+                d[0].code,
+                d[0].message
+            ))
+        }
     };
     let mut ffi = crate::c_functions(&program)?;
     let p2 = program.clone();
@@ -270,7 +278,11 @@ pub fn usage(root: &Path, file: Option<&str>, max_steps: Option<u64>) -> Report 
         results.push(c);
     }
     let bad = results.iter().filter(|c| c.failed()).count();
-    text.push_str(&format!("{} of {} file(s) use no more than their approved usage\n", results.len() - bad, results.len()));
+    text.push_str(&format!(
+        "{} of {} file(s) use no more than their approved usage\n",
+        results.len() - bad,
+        results.len()
+    ));
     let json = json!({ "ok": bad == 0, "files": results.iter().map(Checked::to_json).collect::<Vec<_>>() });
     let exit = if bad == 0 { EXIT_OK } else { EXIT_FAILED };
     Report { json, stdout: text, stderr: String::new(), exit, failed: bad > 0 }
@@ -316,7 +328,11 @@ pub fn usage_approve(root: &Path, file: Option<&str>, max_steps: Option<u64>) ->
                 if let Err(e) = written {
                     return Report::error(format!("cannot write {}: {e}", p.display()));
                 }
-                if c.status == "missing" { "new" } else { "changed" }
+                if c.status == "missing" {
+                    "new"
+                } else {
+                    "changed"
+                }
             }
         };
         text.push_str(&format!("approved the usage of {f} ({what}):\n"));

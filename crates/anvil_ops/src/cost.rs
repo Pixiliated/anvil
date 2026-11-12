@@ -85,7 +85,8 @@ fn fit(points: &[(u64, u64)]) -> (u64, u64, u64) {
     for (i, &(xi, si)) in top.iter().enumerate() {
         for &(xj, sj) in &top[i + 1..] {
             if xi != xj {
-                let (dx, ds) = if xi > xj { (xi - xj, si as i128 - sj as i128) } else { (xj - xi, sj as i128 - si as i128) };
+                let (dx, ds) =
+                    if xi > xj { (xi - xj, si as i128 - sj as i128) } else { (xj - xi, sj as i128 - si as i128) };
                 if ds > 0 {
                     candidates.push(((ds + dx as i128 - 1) / dx as i128) as u64);
                 }
@@ -136,8 +137,16 @@ impl Model {
             // x * (x + 1) is even, so the division is exact; a multiplies first.
             _ if self.triangular => {
                 let t = &self.term;
-                let scaled = if self.a == 1 { format!("{t} * ({t} + 1) / 2") } else { format!("{} * {t} * ({t} + 1) / 2", self.a) };
-                return if self.b == 0 { format!("{keyword} {scaled}") } else { format!("{keyword} {scaled} + {}", self.b) };
+                let scaled = if self.a == 1 {
+                    format!("{t} * ({t} + 1) / 2")
+                } else {
+                    format!("{} * {t} * ({t} + 1) / 2", self.a)
+                };
+                return if self.b == 0 {
+                    format!("{keyword} {scaled}")
+                } else {
+                    format!("{keyword} {scaled} + {}", self.b)
+                };
             }
             _ => format!("{t} * {t}", t = self.term),
         };
@@ -177,7 +186,9 @@ fn model(sizes: &[Vec<(String, i64)>], values: &[u64]) -> Model {
         let negative = sizes.iter().any(|s| s[k].1 < 0);
         let term = if negative { format!("abs({term})") } else { term.clone() };
         let xs: Vec<u64> = sizes.iter().map(|s| s[k].1.unsigned_abs()).collect();
-        let shapes: [(&str, bool, fn(u64) -> u64); 4] = [
+        // (name, whether it is the triangular one, the bound).
+        type Shape = (&'static str, bool, fn(u64) -> u64);
+        let shapes: [Shape; 4] = [
             ("logarithmic", false, bits),
             ("linear", false, |x| x),
             ("quadratic", false, |x| x.saturating_mul(x)),
@@ -424,7 +435,8 @@ fn clause_text(keyword: &str, c: &Option<Check>) -> Option<String> {
 /// Measures pure function `id` (whose parameters can all be generated) on CASES calls.
 pub(crate) fn measure_one(program: &Program, id: usize, ffi: &mut Option<crate::Ffi>, root: &Path) -> Measured {
     let f = &program.funcs[id];
-    let empty = |clause, unit, bound_text| Resource { clause, unit, values: Vec::new(), bounds: Vec::new(), bound_text };
+    let empty =
+        |clause, unit, bound_text| Resource { clause, unit, values: Vec::new(), bounds: Vec::new(), bound_text };
     let mut m = Measured {
         name: f.name.clone(),
         signature_params: f.params.iter().map(|p| f.locals[*p].name.clone()).collect(),

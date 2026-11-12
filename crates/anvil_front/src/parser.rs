@@ -136,9 +136,9 @@ impl Parser {
                     Tok::Extern => self.extern_decl(Vec::new()).map(|f| Item::Fn(Box::new(f)))?,
                     Tok::Interface => self.interface_decl().map(Item::Interface)?,
                     _ => {
-                        return Err(
-                            self.unexpected("`fn`, `extern`, `struct`, `enum`, `interface`, `unit` or `const` after `pub`")
-                        )
+                        return Err(self.unexpected(
+                            "`fn`, `extern`, `struct`, `enum`, `interface`, `unit` or `const` after `pub`",
+                        ))
                     }
                 };
                 match &mut item {
@@ -740,8 +740,9 @@ impl Parser {
         while self.peek() == &Tok::Allow {
             let a = self.allow_decl()?;
             if a.lint.name != "mutants" {
-                let d = Diagnostic::new("E0100", a.lint.span, format!("`allow {}` goes before a function", a.lint.name))
-                    .note("only `allow mutants` can excuse a single statement", None);
+                let d =
+                    Diagnostic::new("E0100", a.lint.span, format!("`allow {}` goes before a function", a.lint.name))
+                        .note("only `allow mutants` can excuse a single statement", None);
                 return Err(d);
             }
             allows.push(a);

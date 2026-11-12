@@ -93,7 +93,9 @@ mod os {
                     std::hint::spin_loop();
                 }
                 // SAFETY: as above.
-                let read = unsafe { QueryThreadCycleTime(GetCurrentThread(), &mut c1) != 0 && QueryPerformanceCounter(&mut t1) != 0 };
+                let read = unsafe {
+                    QueryThreadCycleTime(GetCurrentThread(), &mut c1) != 0 && QueryPerformanceCounter(&mut t1) != 0
+                };
                 let seconds = (t1 - t0) as f64 / frequency as f64;
                 if read && seconds > 0.0 && c1 > c0 {
                     let rate = (c1 - c0) as f64 / seconds;
@@ -505,7 +507,11 @@ pub fn compare(
     text.push_str(&format!(
         "{rounds} rounds of the time charged to each{}, {}{}\n",
         if release { " (release builds)" } else { "" },
-        if pinned { format!("on one fast processor {}", os::PRIORITY) } else { "NOT kept to one processor, so it may mislead".to_string() },
+        if pinned {
+            format!("on one fast processor {}", os::PRIORITY)
+        } else {
+            "NOT kept to one processor, so it may mislead".to_string()
+        },
         if idle { ", its core's other one kept idle" } else { "" },
     ));
     if !same_output || exits[0] != exits[1] {

@@ -533,7 +533,9 @@ fn lex_char(text: &str, i: &mut usize) -> Result<Token, Diagnostic> {
             Some('t') => (9, 2),
             Some('\\') => (92, 2),
             Some('\'') => (39, 2),
-            _ => return bad("unknown escape in a character literal; valid escapes are \\n \\r \\t \\\\ \\'".to_string()),
+            _ => {
+                return bad("unknown escape in a character literal; valid escapes are \\n \\r \\t \\\\ \\'".to_string())
+            }
         },
         Some(c) if c.is_ascii() && c != '\'' && c != '\n' => (c as i64, 1),
         Some(c) if !c.is_ascii() => return bad(format!("`{c}` is not ASCII; a character literal is one byte")),
@@ -549,7 +551,11 @@ fn lex_char(text: &str, i: &mut usize) -> Result<Token, Diagnostic> {
 fn lex_raw(text: &str, i: &mut usize) -> Result<Token, Diagnostic> {
     let start = *i;
     let Some(n) = text[start + 1..].find('`') else {
-        return Err(Diagnostic::new("E0002", Span::new(start, start + 1), "unterminated raw string: no closing backtick"));
+        return Err(Diagnostic::new(
+            "E0002",
+            Span::new(start, start + 1),
+            "unterminated raw string: no closing backtick",
+        ));
     };
     *i = start + n + 2;
     let s = text[start + 1..start + 1 + n].replace("\r\n", "\n");

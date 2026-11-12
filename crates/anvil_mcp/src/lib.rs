@@ -568,7 +568,13 @@ impl AnvilServer {
     async fn measure(&self, Parameters(a): Parameters<MeasureArgs>) -> Result<CallToolResult, ErrorData> {
         self.op(move |root| {
             let input = program_input(a.args, a.input);
-            anvil_ops::measure(root, a.file.as_deref(), Some(steps(a.max_steps)), &input, a.native_only.unwrap_or(false))
+            anvil_ops::measure(
+                root,
+                a.file.as_deref(),
+                Some(steps(a.max_steps)),
+                &input,
+                a.native_only.unwrap_or(false),
+            )
         })
         .await
     }

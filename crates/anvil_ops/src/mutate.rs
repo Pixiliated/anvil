@@ -155,7 +155,13 @@ impl Sites<'_> {
         match &e.kind {
             ExprKind::Int(v) => {
                 if let Some(n) = v.checked_add(1) {
-                    self.add(e.span.start, e.span.end, n.to_string(), &self.text[e.span.start..e.span.end].to_string(), &n.to_string());
+                    self.add(
+                        e.span.start,
+                        e.span.end,
+                        n.to_string(),
+                        &self.text[e.span.start..e.span.end],
+                        &n.to_string(),
+                    );
                 }
             }
             ExprKind::Bool(b) => {
@@ -322,8 +328,7 @@ fn judge(
     max_steps: Option<u64>,
 ) -> Result<Option<String>, String> {
     let seeing: Vec<&Run> = target.runs.iter().filter(|r| r.sees(file, line)).collect();
-    let tests: Vec<(usize, u64)> =
-        seeing.iter().filter_map(|r| r.test.map(|t| (t, r.budget(max_steps)))).collect();
+    let tests: Vec<(usize, u64)> = seeing.iter().filter_map(|r| r.test.map(|t| (t, r.budget(max_steps)))).collect();
     if !tests.is_empty() {
         let mut ffi = crate::c_functions(&program)?;
         let root = project.root.clone();
@@ -446,7 +451,11 @@ fn try_mutant(
             Err(_) if t.file == file => return Ok(Verdict { status: "invalid", by: None, reached }),
             // It compiles alone but breaks an importer: that importer noticed.
             Err(e) => {
-                return Ok(Verdict { status: "killed", by: Some(format!("{} no longer compiles ({e})", t.file)), reached })
+                return Ok(Verdict {
+                    status: "killed",
+                    by: Some(format!("{} no longer compiles ({e})", t.file)),
+                    reached,
+                })
             }
         };
         if let Some(what) = judge(project, t, program, file, m.line, max_steps)? {
@@ -498,7 +507,7 @@ pub fn mutate(root: &Path, file: &str, only: Option<&str>, max_steps: Option<u64
             continue;
         }
         if let Ok(p) = compile(disk, f) {
-            if p.modules.iter().any(|m| *m == file) {
+            if p.modules.contains(&file) {
                 names.push(f.clone());
             }
         }
@@ -582,7 +591,10 @@ pub fn mutate(root: &Path, file: &str, only: Option<&str>, max_steps: Option<u64
             _ => {
                 survived += 1;
                 let why = if v.reached { "no test or golden noticed" } else { "no test or golden runs this statement" };
-                text.push_str(&format!("{file}:{l}:{c} survived: `{}` to `{}` in `{}`; {why}\n", m.from, m.to, m.function));
+                text.push_str(&format!(
+                    "{file}:{l}:{c} survived: `{}` to `{}` in `{}`; {why}\n",
+                    m.from, m.to, m.function
+                ));
             }
         }
         result["status"] = json!(status);

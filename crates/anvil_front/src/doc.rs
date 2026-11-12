@@ -64,15 +64,14 @@ pub fn examples(src: &SourceFile, file: &ast::File) -> (Vec<TestDecl>, Vec<Diagn
                 errors.push(Diagnostic::new("E0100", span, "an example needs an expression after `example:`"));
                 continue;
             }
-            let expr = match crate::lexer::lex_range(&src.text, span.start, span.end)
-                .and_then(crate::parser::parse_expr)
-            {
-                Ok(e) => e,
-                Err(d) => {
-                    errors.push(d);
-                    continue;
-                }
-            };
+            let expr =
+                match crate::lexer::lex_range(&src.text, span.start, span.end).and_then(crate::parser::parse_expr) {
+                    Ok(e) => e,
+                    Err(d) => {
+                        errors.push(d);
+                        continue;
+                    }
+                };
             let (line_no, _) = src.line_col(span.start);
             let call = Expr {
                 kind: ExprKind::Call {

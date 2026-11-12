@@ -4,14 +4,14 @@
 //! that the MCP server has a tool for each, with the same parameters.
 
 mod api;
+mod compare;
 mod cost;
 mod docs;
 mod fuzz;
 pub mod golden;
+mod hot;
 mod inspect;
 mod lsp;
-mod compare;
-mod hot;
 mod measure;
 mod mutate;
 pub(crate) mod proj;
@@ -21,13 +21,13 @@ mod testing;
 mod usage;
 
 pub use api::{api, api_approve};
+pub use compare::compare;
 pub use cost::cost;
 pub use docs::docs;
 pub use fuzz::{fuzz, program_for};
+pub use hot::hot;
 pub use inspect::{profile, trace, TRACE_LIMIT};
 pub use lsp::lsp;
-pub use compare::compare;
-pub use hot::hot;
 pub use measure::measure;
 pub use mutate::mutate;
 pub use proj::{
@@ -595,8 +595,13 @@ pub fn build(root: &Path, file: &str, out: Option<&str>, asm: bool, release: boo
     };
     let work = std::env::temp_dir().join(format!("anvil_build_{}_{}", std::process::id(), unique()));
     let result = if release {
-        anvil_codegen::build_exe_release(&program, &out, &work)
-            .and_then(|()| if asm { anvil_codegen::c_source(&program) } else { Ok(String::new()) })
+        anvil_codegen::build_exe_release(&program, &out, &work).and_then(|()| {
+            if asm {
+                anvil_codegen::c_source(&program)
+            } else {
+                Ok(String::new())
+            }
+        })
     } else {
         anvil_codegen::build_exe(&program, &out, &work, asm)
     };

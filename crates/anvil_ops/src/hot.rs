@@ -20,9 +20,16 @@ use std::process::{Command, Stdio};
 /// be done about it.
 const SYSTEM: (&str, &str) = ("the system: files, memory from the OS, waiting", "");
 const LIBRARY: (&str, &str) = ("the C library", "");
-const BYTES: (&str, &str) = ("copying and comparing bytes", "text and arrays being copied or compared; `anvil profile FILE` names where values are copied");
-const COPYING: (&str, &str) = ("copying arrays and maps", "a write to something shared copies it first; `anvil profile FILE` names each copy and why");
-const OBJECTS: (&str, &str) = ("making and freeing objects", "short-lived arrays and text; numbers in a flat array make none");
+const BYTES: (&str, &str) = (
+    "copying and comparing bytes",
+    "text and arrays being copied or compared; `anvil profile FILE` names where values are copied",
+);
+const COPYING: (&str, &str) = (
+    "copying arrays and maps",
+    "a write to something shared copies it first; `anvil profile FILE` names each copy and why",
+);
+const OBJECTS: (&str, &str) =
+    ("making and freeing objects", "short-lived arrays and text; numbers in a flat array make none");
 const MAPS: (&str, &str) = ("maps", "");
 const SORTING: (&str, &str) = ("sorting", "");
 const TEXT: (&str, &str) = ("text", "");
@@ -32,21 +39,79 @@ const FILES: (&str, &str) = ("reading and writing files", "");
 /// The group of a symbol that is not one of the program's functions.
 fn group_of(name: &str) -> (&'static str, &'static str) {
     let starts = |prefixes: &[&str]| prefixes.iter().any(|p| name.starts_with(p));
-    if matches!(name, "anvil_arr_unique" | "retain_elements" | "map_clone" | "deep_copy" | "slice_copy" | "anvil_arr_slice") {
+    if matches!(
+        name,
+        "anvil_arr_unique" | "retain_elements" | "map_clone" | "deep_copy" | "slice_copy" | "anvil_arr_slice"
+    ) {
         COPYING
     } else if starts(&["anvil_map_", "hash_", "table_", "key_before", "sort_positions"]) {
         MAPS
-    } else if starts(&["pool_", "str_new", "str_from", "arr_init", "anvil_retain", "anvil_release", "anvil_arr_new", "anvil_fn_new", "anvil_arr_push_slot", "xmalloc", "malloc", "free", "realloc", "calloc", "_malloc", "_free", "_realloc", "_calloc", "_heap"]) {
+    } else if starts(&[
+        "pool_",
+        "str_new",
+        "str_from",
+        "arr_init",
+        "anvil_retain",
+        "anvil_release",
+        "anvil_arr_new",
+        "anvil_fn_new",
+        "anvil_arr_push_slot",
+        "xmalloc",
+        "malloc",
+        "free",
+        "realloc",
+        "calloc",
+        "_malloc",
+        "_free",
+        "_realloc",
+        "_calloc",
+        "_heap",
+    ]) {
         OBJECTS
     } else if starts(&["anvil_arr_sorted", "merge_sort"]) {
         SORTING
-    } else if starts(&["anvil_print", "anvil_eprint", "fwrite", "_fwrite", "fputc", "_fputc", "_write", "fflush", "_fflush", "__stdio"]) {
+    } else if starts(&[
+        "anvil_print",
+        "anvil_eprint",
+        "fwrite",
+        "_fwrite",
+        "fputc",
+        "_fputc",
+        "_write",
+        "fflush",
+        "_fflush",
+        "__stdio",
+    ]) {
         PRINTING
     } else if starts(&["anvil_read", "anvil_write", "read_any", "fread", "_fread", "_read"]) {
         FILES
-    } else if starts(&["anvil_str", "anvil_bytes", "anvil_f64", "anvil_arr_join", "format_f64", "i64_digits", "find_at", "utf8_valid", "strtod", "snprintf"]) {
+    } else if starts(&[
+        "anvil_str",
+        "anvil_bytes",
+        "anvil_f64",
+        "anvil_arr_join",
+        "format_f64",
+        "i64_digits",
+        "find_at",
+        "utf8_valid",
+        "strtod",
+        "snprintf",
+    ]) {
         TEXT
-    } else if starts(&["mem", "__mem", "Mov", "Ymm", "Xmm", "mcmp", "__avx", "__sse", "_mem", "head_loop", "main_loop", "found"]) {
+    } else if starts(&[
+        "mem",
+        "__mem",
+        "Mov",
+        "Ymm",
+        "Xmm",
+        "mcmp",
+        "__avx",
+        "__sse",
+        "_mem",
+        "head_loop",
+        "main_loop",
+        "found",
+    ]) {
         BYTES
     } else {
         LIBRARY
@@ -109,7 +174,8 @@ fn rows(program: &Program, symbols: &[(u64, String)], base: u64, samples: &[u64]
         .0;
     let last = symbols.last().map_or(0, |(a, _)| *a);
     // (what it is, hint), to (samples, samples per symbol).
-    let mut counts: BTreeMap<(String, String, &'static str), (u64, BTreeMap<String, u64>)> = BTreeMap::new();
+    type Counts = BTreeMap<(String, String, &'static str), (u64, BTreeMap<String, u64>)>;
+    let mut counts: Counts = BTreeMap::new();
     for s in samples {
         let at = (*s).wrapping_sub(base).wrapping_add(linked);
         let i = symbols.partition_point(|(a, _)| *a <= at);
@@ -137,7 +203,8 @@ fn rows(program: &Program, symbols: &[(u64, String)], base: u64, samples: &[u64]
         .map(|((what, hint, kind), (n, names))| {
             let mut names: Vec<(String, u64)> = names.into_iter().collect();
             names.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
-            let names: Vec<Value> = names.iter().take(4).map(|(s, c)| json!({ "symbol": s, "percent": percent(*c) })).collect();
+            let names: Vec<Value> =
+                names.iter().take(4).map(|(s, c)| json!({ "symbol": s, "percent": percent(*c) })).collect();
             (n, json!({ "what": what, "kind": kind, "percent": percent(n), "symbols": names, "hint": hint }))
         })
         .collect();
@@ -178,7 +245,9 @@ pub fn hot(root: &Path, file: &str, input: &ProgramInput, release: bool) -> Repo
         let table = rows(&program, &built.symbols, base, &samples)?;
         let notes: Vec<Value> =
             built.notes.iter().map(|n| json!({ "function": n.function, "at": n.at, "local": n.local })).collect();
-        Ok::<_, String>(json!({ "ok": true, "exit": code, "ms": ms, "samples": samples.len(), "rows": table, "unproved": notes }))
+        Ok::<_, String>(
+            json!({ "ok": true, "exit": code, "ms": ms, "samples": samples.len(), "rows": table, "unproved": notes }),
+        )
     })();
     let _ = std::fs::remove_dir_all(&scratch);
     let v = match result {
@@ -200,7 +269,12 @@ pub fn hot(root: &Path, file: &str, input: &ProgramInput, release: bool) -> Repo
             .map(|s| format!("{} {}%", s["symbol"].as_str().unwrap_or(""), s["percent"]))
             .collect();
         let detail = if names.is_empty() { String::new() } else { format!("  ({})", names.join(", ")) };
-        text.push_str(&format!("{:>5.1}%  {}{}\n", r["percent"].as_f64().unwrap_or(0.0), r["what"].as_str().unwrap_or(""), detail));
+        text.push_str(&format!(
+            "{:>5.1}%  {}{}\n",
+            r["percent"].as_f64().unwrap_or(0.0),
+            r["what"].as_str().unwrap_or(""),
+            detail
+        ));
         if let Some(h) = r["hint"].as_str().filter(|h| !h.is_empty()) {
             text.push_str(&format!("        {h}\n"));
         }

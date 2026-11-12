@@ -59,7 +59,14 @@ fn measure_file(
     let src = Files::disk(&project.root).load(file).map_err(|r| r.json["error"].as_str().unwrap_or("").to_string())?;
     let program = match anvil_front::compile_with(&src, &crate::loader(&project.root)) {
         (_, Ok(p)) => p,
-        (_, Err(d)) => return Err(format!("{file} does not compile: {} error(s), the first {}: {}", d.len(), d[0].code, d[0].message)),
+        (_, Err(d)) => {
+            return Err(format!(
+                "{file} does not compile: {} error(s), the first {}: {}",
+                d.len(),
+                d[0].code,
+                d[0].message
+            ))
+        }
     };
     if program.main.is_none() {
         return Ok(None);
@@ -90,7 +97,13 @@ fn measure_file(
 }
 
 /// Every project file with a main (or one file), run natively and measured.
-pub fn measure(root: &Path, file: Option<&str>, max_steps: Option<u64>, input: &ProgramInput, native_only: bool) -> Report {
+pub fn measure(
+    root: &Path,
+    file: Option<&str>,
+    max_steps: Option<u64>,
+    input: &ProgramInput,
+    native_only: bool,
+) -> Report {
     if file.is_none() && input.given() {
         return Report::usage("arguments and --input are for one file; name it");
     }

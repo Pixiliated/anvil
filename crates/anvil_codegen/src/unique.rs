@@ -191,7 +191,9 @@ impl Walk<'_> {
             // Read through a borrowed reference (see `plain`), which it does not keep.
             ExprKind::Index { base, index, plain: true, .. } if root(base).is_some() => self.expr(index),
             ExprKind::Builtin(Builtin::Len, args) if root(&args[0]).is_some() => {}
-            ExprKind::Builtin(Builtin::MapHas | Builtin::MapGet, args) if root(&args[0]).is_some() && !mutates(&args[1]) => {
+            ExprKind::Builtin(Builtin::MapHas | Builtin::MapGet, args)
+                if root(&args[0]).is_some() && !mutates(&args[1]) =>
+            {
                 self.expr(&args[1])
             }
             ExprKind::Builtin(Builtin::MapKeys | Builtin::MapValues, args) if root(&args[0]).is_some() => {}
@@ -205,7 +207,9 @@ impl Walk<'_> {
             }
             // Changes the array the local holds in place, after a check of its own.
             ExprKind::Push { .. } | ExprKind::Pop { .. } | ExprKind::MapSet { .. } | ExprKind::MapRemove { .. } => {
-                if let (ExprKind::Pop { local, path, .. } | ExprKind::MapRemove { local, path, .. }, Some(shrunk)) = (&e.kind, self.shrunk.as_deref_mut()) {
+                if let (ExprKind::Pop { local, path, .. } | ExprKind::MapRemove { local, path, .. }, Some(shrunk)) =
+                    (&e.kind, self.shrunk.as_deref_mut())
+                {
                     if !path.iter().any(|step| matches!(step, Step::Index { .. })) {
                         shrunk.insert(*local);
                     }
@@ -276,7 +280,9 @@ pub(crate) fn surely_written(program: &Program, types: &[Ty], body: &[Stmt]) -> 
             break;
         }
         let place = match s {
-            Stmt::Assign(l, path, _, _) if path.iter().any(|step| matches!(step, Step::Index { .. })) => Some((*l, path)),
+            Stmt::Assign(l, path, _, _) if path.iter().any(|step| matches!(step, Step::Index { .. })) => {
+                Some((*l, path))
+            }
             Stmt::Expr(Expr { kind: ExprKind::Push { local, path, .. }, .. }) => Some((*local, path)),
             _ => None,
         };
@@ -293,7 +299,12 @@ pub(crate) fn surely_written(program: &Program, types: &[Ty], body: &[Stmt]) -> 
 pub(crate) fn repeats(e: &Expr) -> bool {
     let plain = match &e.kind {
         ExprKind::Int(_) | ExprKind::Float(_) | ExprKind::Bool(_) | ExprKind::Local(_) | ExprKind::Field(..) => true,
-        ExprKind::And(..) | ExprKind::Or(..) | ExprKind::Not(_) | ExprKind::BitNot(_) | ExprKind::FNeg(_) | ExprKind::FArith(..) => true,
+        ExprKind::And(..)
+        | ExprKind::Or(..)
+        | ExprKind::Not(_)
+        | ExprKind::BitNot(_)
+        | ExprKind::FNeg(_)
+        | ExprKind::FArith(..) => true,
         ExprKind::IArith { .. } | ExprKind::INeg { .. } | ExprKind::Bits { .. } => true,
         ExprKind::Cmp(_, l, _) => matches!(l.ty, Ty::I64 | Ty::F64(_) | Ty::Bool),
         ExprKind::Index { plain, .. } => *plain,
@@ -356,7 +367,9 @@ fn not_held(body: &[Stmt]) -> HashSet<LocalId> {
                 Stmt::Drop(l) => {
                     out.insert(*l);
                 }
-                Stmt::While(..) | Stmt::For(..) | Stmt::ForEach { .. } => unreachable!("only innermost loops are asked about"),
+                Stmt::While(..) | Stmt::For(..) | Stmt::ForEach { .. } => {
+                    unreachable!("only innermost loops are asked about")
+                }
                 Stmt::Return(None) | Stmt::Break | Stmt::Continue | Stmt::Reached(_) | Stmt::Line(_) => {}
             }
         }
@@ -447,7 +460,12 @@ pub(crate) fn held_arrays(program: &Program, types: &[Ty], f: &Func) -> BTreeMap
                     expr(program, iter, looping, found);
                     block(program, types, body, true, found);
                 }
-                Stmt::Return(None) | Stmt::Drop(_) | Stmt::Break | Stmt::Continue | Stmt::Reached(_) | Stmt::Line(_) => {}
+                Stmt::Return(None)
+                | Stmt::Drop(_)
+                | Stmt::Break
+                | Stmt::Continue
+                | Stmt::Reached(_)
+                | Stmt::Line(_) => {}
             }
         }
     }
@@ -617,7 +635,12 @@ fn tests(e: &Expr) -> (&Expr, Vec<&Expr>) {
 /// If the loop counts up by a fixed step to a limit it cannot change, as its first test and last
 /// statement say. Its counter changes nowhere else, so every round's counter is one of
 /// first, first + step, ... below the limit, whatever else the body does.
-pub(crate) fn counted_while<'e>(program: &Program, types: &[Ty], cond: &'e Expr, body: &'e [Stmt]) -> Option<CountedWhile<'e>> {
+pub(crate) fn counted_while<'e>(
+    program: &Program,
+    types: &[Ty],
+    cond: &'e Expr,
+    body: &'e [Stmt],
+) -> Option<CountedWhile<'e>> {
     if !is_innermost(body) {
         return None;
     }

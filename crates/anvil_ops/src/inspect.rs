@@ -284,8 +284,10 @@ pub fn profile(root: &Path, file: &str, test: Option<&str>, max_steps: Option<u6
                     let mut out: Vec<From> = of
                         .iter()
                         .map(|(s, (b, t))| {
-                            let args =
-                                p.handed.get(s).map_or(Vec::new(), |ks| ks.iter().map(|k| (k.what.clone(), k.kept)).collect());
+                            let args = p
+                                .handed
+                                .get(s)
+                                .map_or(Vec::new(), |ks| ks.iter().map(|k| (k.what.clone(), k.kept)).collect());
                             (s.clone(), *b, *t, args)
                         })
                         .collect();
@@ -341,7 +343,9 @@ pub fn profile(root: &Path, file: &str, test: Option<&str>, max_steps: Option<u6
                 for (what, kept) in args {
                     let note = match kept {
                         Some(why) => format!("`{what}` is not moved there: {why}"),
-                        None => format!("`{what}` is moved there (what shares it is elsewhere: another value, or the callee)"),
+                        None => format!(
+                            "`{what}` is moved there (what shares it is elsewhere: another value, or the callee)"
+                        ),
                     };
                     text.push_str(&format!("{:>34}{note}\n", ""));
                 }
@@ -350,7 +354,10 @@ pub fn profile(root: &Path, file: &str, test: Option<&str>, max_steps: Option<u6
                 text.push_str(&format!("{:>32}... {} more call site(s)\n", "", calls.len() - COPY_CALLS));
             }
             for (site, b, times, args) in up.iter().take(COPY_CALLS) {
-                text.push_str(&format!("{b:>12} bytes {times:>8}x    further up, {site}: {}\n", site_line(&files, site)));
+                text.push_str(&format!(
+                    "{b:>12} bytes {times:>8}x    further up, {site}: {}\n",
+                    site_line(&files, site)
+                ));
                 for (what, why) in args.iter().filter_map(|(what, kept)| kept.map(|why| (what, why))) {
                     text.push_str(&format!("{:>34}`{what}` keeps a reference there: {why}\n", ""));
                 }

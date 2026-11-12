@@ -176,8 +176,7 @@ pub fn golden_approve(root: &Path, file: &str, max_steps: Option<u64>) -> Report
     json["golden"] = json!(path.display().to_string());
     json["change"] = json!(change);
     // A misnamed input means this was just approved without it: say so here, not only in verify.
-    let lost: Vec<String> =
-        golden::orphans(&project).into_iter().filter(|m| m.contains(&format!("/{rel}."))).collect();
+    let lost: Vec<String> = golden::orphans(&project).into_iter().filter(|m| m.contains(&format!("/{rel}."))).collect();
     let note: String = lost.iter().map(|m| format!("note: {m}\n")).collect();
     json["unread"] = json!(lost);
     ok(json, format!("approved {rel} ({change}):\n{}{note}", out.to_text()))
@@ -306,18 +305,19 @@ fn verify_file(
         mark_ran(&mut ran, &mut reached, c);
     }
     // What each run takes, against its approved usage.
-    let usage = match crate::usage::check(project, file, crate::usage::measured(&results, (g.status, g.counts.as_ref()))) {
-        Ok(u) => {
-            for m in u.findings() {
-                add("usage", m, String::new());
+    let usage =
+        match crate::usage::check(project, file, crate::usage::measured(&results, (g.status, g.counts.as_ref()))) {
+            Ok(u) => {
+                for m in u.findings() {
+                    add("usage", m, String::new());
+                }
+                u.status
             }
-            u.status
-        }
-        Err(e) => {
-            add("usage", e, String::new());
-            "error"
-        }
-    };
+            Err(e) => {
+                add("usage", e, String::new());
+                "error"
+            }
+        };
     // main runs only under its golden, and a missing golden is already a finding.
     let main = g.status != "no_main";
     let key = |f: &anvil_front::ir::Func| (modules[f.module].clone(), f.span.start);
@@ -369,7 +369,10 @@ fn verify_file(
         "file": file, "errors": 0, "tests": tests.len(), "tests_failed": test_failures, "golden": g.status,
         "steps": steps, "usage": usage, "untested": [], "unreached": [], "contracts": contracts,
     });
-    (json, Some(Coverage { file: file.to_string(), own, ran, branches: own_branches, reached, modules: modules.clone() }))
+    (
+        json,
+        Some(Coverage { file: file.to_string(), own, ran, branches: own_branches, reached, modules: modules.clone() }),
+    )
 }
 
 /// The `contract` lint: a function whose requires hold for generated arguments must return, its
@@ -572,7 +575,8 @@ fn api_findings(project: &Project, coverage: &[Coverage], files: &mut [Value], s
             // A file that does not parse is already a finding of its own.
             Err(_) => continue,
         };
-        let mut add = |message: String| seen.push(Seen { file: f.clone(), check: "api".into(), message, at: String::new() });
+        let mut add =
+            |message: String| seen.push(Seen { file: f.clone(), check: "api".into(), message, at: String::new() });
         match c.status {
             "missing" => add(format!(
                 "{f} has pub items but no approved API; check it with `anvil api {f}`, then `anvil api approve {f}`"
@@ -623,10 +627,8 @@ type FileVerified = (Value, Option<Coverage>, Vec<Seen>);
 /// Verifies every file of the project, side by side, each result in the project's order. One at a
 /// time when a file has C functions, which may not expect threads.
 fn verify_files(project: &Project, native: bool, max_steps: Option<u64>) -> Vec<FileVerified> {
-    let has_c = project
-        .files
-        .iter()
-        .any(|f| std::fs::read_to_string(project.root.join(f)).is_ok_and(|t| t.contains("extern")));
+    let has_c =
+        project.files.iter().any(|f| std::fs::read_to_string(project.root.join(f)).is_ok_and(|t| t.contains("extern")));
     let wanted = std::env::var("ANVIL_THREADS").ok().and_then(|v| v.parse::<usize>().ok());
     let cores = std::thread::available_parallelism().map_or(1, |n| n.get());
     let threads = if has_c { 1 } else { wanted.unwrap_or(cores).clamp(1, 8).min(project.files.len().max(1)) };

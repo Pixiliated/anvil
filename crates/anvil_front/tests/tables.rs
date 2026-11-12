@@ -21,7 +21,7 @@ fn every_listed_method_checks_with_its_signature() {
             "f64" => "f",
             other => panic!("unknown receiver kind {other}"),
         };
-        let fill = |t: &str| t.replace('T', "i64").replace('K', "str").replace('V', "i64").replace('U', "i64");
+        let fill = |t: &str| t.replace('T', "i64").replace('K', "str").replace(['V', 'U'], "i64");
         // The last `) -> ` ends the parameters: a parameter can be a function type.
         let end = sig.rfind(") -> ").unwrap_or_else(|| sig.rfind(')').unwrap());
         let params = &sig[sig.find('(').unwrap() + 1..end];

@@ -15,7 +15,8 @@
 
 use cranelift_codegen::ir::condcodes::{FloatCC, IntCC};
 use cranelift_codegen::ir::{
-    types, BlockArg, BlockCall, ExternalName, Function, GlobalValueData, InstructionData, Opcode, Signature, Type, Value,
+    types, BlockArg, BlockCall, ExternalName, Function, GlobalValueData, InstructionData, Opcode, Signature, Type,
+    Value,
 };
 use cranelift_module::{DataDescription, DataId, FuncId, Init, Linkage, ModuleDeclarations, ModuleRelocTarget};
 use std::collections::{BTreeMap, BTreeSet};
@@ -221,18 +222,27 @@ pub(crate) fn emit(decls: &ModuleDeclarations, program: &CProgram) -> Result<Str
             }
             write!(list, "{b},").unwrap();
         }
-        writeln!(out, "static ANV_ALIGN({align}) unsigned char {name}[{}] = {{{list}\n}};", bytes.len().max(1)).unwrap();
+        writeln!(out, "static ANV_ALIGN({align}) unsigned char {name}[{}] = {{{list}\n}};", bytes.len().max(1))
+            .unwrap();
         for (offset, fr) in &desc.function_relocs {
             let target = match &desc.function_decls[*fr] {
                 ModuleRelocTarget::User { namespace: 0, index } => names.func(FuncId::from_u32(*index)),
-                other => return Err(format!("data `{name}` points at {other:?}, which the release backend cannot write")),
+                other => {
+                    return Err(format!("data `{name}` points at {other:?}, which the release backend cannot write"))
+                }
             };
-            writeln!(fixups, "    {{ uint64_t a = (uint64_t)(uintptr_t)&{target}; memcpy({name} + {offset}, &a, 8); }}").unwrap();
+            writeln!(
+                fixups,
+                "    {{ uint64_t a = (uint64_t)(uintptr_t)&{target}; memcpy({name} + {offset}, &a, 8); }}"
+            )
+            .unwrap();
         }
         for (offset, gv, addend) in &desc.data_relocs {
             let target = match &desc.data_decls[*gv] {
                 ModuleRelocTarget::User { namespace: 1, index } => names.data(DataId::from_u32(*index)),
-                other => return Err(format!("data `{name}` points at {other:?}, which the release backend cannot write")),
+                other => {
+                    return Err(format!("data `{name}` points at {other:?}, which the release backend cannot write"))
+                }
             };
             writeln!(
                 fixups,

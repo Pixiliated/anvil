@@ -28,12 +28,12 @@ mod range;
 mod unique;
 
 use anvil_front::ir::*;
-use cranelift_codegen::ir::condcodes::{FloatCC, IntCC};
 use cranelift_codegen::inline::{Inline, InlineCommand};
+use cranelift_codegen::ir::condcodes::{FloatCC, IntCC};
 use cranelift_codegen::ir::function::FunctionParameters;
 use cranelift_codegen::ir::{
-    types, AbiParam, AliasRegionData, Block, BlockArg, ExternalName, FuncRef, Function, GlobalValueData,
-    Inst, InstBuilder, MemFlagsData, Opcode, Signature, TrapCode, Type, UserExternalName, UserFuncName, Value,
+    types, AbiParam, AliasRegionData, Block, BlockArg, ExternalName, FuncRef, Function, GlobalValueData, Inst,
+    InstBuilder, MemFlagsData, Opcode, Signature, TrapCode, Type, UserExternalName, UserFuncName, Value,
 };
 use cranelift_codegen::settings::{self, Configurable};
 use cranelift_codegen::Context;
@@ -289,7 +289,12 @@ pub fn compile_object(program: &Program, asm: bool) -> Result<(Vec<u8>, String),
 }
 
 /// The object file, or with `release` the C program's text, with a listing and what went unproved.
-fn compile(program: &Program, asm: bool, entry: Entry, release: bool) -> Result<(Vec<u8>, String, Vec<Unproved>), String> {
+fn compile(
+    program: &Program,
+    asm: bool,
+    entry: Entry,
+    release: bool,
+) -> Result<(Vec<u8>, String, Vec<Unproved>), String> {
     let mut listing = String::new();
     let mut flags = settings::builder();
     let set = |f: &mut settings::Builder, k: &str, v: &str| f.set(k, v).map_err(|e| format!("cranelift flag {k}: {e}"));
@@ -378,13 +383,14 @@ fn compile(program: &Program, asm: bool, entry: Entry, release: bool) -> Result<
         ctx.set_disasm(asm);
         ctx.func = bodies.remove(&id).unwrap();
         // The C compiler inlines for itself, and better.
-        if be.c.is_some() {
+        if let Some(c) = &mut be.c {
             cranelift_codegen::verify_function(&ctx.func, be.module.isa())
                 .map_err(|e| format!("the IR of `{}` is wrong: {e}", names[&id]))?;
-            be.c.as_mut().unwrap().functions.push((ClFuncId::from_u32(id), ctx.func));
+            c.functions.push((ClFuncId::from_u32(id), ctx.func));
             continue;
         }
-        ctx.inline(SmallCallees { bodies: &inlined }).map_err(|e| format!("codegen of `{}` failed: {e:?}", names[&id]))?;
+        ctx.inline(SmallCallees { bodies: &inlined })
+            .map_err(|e| format!("codegen of `{}` failed: {e:?}", names[&id]))?;
         if ctx.func.dfg.num_insts() <= INLINE_LARGEST {
             inlined.insert(id, ctx.func.clone());
         }
@@ -437,8 +443,7 @@ fn compile(program: &Program, asm: bool, entry: Entry, release: bool) -> Result<
             let b = FunctionBuilder::new(&mut ctx.func, &mut fbc);
             Gen::new(&mut be, program, b, &[]).eq_function(&ty);
         }
-        be.define(id, &mut ctx)
-            .map_err(|e| format!("codegen of == for {} failed: {e:?}", show(program, &ty)))?;
+        be.define(id, &mut ctx).map_err(|e| format!("codegen of == for {} failed: {e:?}", show(program, &ty)))?;
     }
     match entry {
         Entry::Main => {
@@ -466,7 +471,8 @@ const INLINE_CALLER_LARGEST: usize = 30_000;
 fn share_names(bodies: &mut HashMap<u32, Function>) {
     let all: BTreeSet<(u32, u32)> =
         bodies.values().flat_map(|f| f.params.user_named_funcs().values().map(|n| (n.namespace, n.index))).collect();
-    let table: Vec<UserExternalName> = all.into_iter().map(|(namespace, index)| UserExternalName { namespace, index }).collect();
+    let table: Vec<UserExternalName> =
+        all.into_iter().map(|(namespace, index)| UserExternalName { namespace, index }).collect();
     for f in bodies.values_mut() {
         let old = f.params.user_named_funcs().clone();
         f.params = FunctionParameters::new();
@@ -599,12 +605,12 @@ fn show(program: &Program, ty: &Ty) -> String {
 
 impl Backend {
     /// Compiles a finished function, or keeps it for the C of a release build.
-    fn define(&mut self, id: ClFuncId, ctx: &mut Context) -> cranelift_module::ModuleResult<()> {
+    fn define(&mut self, id: ClFuncId, ctx: &mut Context) -> Result<(), Box<cranelift_module::ModuleError>> {
         if let Some(c) = &mut self.c {
             c.functions.push((id, ctx.func.clone()));
             return Ok(());
         }
-        self.module.define_function(id, ctx)
+        self.module.define_function(id, ctx).map_err(Box::new)
     }
 
     fn define_data(&mut self, id: DataId, desc: &DataDescription) {
@@ -1310,8 +1316,16 @@ impl<'a, 'b> Gen<'a, 'b> {
 
     /// Address of element `index` of array `arr`, after a bounds check that panics at `site`,
     /// unless what is known already proves it. `key` says which local holds the array, if one does,
-    /// and `named` which local the index is, if one is.
-    fn elem_addr(&mut self, arr: Value, index: Value, elem: &Ty, site: &str, key: Option<unique::Key>, named: Option<LocalId>, holder: Option<unique::Key>) -> Value {
+    /// and the index comes with the local it is, if it is one.
+    fn elem_addr(
+        &mut self,
+        arr: Value,
+        (index, named): (Value, Option<LocalId>),
+        elem: &Ty,
+        site: &str,
+        key: Option<unique::Key>,
+        holder: Option<unique::Key>,
+    ) -> Value {
         self.bounds_check(arr, index, site, key, named, holder);
         let data = match holder.and_then(|k| self.held.get(&k)).and_then(|h| h.1) {
             Some(data) => self.b.use_var(data),
@@ -1323,7 +1337,15 @@ impl<'a, 'b> Gen<'a, 'b> {
     }
 
     /// Panics at `site` unless `index` is in bounds of `arr`, which needs no code if already proved.
-    fn bounds_check(&mut self, arr: Value, index: Value, site: &str, key: Option<unique::Key>, named: Option<LocalId>, holder: Option<unique::Key>) {
+    fn bounds_check(
+        &mut self,
+        arr: Value,
+        index: Value,
+        site: &str,
+        key: Option<unique::Key>,
+        named: Option<LocalId>,
+        holder: Option<unique::Key>,
+    ) {
         let fact = key.zip(named);
         if fact.is_some_and(|f| self.known.in_bounds.contains(&f)) {
             return;
@@ -1358,7 +1380,8 @@ impl<'a, 'b> Gen<'a, 'b> {
         let changes = unique::changes(self.program, s);
         // `i = i + 1` reads `i` before changing it, so what is known of it holds for that read. A loop
         // is different: a later round reads what an earlier one left.
-        let ranges = (!matches!(s, Stmt::While(..) | Stmt::For(..) | Stmt::ForEach { .. })).then(|| self.known.ranges.clone());
+        let ranges =
+            (!matches!(s, Stmt::While(..) | Stmt::For(..) | Stmt::ForEach { .. })).then(|| self.known.ranges.clone());
         self.known.forget(&changes);
         if let Some(ranges) = ranges {
             self.known.ranges = ranges;
@@ -1956,7 +1979,7 @@ impl<'a, 'b> Gen<'a, 'b> {
                     let named = unique::local_of(index_expr);
                     let addr = match key {
                         Some(k) if self.is_cleared(index_expr) => self.cleared_addr(k, index, &elem),
-                        _ => self.elem_addr(arr, index, &elem, site, key, named, key),
+                        _ => self.elem_addr(arr, (index, named), &elem, site, key, key),
                     };
                     Loc::Mem(addr, elem)
                 }
@@ -1972,7 +1995,11 @@ impl<'a, 'b> Gen<'a, 'b> {
                 return self.b.use_var(self.vars[*l][*start]);
             }
             if !self.loops.is_empty() {
-                let note = Unproved { function: self.function.clone(), at: site.to_string(), local: self.local_names[*l].clone() };
+                let note = Unproved {
+                    function: self.function.clone(),
+                    at: site.to_string(),
+                    local: self.local_names[*l].clone(),
+                };
                 self.be.notes.push(note);
             }
             if self.branching == 0 {
@@ -2048,7 +2075,8 @@ impl<'a, 'b> Gen<'a, 'b> {
                 let lay = self.layout(&e.ty);
                 let vals = match self.locate(*local, path, &indices) {
                     Loc::Vars(l, start, _) => {
-                        let vals: Vec<Value> = (0..lay.len()).map(|k| self.b.use_var(self.vars[l][start + k])).collect();
+                        let vals: Vec<Value> =
+                            (0..lay.len()).map(|k| self.b.use_var(self.vars[l][start + k])).collect();
                         for (k, s) in lay.iter().enumerate() {
                             if s.heap {
                                 let z = self.zero(*s);
@@ -2127,7 +2155,7 @@ impl<'a, 'b> Gen<'a, 'b> {
         let arr = self.borrow(base).0[0];
         let i = self.expr(index)[0];
         let named = unique::local_of(index);
-        let addr = self.elem_addr(arr, i, ty, site, key, named, key);
+        let addr = self.elem_addr(arr, (i, named), ty, site, key, key);
         self.load(addr, &lay)
     }
 
@@ -2284,7 +2312,14 @@ impl<'a, 'b> Gen<'a, 'b> {
                 let i = if cleared.is_some() { self.unchecked(index) } else { self.expr(index)[0] };
                 let addr = match cleared {
                     Some(k) => self.cleared_addr(k, i, &e.ty),
-                    None => self.elem_addr(arr[0], i, &e.ty, site, None, unique::local_of(index), unique::key_of(self.program, base)),
+                    None => self.elem_addr(
+                        arr[0],
+                        (i, unique::local_of(index)),
+                        &e.ty,
+                        site,
+                        None,
+                        unique::key_of(self.program, base),
+                    ),
                 };
                 let vals = self.load(addr, &lay);
                 self.retain(&lay, &vals);
@@ -2502,7 +2537,8 @@ impl<'a, 'b> Gen<'a, 'b> {
             }
             // With a number on the right, overflow shows in how the result compares with the left,
             // which takes one compare-and-branch.
-            ExprKind::IArith { op: op @ (IOp::Add | IOp::Sub), l, r, overflow, .. } if matches!(r.kind, ExprKind::Int(c) if c != i64::MIN) => {
+            ExprKind::IArith { op: op @ (IOp::Add | IOp::Sub), l, r, overflow, .. } if matches!(r.kind, ExprKind::Int(c) if c != i64::MIN) =>
+            {
                 let a = self.expr(l)[0];
                 let ExprKind::Int(c) = r.kind else { unreachable!() };
                 let c = if *op == IOp::Add { c } else { -c };
@@ -3270,7 +3306,8 @@ impl<'a, 'b> Gen<'a, 'b> {
                 let lay = self.layout(ty);
                 self.release(&lay, &a);
                 self.release(&lay, &c);
-                let fail = self.b.ins().icmp_imm_s(if *op == CmpOp::Eq { IntCC::Equal } else { IntCC::NotEqual }, same, 0);
+                let fail =
+                    self.b.ins().icmp_imm_s(if *op == CmpOp::Eq { IntCC::Equal } else { IntCC::NotEqual }, same, 0);
                 self.panic_if(fail, message);
                 return Vec::new();
             }

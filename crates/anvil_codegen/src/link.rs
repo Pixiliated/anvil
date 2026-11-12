@@ -42,7 +42,13 @@ pub fn supported() -> Result<(), String> {
 
 /// `objects` are the compiled C files of extern functions (see `compile_c`). With `map`, the
 /// linker also writes the addresses of the executable's symbols there (MSVC only).
-pub fn link_exe(object: &[u8], objects: &[PathBuf], out: &Path, work_dir: &Path, map: Option<&Path>) -> Result<(), String> {
+pub fn link_exe(
+    object: &[u8],
+    objects: &[PathBuf],
+    out: &Path,
+    work_dir: &Path,
+    map: Option<&Path>,
+) -> Result<(), String> {
     supported()?;
     std::fs::create_dir_all(work_dir).map_err(|e| format!("cannot create {}: {e}", work_dir.display()))?;
     let (obj_name, rt_name) =
