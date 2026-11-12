@@ -1,4 +1,9 @@
-# Anvil
+<h1 align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/Pixiliated/anvil/main/branding/lockup-on-dark.svg">
+    <img alt="Anvil" src="https://raw.githubusercontent.com/Pixiliated/anvil/main/branding/lockup-on-light.svg" width="360">
+  </picture>
+</h1>
 
 A small compiled programming language designed to be written mostly by AI agents and read by
 people.
