@@ -1,4 +1,4 @@
-# On every push and pull request: the checks a milestone needs (CLAUDE.md), on Windows and
+# On every push and pull request: the checks a milestone needs (AGENTS.md), on Windows and
 # Linux, and that every crate still packages for crates.io.
 name: ci
 

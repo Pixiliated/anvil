@@ -1,7 +1,7 @@
 # Contributing to Anvil
 
 Anvil is built to be written by AI agents, and it is mostly built by them too: the rules here
-are the ones CLAUDE.md gives every agent, for people as much as for models. Read
+are the ones AGENTS.md gives every agent, for people as much as for models. Read
 docs/SPEC.md (the language), docs/ROADMAP.md (what comes next: the first unchecked milestone) and
 docs/DECISIONS.md (why things are as they are) before changing anything.
 

@@ -210,8 +210,14 @@ Its answers are the commands' answers, so an editor, the CLI and an agent see th
 ## For agents: the MCP server
 
 `anvil-mcp` serves every command above except `watch` and `lsp` as an MCP tool over stdio, with the same
-arguments and the same JSON (a test keeps the two in step). A failing check is a tool error. To add it to
-Claude Code:
+arguments and the same JSON (a test keeps the two in step). A failing check is a tool error. Any MCP
+client can run it. Most (Cursor, Gemini CLI, Claude Desktop and others) take it in their JSON settings:
+
+```json
+{ "mcpServers": { "anvil": { "command": "target/release/anvil-mcp", "args": ["--root", "."] } } }
+```
+
+and Claude Code adds it with:
 
 ```bash
 claude mcp add anvil -- target/release/anvil-mcp --root .
@@ -220,6 +226,9 @@ claude mcp add anvil -- target/release/anvil-mcp --root .
 An agent starts with `spec` (the whole language), writes a file, then loops on `check` and
 `fix`; `outline`, `type_at`, `refs` and `complete` let it navigate a file without reading all of it, and
 `trace` and `profile` show what a run did, counted in steps so the answer never varies.
+
+Agents working on Anvil itself start from [AGENTS.md](AGENTS.md), the brief every coding agent reads;
+CLAUDE.md points to it.
 
 ## Layout
 
