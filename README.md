@@ -239,5 +239,7 @@ Contributing: CONTRIBUTING.md. Changes by version: CHANGELOG.md.
 
 ## License
 
+Copyright (c) 2026 Pixiliated.
+
 Licensed under either of [Apache License 2.0](LICENSE-APACHE) or [MIT](LICENSE-MIT) at your
 option. Contributions are accepted under the same terms.
